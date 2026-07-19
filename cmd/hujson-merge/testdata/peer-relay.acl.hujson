@@ -1,0 +1,50 @@
+// peer-relay.acl.hujson
+//
+// These entries belong in the TAILNET policy, which initial-30 owns
+// (initial-30/acl.hujson, applied by its tailscale.Acl with overwriteExistingContent).
+// peer-relay-internal deliberately does NOT create a tailscale.Acl - two stacks
+// managing the same whole-tailnet policy would clobber each other. So merge the
+// pieces below into initial-30/acl.hujson (then `pulumi up` initial-30), or paste
+// them into the admin console.
+//
+// Apply in two stages to reproduce the video's before/after:
+{
+	// STAGE 1 - prerequisite to deploy peer-relay-internal. Declares the relay tag
+	// so the relay node's tagged auth key can be minted. With ONLY this in place,
+	// client <-> librespeed fall back to DERP: the slow baseline.
+	"tagOwners": {
+		"tag:relay-server": ["autogroup:admin"],
+	},
+
+	// STAGE 2 - the on-switch. This grant tells Tailscale to relay traffic for the
+	// listed src through any node tagged tag:relay-server. Adding it is what makes
+	// the peer relay actually engage ("a couple of grants ... before this will
+	// actually start working"). Remove it to fall back to DERP again.
+	//
+	// Verified against tailscale.com/docs/features/peer-relay: the relay capability
+	// takes no parameters, so its value is an empty array []. src = the devices
+	// that may relay through it (our user-owned client + librespeed are
+	// autogroup:member); dst = the relay node's tag.
+	"grants": [
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:relay-server"],
+			"app": {
+				"tailscale.com/cap/relay": [],
+			},
+		},
+	],
+
+	// SSH to the tagged relay node. Tagged nodes aren't autogroup:self, so the base
+	// ssh rule (dst: autogroup:self) can't reach them - without this you get
+	// "tailnet policy does not permit you to SSH to this node". Lets you
+	// `tailscale ssh peer-relay` to toggle the relay (e.g. --relay-server-port=0).
+	"ssh": [
+		{
+			"action": "accept",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:relay-server"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+	],
+}

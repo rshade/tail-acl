@@ -1,0 +1,149 @@
+// Tailnet policy file for example-lab — this is the SOURCE. Managed via
+// Pulumi (tailscale.Acl in index.ts, overwriteExistingContent: true), but the
+// deployed policy is compiled by tail-acl: edit this file, run `make merge` to
+// rebuild acl/acl.generated.json, then `pulumi up`. Preview a live diff first
+// with `make acl-plan`. Don't edit the policy in the admin console — those
+// changes are reverted on the next deploy.
+{
+	"autoApprovers": {
+		// The subnet router and exit node authenticate with untagged ephemeral
+		// auth keys, so their devices are owned by the account below. Listing that
+		// owner here auto-approves the routes they advertise at registration —
+		// replacing the per-device DeviceSubnetRoutes resource, which used to bind
+		// to a device looked up by name and broke on every instance replacement.
+		// The route CIDR must match SubnetRouter's `routes` in index.ts. The
+		// ansible-lab exit node (configured by tailscale-ansible, not Pulumi) also
+		// relies on the exitNode entry below, so it must authenticate with a key
+		// owned by that same account.
+		"routes": {
+			"10.10.0.0/16": ["owner@example.com"], // web VPC, advertised by web-subnet-router
+		},
+		"exitNode": ["owner@example.com"], // client-exit-node (initial-30) + ansible-exit (ansible-lab)
+		"services": {
+			"tag:k8s": ["tag:k8s"],
+		},
+	},
+
+	"grants": [
+		// --- Human management plane -------------------------------------------
+		// Members — your laptop plus the user-owned (untagged) nodes:
+		// client-instance, web-subnet-router, client-exit-node — can reach every
+		// member-owned device. Scoped to autogroup:member instead of the old "*"
+		// so tagged service nodes (app-connector, k8s, relay) can no longer
+		// initiate arbitrary tailnet connections. That is the hardening over the
+		// previous allow-all rule; it deliberately keeps your own access intact.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:member"],
+			"ip":  ["*"],
+		},
+
+		// Web app behind the subnet router: reach the nginx demo server (and the
+		// rest of the web VPC) at its private address. The CIDR must match
+		// web-subnet-router's advertised route and autoApprovers.routes above.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["10.10.0.0/16"],
+			"ip":  ["tcp:80", "tcp:443", "icmp:*"], // icmp:* = ping; a bare "icmp" is rejected by the API
+		},
+
+		// RDP to the Windows client (tag:client), which is reachable only over
+		// the tailnet — clientSg opens no inbound 3389 to the public internet.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:client"],
+			"ip":  ["tcp:3389"],
+		},
+
+		// Route internet traffic through client-exit-node, and reach the SaaS
+		// domains (GitHub, Grafana) proxied by client-app-connector. In both
+		// cases the destination is off-tailnet, so it resolves to
+		// autogroup:internet; the exit node is approved by autoApprovers.exitNode.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:internet"],
+			"ip":  ["*"],
+		},
+
+		// Admin access to the Kubernetes operator's API-server proxy — mirrors
+		// the cluster-admin ClusterRoleBinding granted to adminUser in index.ts.
+		{
+			"src": ["autogroup:admin"],
+			"dst": ["tag:k8s-operator"],
+			"ip":  ["tcp:443"],
+		},
+
+		// --- Peer relay -------------------------------------------------------
+		// Lets members relay traffic through any tag:relay-server node. The relay
+		// capability takes no parameters, so its value is []. (Also carried in
+		// peer-relay-internal's snippet; the merge dedupes it.)
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:relay-server"],
+			"app": {
+				"tailscale.com/cap/relay": [],
+			},
+		},
+	],
+
+	"nodeAttrs": [
+		// Let the Kubernetes operator use Tailscale Funnel
+		{
+			"target": ["tag:k8s"], // tag that the Tailscale operator uses to tag proxies; defaults to 'tag:k8s'
+			"attr":   ["funnel"],
+		},
+
+		// App Connector — proxies access to GitHub's domains for other
+		// tailnet devices without full subnet routing. tailscale.com/app-
+		// connectors only accepts target "*"; restricting which devices
+		// actually serve these domains happens via "connectors" below.
+		// Add more GitHub-owned hosts here (e.g. api.github.com) as needed.
+		{
+			"target": ["*"],
+			"app": {
+				"tailscale.com/app-connectors": [
+					{
+						"name":       "github",
+						"connectors": ["tag:app-connector"],
+						"domains":    ["github.com", "githubusercontent.com"],
+					},
+					{
+						"name":       "merrypepper275-grafana-net",
+						"connectors": ["tag:app-connector"],
+						"domains":    ["merrypepper275.grafana.net"],
+					},
+				],
+			},
+		},
+	],
+
+	"ssh": [
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["autogroup:self"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+		{
+			"action": "accept",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:relay-server"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+	],
+
+	"tagOwners": {
+		"tag:lab":           ["autogroup:admin"],
+		"tag:server":        ["autogroup:admin"],
+		"tag:client":        ["autogroup:admin"],
+		"tag:subnet":        ["autogroup:admin"],
+		"tag:exit":          ["autogroup:admin"],
+		"tag:web":           ["autogroup:admin"],
+		"tag:db":            ["autogroup:admin"],
+		"tag:other":         ["autogroup:admin"],
+		"tag:k8s-operator":  ["autogroup:admin"],
+		"tag:k8s":           ["tag:k8s-operator"],
+		"tag:app-connector": ["autogroup:admin"],
+		"tag:relay-server":  ["autogroup:admin"],
+	},
+}
