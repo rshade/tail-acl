@@ -1,0 +1,58 @@
+# Run from THIS module directory (paths below are module-relative):
+#   cd tail-acl && GORELEASER_CURRENT_TAG=v0.2.0 goreleaser release --clean
+# git tags stay prefixed (tail-acl/vX.Y.Z); OSS goreleaser can't strip the
+# prefix, so the release workflow passes the clean semver via
+# GORELEASER_CURRENT_TAG. release-please owns the tag, changelog, and GitHub
+# Release object; the workflow builds with `--skip=publish` and attaches the
+# dist/ archives via `gh release upload "<full-prefixed-tag>"` (goreleaser's
+# own publisher can't target a slash-prefixed tag).
+# Local smoke test needs no tag: `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: tail-acl
+
+builds:
+  - id: tail-acl
+    main: ./cmd/tail-acl
+    binary: tail-acl
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+  - id: hujson-merge
+    main: ./cmd/hujson-merge
+    binary: hujson-merge
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+  - id: acl-upload
+    main: ./cmd/acl-upload
+    binary: acl-upload
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true
