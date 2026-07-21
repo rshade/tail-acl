@@ -87,4 +87,4 @@ diffing, so a broken policy fails the plan rather than the upload.
 
 ## License
 
-[MIT](LICENSE).
+[Apache-2.0](LICENSE).
