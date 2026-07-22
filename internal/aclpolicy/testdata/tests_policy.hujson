@@ -1,0 +1,27 @@
+{
+	"groups": {
+		"group:dev": ["alice@example.com"],
+	},
+	"hosts": {
+		"web": "10.20.30.40",
+	},
+	"grants": [
+		{
+			"src": ["group:dev"],
+			"dst": ["tag:web"],
+			"ip": ["tcp:443"],
+		},
+		{
+			"src": ["autogroup:member"],
+			"dst": ["10.0.0.0/8"],
+			"ip": ["tcp:80"],
+		},
+	],
+	"tests": [
+		{
+			"src": "alice@example.com",
+			"accept": ["tag:web:443", "tag:web:80", "web:80"],
+			"deny": ["tag:web:22", "tag:web:443"],
+		},
+	],
+}

@@ -1,6 +1,8 @@
 package aclpolicy_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +88,41 @@ func TestRepositoryPolicyUsesSupportedTailscaleTypes(t *testing.T) {
 	}
 	if len(policy.Grants) == 0 || len(policy.NodeAttrs) == 0 || len(policy.SSH) == 0 {
 		t.Fatalf("repository policy was incompletely decoded: %#v", policy)
+	}
+}
+
+func TestEvaluateTestsGolden(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "tests_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+	want, err := os.ReadFile(filepath.Join("testdata", "tests_report.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("EvaluateTests report:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestEvaluateTestsMissingSection(t *testing.T) {
+	t.Parallel()
+	report, err := aclpolicy.EvaluateTests(&tailscale.ACL{}, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary != (aclpolicy.TestSummary{}) || report.Assertions == nil || len(report.Assertions) != 0 {
+		t.Errorf("report = %#v, want an empty initialized report", report)
 	}
 }
 

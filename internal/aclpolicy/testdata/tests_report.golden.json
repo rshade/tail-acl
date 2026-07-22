@@ -1,0 +1,84 @@
+{
+  "assertions": [
+    {
+      "id": "tests[0].accept[0]",
+      "status": "pass",
+      "test_index": 0,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "tag:web:443",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 0",
+      "trace": [
+        "grant 0: source, destination, and network capability matched"
+      ]
+    },
+    {
+      "id": "tests[0].accept[1]",
+      "status": "fail",
+      "test_index": 0,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "tag:web:80",
+      "expected": "accept",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: network capability did not match port 80",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[0].accept[2]",
+      "status": "pass",
+      "test_index": 0,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "web:80",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 1",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: source, destination, and network capability matched"
+      ]
+    },
+    {
+      "id": "tests[0].deny[0]",
+      "status": "pass",
+      "test_index": 0,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "tag:web:22",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: network capability did not match port 22",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[0].deny[1]",
+      "status": "fail",
+      "test_index": 0,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "tag:web:443",
+      "expected": "deny",
+      "actual": "accept",
+      "evidence": "matched grant 0",
+      "trace": [
+        "grant 0: source, destination, and network capability matched"
+      ]
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "passed": 3,
+    "failed": 2
+  }
+}

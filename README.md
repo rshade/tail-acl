@@ -1,9 +1,10 @@
 # tail-acl
 
-Compile, validate, plan, and upload a Tailscale ACL policy. `tail-acl` makes
+Compile, validate, test, plan, and upload a Tailscale ACL policy. `tail-acl` makes
 typed edits to a policy file, deep-merges commented HuJSON sources into one
-strict-JSON policy, and talks to Tailscale's policy-file API to validate a
-candidate, diff it against the live tailnet, or upload it.
+strict-JSON policy, runs its native network assertions locally, and talks to
+Tailscale's policy-file API to validate a candidate, diff it against the live
+tailnet, or upload it.
 
 > **Module** `github.com/rshade/tailscale-utils/tail-acl`. Conforms to the AX
 > conventions in [`../CLAUDE.md`](../CLAUDE.md#ax-conventions-the-shared-standard):
@@ -37,6 +38,11 @@ tail-acl --file acl.json host set web 100.64.0.10
 # Compile commented HuJSON sources into one strict-JSON policy:
 tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
 
+# Run the policy's top-level tests locally (no credentials or network):
+tail-acl --file acl/acl.generated.json test
+tail-acl -format json --file acl/acl.generated.json test
+tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
+
 # Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
@@ -58,6 +64,7 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `host set` | Set a host alias to an address |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
+| `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
 
@@ -70,9 +77,9 @@ URL (used by tests).
 
 ### Exit codes
 
-- `0` success
-- `1` operation failed (API rejected the policy, network error, unreadable file)
-- `2` usage or input error (bad flags, missing command, missing credentials)
+- `0` success; all policy assertions passed (an absent `tests` section is an empty success)
+- `1` operation or policy assertion failed
+- `2` usage, input, or collection error (including an unreadable or unsupported test policy)
 
 ## Design
 
@@ -84,6 +91,27 @@ target so HuJSON comments and formatting survive. `merge` has two paths:
 calls `Standardize()` and strips comments, which is why compiled output is
 comment-free strict JSON. `plan` validates the candidate server-side before
 diffing, so a broken policy fails the plan rather than the upload.
+
+`test` is a pure evaluator over the candidate file's network-level grants and
+legacy ACLs. Each `accept` or `deny` destination becomes one stable assertion
+result with pass/fail status, evidence, and a decision trace. The evaluator
+supports groups, hosts, IP sets, literal IPs/CIDRs, tags and other exact
+selectors, `autogroup:member`, `autogroup:self`, `autogroup:internet`, and
+single/list/range port expressions. Application-only capabilities do not grant
+network access. Because posture and `via` routing depend on semantics that
+cannot be reproduced safely from the policy alone, a matching rule that uses
+either returns exit `2` instead of guessing; use `validate` for the authoritative
+control-plane evaluation in that case.
+
+Rule *syntax* is scanned once up front, before any assertion runs, so the
+result never depends on which assertion happened to reach which rule. An
+element the evaluator cannot parse — most often an ACL destination written
+without its port, as in `"dst": ["tag:web"]` — can never match, so a verdict
+reached alongside one may be wrong. By default such a rule is logged at `warn`
+on stderr and listed in the envelope's `skipped` array while the remaining
+assertions are still reported; `-strict` refuses to report verdicts computed
+around it at all and exits `2`. Prefer `-strict` in CI, where a silently
+mis-evaluated `deny` assertion is the failure you least want to pass.
 
 ## License
 

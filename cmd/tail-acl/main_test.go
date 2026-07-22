@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -274,6 +275,345 @@ func TestJSONEnvelope(t *testing.T) {
 	}
 }
 
+func TestPolicyTestHumanOutputAndExitCodes(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name       string
+		policy     string
+		wantCode   int
+		wantOutput []string
+	}{
+		{
+			name: "all pass",
+			policy: `{
+				"grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+				"groups": {"group:dev": ["alice@example.com"]},
+				"tests": [{
+					"src": "alice@example.com",
+					"accept": ["tag:web:443"],
+					"deny": ["tag:web:22"]
+				}]
+			}`,
+			wantCode: exitOK,
+			wantOutput: []string{
+				"PASS tests[0].accept[0] alice@example.com -> tag:web:443",
+				"PASS tests[0].deny[0] alice@example.com -> tag:web:22",
+				"tail-acl: 2 assertions: 2 passed, 0 failed",
+			},
+		},
+		{
+			name: "assertion failure",
+			policy: `{
+				"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+				"tests": [{"src": "alice@example.com", "deny": ["tag:web:443"]}]
+			}`,
+			wantCode: exitFailed,
+			wantOutput: []string{
+				"FAIL tests[0].deny[0] alice@example.com -> tag:web:443",
+				"tail-acl: 1 assertions: 0 passed, 1 failed",
+			},
+		},
+		{
+			name:       "missing tests",
+			policy:     `{"grants": []}`,
+			wantCode:   exitOK,
+			wantOutput: []string{"tail-acl: no policy tests declared"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, testCase.policy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{"--file", path, "test"},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Errorf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+			for _, want := range testCase.wantOutput {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want quiet", stderr.String())
+			}
+		})
+	}
+}
+
+func TestPolicyTestJSONFailureEnvelope(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+		"tests": [{
+			"src": "alice@example.com",
+			"accept": ["tag:web:443"],
+			"deny": ["tag:web:443"]
+		}]
+	}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.SchemaVersion != schemaVersion || res.Command != cmdTest || res.Status != statusFailed {
+		t.Errorf("envelope = %#v", res)
+	}
+	if res.Assertions == nil || len(*res.Assertions) != 2 ||
+		(*res.Assertions)[0].Status != aclpolicy.AssertionPass ||
+		(*res.Assertions)[1].Status != aclpolicy.AssertionFail {
+		t.Errorf("Assertions = %#v", res.Assertions)
+	}
+	if res.TestSummary == nil || res.TestSummary.Total != 2 || res.TestSummary.Passed != 1 ||
+		res.TestSummary.Failed != 1 {
+		t.Errorf("TestSummary = %#v", res.TestSummary)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
+// TestPolicyTestJSONAssertionsKeyPresence pins the machine contract: a test run
+// always carries an "assertions" array — empty rather than absent when the
+// policy declares no tests — while other commands omit the key entirely.
+func TestPolicyTestJSONAssertionsKeyPresence(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": [{"src": ["one"], "dst": ["*"], "ip": ["*"]}]}`)
+
+	testCases := []struct {
+		name    string
+		args    []string
+		wantKey bool
+	}{
+		{"test without declared tests", []string{"--file", path, "test"}, true},
+		{
+			"merge does not report assertions",
+			[]string{"--file", filepath.Join(dir, "out.json"), "merge", "--dir", dir},
+			false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout strings.Builder
+			err := run(
+				context.Background(),
+				append([]string{"-format", "json"}, testCase.args...),
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				io.Discard,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]json.RawMessage
+			if err = json.Unmarshal([]byte(stdout.String()), &envelope); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			raw, ok := envelope["assertions"]
+			if ok != testCase.wantKey {
+				t.Fatalf("assertions key present = %t, want %t:\n%s", ok, testCase.wantKey, stdout.String())
+			}
+			if testCase.wantKey && string(raw) != "[]" {
+				t.Errorf("assertions = %s, want []", raw)
+			}
+		})
+	}
+}
+
+// TestPolicyTestUnparseableRule pins the two halves of the unparseable-rule
+// contract: by default the rule is warned about on stderr and named in the
+// envelope while evaluation continues, and -strict refuses to report verdicts
+// computed around it at all.
+func TestPolicyTestUnparseableRule(t *testing.T) {
+	t.Parallel()
+	// acls[0] omits the port Tailscale requires, so it can never be evaluated.
+	const policy = `{
+		"acls": [
+			{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:web"]},
+			{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:db:5432"]}
+		],
+		"tests": [{"src": "alice@example.com", "accept": ["tag:db:5432"], "deny": ["tag:web:443"]}]
+	}`
+
+	t.Run("default warns and continues", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.hujson")
+		writeTestPolicy(t, path, policy)
+		var stdout, stderr strings.Builder
+		err := run(
+			context.Background(),
+			[]string{"-format", "json", "--file", path, "test"},
+			func(string) string { return "" },
+			http.DefaultClient,
+			"",
+			&stdout,
+			&stderr,
+		)
+		if code := exitCode(err); code != exitOK {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+		}
+		if !strings.Contains(stderr.String(), "skipping unparseable policy rule") ||
+			!strings.Contains(stderr.String(), "acls[0].dst[0]") {
+			t.Errorf("stderr missing skip warning: %s", stderr.String())
+		}
+		var res result
+		if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+		}
+		if len(res.Skipped) != 1 || res.Skipped[0].Rule != "acls[0].dst[0]" ||
+			res.Skipped[0].Value != "tag:web" {
+			t.Errorf("Skipped = %#v, want the unparseable acls[0] destination", res.Skipped)
+		}
+		if res.TestSummary == nil || res.TestSummary.Total != 2 {
+			t.Errorf("TestSummary = %#v, want both assertions still evaluated", res.TestSummary)
+		}
+	})
+
+	t.Run("strict refuses to guess", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.hujson")
+		writeTestPolicy(t, path, policy)
+		var stdout, stderr strings.Builder
+		err := run(
+			context.Background(),
+			[]string{"-strict", "--file", path, "test"},
+			func(string) string { return "" },
+			http.DefaultClient,
+			"",
+			&stdout,
+			&stderr,
+		)
+		if code := exitCode(err); code != exitUsage {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+		}
+		if !strings.Contains(err.Error(), "acls[0].dst[0]") {
+			t.Errorf("error = %v, want it to locate the offending rule", err)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want no verdicts in strict mode", stdout.String())
+		}
+	})
+}
+
+// TestPolicyTestTraceNamesParseFailure guards the decision trace against
+// reporting an unparseable rule as an ordinary semantic non-match.
+func TestPolicyTestTraceNamesParseFailure(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"acls": [{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:web"]}],
+		"tests": [{"src": "alice@example.com", "deny": ["tag:web:443"]}]
+	}`)
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.Assertions == nil || len(*res.Assertions) != 1 {
+		t.Fatalf("Assertions = %#v, want one", res.Assertions)
+	}
+	trace := strings.Join((*res.Assertions)[0].Trace, "\n")
+	if !strings.Contains(trace, "acl 0: destination could not be parsed") {
+		t.Errorf("trace = %q, want it to name the parse failure", trace)
+	}
+	if strings.Contains(trace, "acl 0: destination or port did not match") {
+		t.Errorf("trace = %q, must not report a parse failure as a semantic non-match", trace)
+	}
+}
+
+func TestPolicyTestCollectionFailureIsExitTwo(t *testing.T) {
+	t.Parallel()
+	err := run(
+		context.Background(),
+		[]string{"--file", filepath.Join(t.TempDir(), "missing.hujson"), "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil {
+		t.Fatal("test unexpectedly succeeded for a missing policy")
+	}
+	if code := exitCode(err); code != exitUsage {
+		t.Errorf("exit code = %d, want %d", code, exitUsage)
+	}
+}
+
+func TestPolicyTestVerboseTraceGoesToStderr(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+		"tests": [{"src": "alice@example.com", "accept": ["tag:web:443"]}]
+	}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-verbose", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "PASS tests[0].accept[0]") {
+		t.Errorf("stdout = %q, want assertion result", stdout.String())
+	}
+	for _, want := range []string{"policy test decision", "tests[0].accept[0]", "matched"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
 func TestVersionFlag(t *testing.T) {
 	t.Parallel()
 	var stdout strings.Builder
@@ -317,6 +657,9 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	if doc.Name != "tail-acl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
 		t.Errorf("schema = %#v", doc)
+	}
+	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdTest }) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdTest)
 	}
 }
 

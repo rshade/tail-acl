@@ -1,10 +1,10 @@
 // Command tail-acl makes typed edits to a Tailscale policy file and can merge,
-// validate, plan, or upload it with Tailscale's policy-file API.
+// validate, test, plan, or upload it with Tailscale's policy-file API.
 //
 // Output contract (AX conventions, see ../../CLAUDE.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
 // -format json — while logs and errors go to stderr. Exit codes: 0 success,
-// 1 the operation failed, 2 the invocation was wrong (flags, args, credentials).
+// 1 the operation or an assertion failed, 2 usage/input/collection failed.
 package main
 
 import (
@@ -39,13 +39,14 @@ const schemaVersion = "1"
 // Exit codes, documented in usage() and the -schema output.
 const (
 	exitOK     = 0
-	exitFailed = 1 // a valid invocation whose operation failed
-	exitUsage  = 2 // the invocation itself was wrong (flags, args, credentials)
+	exitFailed = 1 // a valid operation or policy assertion failed
+	exitUsage  = 2 // usage, input, credentials, or collection failed
 )
 
 // Result statuses reported in the envelope's "status" field.
 const (
 	statusOK           = "ok"
+	statusFailed       = "failed"
 	statusNoChanges    = "no_changes"
 	statusChangesFound = "changes_found"
 )
@@ -59,6 +60,7 @@ const (
 	cmdHost     = "host"
 	cmdMerge    = "merge"
 	cmdValidate = "validate"
+	cmdTest     = "test"
 	cmdPlan     = "plan"
 	cmdUpload   = "upload"
 
@@ -78,6 +80,7 @@ type options struct {
 	tailnet string
 	apiKey  string
 	ifMatch string
+	strict  bool
 }
 
 // result is the versioned envelope every command returns. Human rendering emits
@@ -95,7 +98,17 @@ type result struct {
 	Changed       *bool  `json:"changed,omitempty"`
 	GrantIndex    *int   `json:"grant_index,omitempty"`
 	MergedFiles   *int   `json:"merged_files,omitempty"`
+	// Assertions is a pointer so a test run with no declared tests still emits
+	// "assertions": [] rather than dropping the key, while every other command
+	// omits it — the same absent-versus-zero split as Changed and MergedFiles.
+	Assertions *[]aclpolicy.AssertionResult `json:"assertions,omitempty"`
+	// Skipped is an exception list, so absent genuinely means "nothing skipped"
+	// and a plain omitempty slice is right here.
+	Skipped     []aclpolicy.RuleSkip   `json:"skipped,omitempty"`
+	TestSummary *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 }
+
+var errAssertionsFailed = errors.New("one or more policy assertions failed")
 
 // usageError marks an error as an invocation problem (exit 2) rather than an
 // operation failure (exit 1), so exitCode can tell "you called it wrong" from
@@ -158,6 +171,12 @@ func run(
 	)
 	root.StringVar(&opts.apiKey, "api-key", "", "Tailscale API access token (default: TAILSCALE_API_KEY)")
 	root.StringVar(&opts.ifMatch, "if-match", "", "optional ETag required for upload")
+	root.BoolVar(
+		&opts.strict,
+		"strict",
+		false,
+		"test: reject a policy containing an unparseable rule instead of warning",
+	)
 	format := root.String("format", formatHuman, "output format: human|json")
 	verbose := root.Bool("verbose", false, "log operational detail to stderr")
 	showVersion := root.Bool("version", false, "print version and exit")
@@ -191,11 +210,13 @@ func run(
 		return usageError{errors.New("a command is required")}
 	}
 
-	res, err := dispatch(ctx, remaining, opts, httpClient, apiURL, logger)
-	if err != nil {
-		return err
+	res, dispatchErr := dispatch(ctx, remaining, opts, httpClient, apiURL, logger)
+	if res != nil {
+		if err := render(stdout, *format, res); err != nil {
+			return err
+		}
 	}
-	return render(stdout, *format, res)
+	return dispatchErr
 }
 
 func newLogger(w io.Writer, verbose bool) *slog.Logger {
@@ -227,6 +248,8 @@ func dispatch(
 		return runMerge(opts.file, args[1:])
 	case cmdValidate:
 		return runValidate(ctx, opts, httpClient, apiURL, args[1:])
+	case cmdTest:
+		return runTest(ctx, opts, args[1:], logger)
 	case cmdPlan:
 		return runPlan(ctx, opts, httpClient, apiURL, args[1:])
 	case cmdUpload:
@@ -258,6 +281,23 @@ func render(w io.Writer, format string, res *result) error {
 	if res.Diff != "" {
 		if _, err := io.WriteString(w, res.Diff); err != nil {
 			return err
+		}
+	}
+	if res.Assertions != nil {
+		for _, assertion := range *res.Assertions {
+			if _, err := fmt.Fprintf(
+				w,
+				"%s %s %s -> %s (expected %s, got %s; %s)\n",
+				strings.ToUpper(string(assertion.Status)),
+				assertion.ID,
+				assertion.Source,
+				assertion.Destination,
+				assertion.Expected,
+				assertion.Actual,
+				assertion.Evidence,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
@@ -503,6 +543,61 @@ func runValidate(
 	return res, nil
 }
 
+func runTest(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
+	if len(args) != 0 {
+		return nil, usagef("test does not accept arguments")
+	}
+	path := opts.file
+	policy, err := aclpolicy.Load(path)
+	if err != nil {
+		return nil, usagef("could not load policy tests: %v", err)
+	}
+	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{Strict: opts.strict})
+	if err != nil {
+		return nil, usagef("could not evaluate policy tests: %v", err)
+	}
+	// A skipped rule can never match, so it may have silently decided a verdict
+	// below. Warn without -verbose: this is exactly the collection failure the
+	// AX conventions forbid swallowing.
+	for _, skip := range report.Skipped {
+		logger.WarnContext(ctx, "skipping unparseable policy rule", "rule", skip.Rule,
+			"value", skip.Value, "reason", skip.Reason)
+	}
+	for _, assertion := range report.Assertions {
+		for _, decision := range assertion.Trace {
+			logger.DebugContext(
+				ctx,
+				"policy test decision",
+				"assertion",
+				assertion.ID,
+				"decision",
+				decision,
+			)
+		}
+	}
+
+	status := statusOK
+	message := fmt.Sprintf(
+		"%d assertions: %d passed, %d failed",
+		report.Summary.Total,
+		report.Summary.Passed,
+		report.Summary.Failed,
+	)
+	if report.Summary.Total == 0 {
+		message = fmt.Sprintf("no policy tests declared in %s", path)
+	}
+	res := newResult(cmdTest, status, message)
+	res.File = path
+	res.Assertions = &report.Assertions
+	res.Skipped = report.Skipped
+	res.TestSummary = &report.Summary
+	if report.Summary.Failed != 0 {
+		res.Status = statusFailed
+		return res, errAssertionsFailed
+	}
+	return res, nil
+}
+
 func runPlan(
 	ctx context.Context,
 	opts options,
@@ -601,6 +696,7 @@ func commandCatalog() []schemaCommand {
 		{"host set", "Set a host alias to an address", "host set NAME ADDRESS"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
+		{cmdTest, "Run the policy's native tests locally (-strict to reject unparseable rules)", cmdTest},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
 		{cmdUpload, "Upload the policy to the tailnet", cmdUpload},
 	}
@@ -626,13 +722,13 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and merge, validate, plan, or upload it via Tailscale's policy-file API.",
+		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
 		ExitCodes: map[string]string{
 			"0": "success",
-			"1": "operation failed",
-			"2": "usage or input error",
+			"1": "operation or policy assertion failed",
+			"2": "usage, input, or collection error",
 		},
 	}
 	enc := json.NewEncoder(w)
@@ -641,7 +737,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *flag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl — edit, merge, validate, plan, and upload a Tailscale ACL policy.")
+	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, plan, and upload a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
 	fmt.Fprintln(w, "with -format json); logs and errors go to stderr.")
@@ -655,12 +751,14 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
+	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
 	fmt.Fprintln(w, "\nExit codes:")
 	fmt.Fprintln(w, "  0  success")
-	fmt.Fprintln(w, "  1  operation failed (API rejected the policy, network error, unreadable file)")
-	fmt.Fprintln(w, "  2  usage or input error (bad flags, missing command, missing credentials)")
+	fmt.Fprintln(w, "  1  operation or policy assertion failed")
+	fmt.Fprintln(w, "  2  usage, input, or collection error (including an unreadable test policy)")
 }
 
 type stringListFlag []string
