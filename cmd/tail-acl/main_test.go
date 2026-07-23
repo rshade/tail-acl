@@ -142,7 +142,7 @@ func TestTypedEditsRejectHuJSONWithoutChangingIt(t *testing.T) {
 				context.Background(),
 				args,
 				func(string) string { return "" },
-				http.DefaultClient,
+				nil, // check is deliberately offline and must not need an HTTP client.
 				"",
 				io.Discard,
 				io.Discard,
@@ -614,6 +614,226 @@ func TestPolicyTestVerboseTraceGoesToStderr(t *testing.T) {
 	}
 }
 
+func TestCheckHumanOutputAndExitCodes(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+		"groups": {"group:dev": ["alice@example.com"]}
+	}`)
+	testCases := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantOutput []string
+	}{
+		{
+			name:     "reachable inline port",
+			args:     []string{"--src", "alice@example.com", "--dst", "tag:web:443"},
+			wantCode: exitOK,
+			wantOutput: []string{
+				"tail-acl: reachable: alice@example.com -> tag:web:443",
+				"matched grant 0",
+			},
+		},
+		{
+			name:     "reachable separate port",
+			args:     []string{"--src", "alice@example.com", "--dst", "tag:web", "--port", "443"},
+			wantCode: exitOK,
+			wantOutput: []string{
+				"tail-acl: reachable: alice@example.com -> tag:web:443",
+				"matched grant 0",
+			},
+		},
+		{
+			name:     "not reachable",
+			args:     []string{"--src", "alice@example.com", "--dst", "tag:web:22"},
+			wantCode: exitFailed,
+			wantOutput: []string{
+				"tail-acl: not reachable: alice@example.com -> tag:web:22",
+				"no network grant or ACL matched",
+			},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			args := append([]string{"--file", path, cmdCheck}, testCase.args...)
+			err := run(
+				context.Background(),
+				args,
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+			for _, want := range testCase.wantOutput {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want quiet", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCheckJSONEnvelope(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{"src": ["tag:app"], "dst": ["tag:db"], "ip": ["5432"]}]
+	}`)
+	testCases := []struct {
+		name      string
+		port      uint16
+		wantCode  int
+		wantAllow bool
+		wantGrant int
+	}{
+		{"reachable", 5432, exitOK, true, 0},
+		{"not reachable", 22, exitFailed, false, -1},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			assertCheckJSON(
+				t,
+				path,
+				testCase.port,
+				testCase.wantCode,
+				testCase.wantAllow,
+				testCase.wantGrant,
+			)
+		})
+	}
+}
+
+func assertCheckJSON(t *testing.T, path string, port uint16, wantCode int, wantAllow bool, wantGrant int) {
+	t.Helper()
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{
+			"-format", "json", "--file", path, cmdCheck,
+			"--src", "tag:app", "--dst", fmt.Sprintf("tag:db:%d", port),
+		},
+		func(string) string { return "" },
+		nil, // check is deliberately offline and must not need an HTTP client.
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != wantCode {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, wantCode, err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.SchemaVersion != schemaVersion || res.Command != cmdCheck || res.Allowed == nil ||
+		*res.Allowed != wantAllow || res.Source != "tag:app" ||
+		res.Destination != "tag:db" || res.Port == nil || *res.Port != port {
+		t.Errorf("envelope = %#v", res)
+	}
+	if (res.GrantIndex == nil) != (wantGrant < 0) ||
+		res.GrantIndex != nil && *res.GrantIndex != wantGrant {
+		t.Errorf("GrantIndex = %v, want %d", res.GrantIndex, wantGrant)
+	}
+	if res.Evidence == "" || len(res.Trace) == 0 {
+		t.Errorf("decision evidence missing: %#v", res)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
+func TestCheckCouldNotEvaluateIsExitTwo(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{
+			"src": ["alice@example.com"],
+			"dst": ["tag:web"],
+			"ip": ["tcp:443"],
+			"via": ["tag:router"]
+		}]
+	}`)
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdCheck, "--src", "alice@example.com", "--dst", "tag:web:443"},
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "unsupported via routing") {
+		t.Errorf("error = %v, want unsupported via routing", err)
+	}
+}
+
+func TestCheckUsageErrorsAreExitTwo(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	testCases := []struct {
+		name string
+		args []string
+	}{
+		{"missing source", []string{"--dst", "tag:web:443"}},
+		{"missing inline port", []string{"--src", "alice@example.com", "--dst", "tag:web"}},
+		{"inline and separate ports", []string{"--src", "alice@example.com", "--dst", "tag:web:443", "--port", "443"}},
+		{"out of range inline and separate ports", []string{"--src", "alice@example.com", "--dst", "web:65536", "--port", "443"}},
+		{"bare IPv6 without brackets", []string{"--src", "alice@example.com", "--dst", "2001:db8::1"}},
+		{"malformed unbracketed IPv6", []string{"--src", "alice@example.com", "--dst", "2001:db8::gg:443"}},
+		{"port too large", []string{"--src", "alice@example.com", "--dst", "tag:web", "--port", "65536"}},
+		{"negative port", []string{"--src", "alice@example.com", "--dst", "tag:web", "--port", "-1"}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			err := run(
+				context.Background(),
+				append([]string{"--file", path, cmdCheck}, testCase.args...),
+				func(string) string { return "" },
+				nil,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+		})
+	}
+}
+
+func TestCheckSeparatePortAcceptsBareIPv6Destination(t *testing.T) {
+	t.Parallel()
+	source, target, err := parseCheckArgs([]string{
+		"--src", "alice@example.com",
+		"--dst", "2001:db8::1",
+		"--port", "443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != "alice@example.com" || target != "[2001:db8::1]:443" {
+		t.Errorf("source, target = %q, %q, want %q, %q",
+			source, target, "alice@example.com", "[2001:db8::1]:443")
+	}
+}
+
 func TestVersionFlag(t *testing.T) {
 	t.Parallel()
 	var stdout strings.Builder
@@ -630,6 +850,34 @@ func TestVersionFlag(t *testing.T) {
 	}
 	if !strings.HasPrefix(stdout.String(), "tail-acl ") {
 		t.Errorf("version = %q, want a \"tail-acl \" prefix", stdout.String())
+	}
+}
+
+func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
+	t.Parallel()
+	var stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--help"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		&stderr,
+	)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("error = %v, want flag.ErrHelp", err)
+	}
+	for _, want := range []string{
+		"check          Answer one reachability question locally",
+		"check --src alice@example.com --dst tag:web:443",
+		"0  success; check reports reachable",
+		"1  operation or policy assertion failed; check reports not reachable",
+		"2  usage, input, or collection error (including a policy check that cannot be evaluated)",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("help missing %q:\n%s", want, stderr.String())
+		}
 	}
 }
 
@@ -660,6 +908,9 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdTest }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdTest)
+	}
+	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdCheck }) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdCheck)
 	}
 }
 

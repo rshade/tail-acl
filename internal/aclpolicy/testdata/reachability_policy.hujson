@@ -1,0 +1,34 @@
+{
+	"groups": {
+		"group:dev": ["alice@example.com"],
+	},
+	"hosts": {
+		"web": "10.20.30.40",
+		"corp-net": "10.20.0.0/16",
+	},
+	"ipsets": {
+		"ipset:corp": ["corp-net"],
+	},
+	"grants": [
+		{
+			"src": ["group:dev"],
+			"dst": ["tag:web"],
+			"ip": ["tcp:443"],
+		},
+		{
+			"src": ["autogroup:member"],
+			"dst": ["ipset:corp"],
+			"ip": ["8000-8080"],
+		},
+		{
+			"src": ["tag:batch"],
+			"dst": ["tag:db"],
+			"ip": ["udp:5432"],
+		},
+		{
+			"src": ["10.0.0.0/8"],
+			"dst": ["tag:metrics"],
+			"ip": ["6:9100"],
+		},
+	],
+}

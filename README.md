@@ -1,10 +1,10 @@
 # tail-acl
 
-Compile, validate, test, plan, and upload a Tailscale ACL policy. `tail-acl` makes
+Compile, validate, test, check, plan, and upload a Tailscale ACL policy. `tail-acl` makes
 typed edits to a policy file, deep-merges commented HuJSON sources into one
-strict-JSON policy, runs its native network assertions locally, and talks to
-Tailscale's policy-file API to validate a candidate, diff it against the live
-tailnet, or upload it.
+strict-JSON policy, runs its native network assertions and ad-hoc reachability
+checks locally, and talks to Tailscale's policy-file API to validate a candidate,
+diff it against the live tailnet, or upload it.
 
 > **Module** `github.com/rshade/tailscale-utils/tail-acl`. Conforms to the AX
 > conventions in [`../CLAUDE.md`](../CLAUDE.md#ax-conventions-the-shared-standard):
@@ -43,6 +43,11 @@ tail-acl --file acl/acl.generated.json test
 tail-acl -format json --file acl/acl.generated.json test
 tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
 
+# Ask one reachability question locally (no credentials or network):
+tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
+tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
+tail-acl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
+
 # Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
@@ -65,21 +70,23 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules) |
+| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` is also accepted) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
 
 ### Global flags
 
 `--file` (policy path), `--tailnet` / `--api-key` (default to `TAILSCALE_TAILNET` /
-`TAILSCALE_API_KEY`), `--if-match` (ETag for `upload`), `-format human|json`,
-`-verbose`, `--version`, `-schema`. `TAILSCALE_API_URL` overrides the API base
-URL (used by tests).
+`TAILSCALE_API_KEY`), `--if-match` (ETag for `upload`), `-strict` (make local
+`test`/`check` evaluation reject any unparseable rule), `-format human|json`,
+`-verbose`, `--version`, `-schema`. `TAILSCALE_API_URL` overrides the API base URL
+(used by tests).
 
 ### Exit codes
 
-- `0` success; all policy assertions passed (an absent `tests` section is an empty success)
-- `1` operation or policy assertion failed
-- `2` usage, input, or collection error (including an unreadable or unsupported test policy)
+- `0` success; all policy assertions passed; `check` reports reachable
+- `1` operation or policy assertion failed; `check` reports not reachable
+- `2` usage, input, or collection error (including a local policy decision that cannot be evaluated)
 
 ## Design
 
@@ -112,6 +119,32 @@ on stderr and listed in the envelope's `skipped` array while the remaining
 assertions are still reported; `-strict` refuses to report verdicts computed
 around it at all and exits `2`. Prefer `-strict` in CI, where a silently
 mis-evaluated `deny` assertion is the failure you least want to pass.
+
+### `check` design decision: local evaluation
+
+`check` deliberately uses the same pure evaluator as `test`; it does not call
+the control-plane ACL preview endpoint. A local result is deterministic for an
+unchanged compiled policy, works before credentials or a tailnet are available,
+and is golden-fixture testable. It also makes the command useful in an agent's
+edit → check → plan workflow without leaking a read-only operation onto the
+network. The JSON envelope adds `allowed`, `source`, `destination`, `port`,
+`evidence`, `trace`, and the matching `grant_index` or `acl_index`; these are
+additive schema-version-1 fields.
+
+The evaluator treats a port-only question like a native Tailscale policy test
+with no `proto`: either TCP or UDP access is sufficient. It understands network
+grants and legacy ACLs, groups, hosts, IP sets, exact tag/user selectors,
+supported autogroups, IP/CIDR containment, bare or protocol-qualified ports,
+lists, and ranges. Application capabilities alone do not grant network access.
+As Tailscale does, a policy with neither a `grants` nor an `acls` section uses
+the implicit default-allow policy; an explicitly empty section denies access.
+
+This local choice has an explicit safety boundary. Device posture and `via`
+routing depend on facts outside the policy snapshot, so a matching rule using
+either returns exit `2` rather than guessing. Use Tailscale's credentialed
+[ACL preview API](https://tailscale.com/docs/reference/trust-credentials) or
+server-side `validate` when those live control-plane semantics are required;
+`check` never silently falls back to the network.
 
 ## License
 

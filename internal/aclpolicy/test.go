@@ -20,11 +20,13 @@ const (
 	AssertionFail AssertionStatus = "fail"
 )
 
-// The port-carrying protocols. Everything else (icmp, numeric protocols) grants
-// no port access, which is a legitimate non-match rather than a parse failure.
+// The protocols a port-only query can satisfy. Everything else (for example,
+// ICMP) is a legitimate non-match rather than a parse failure.
 const (
-	protocolTCP = "tcp"
-	protocolUDP = "udp"
+	protocolTCP       = "tcp"
+	protocolUDP       = "udp"
+	protocolTCPNumber = "6"
+	protocolUDPNumber = "17"
 )
 
 // AssertionResult describes one accept or deny destination from a policy test.
@@ -132,17 +134,34 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 // rather than along the matching path, so the answer does not depend on which
 // assertions happen to reach which rule.
 //
-// A capability that names a non-port protocol (for example "icmp") is not a
-// parse failure: it correctly grants no port access and is skipped in silence.
+// A protocol-qualified capability that names a non-port protocol (for example
+// "icmp:*") is not a parse failure: it correctly grants no port access and is
+// skipped in silence.
 func scanRules(policy *tailscale.ACL) []RuleSkip {
 	skips := make([]RuleSkip, 0)
-	for index, grant := range policy.Grants {
+	skips = append(skips, scanGrantRules(policy.Grants)...)
+	skips = append(skips, scanACLRules(policy.ACLs)...)
+	return skips
+}
+
+func scanGrantRules(grants []tailscale.Grant) []RuleSkip {
+	skips := make([]RuleSkip, 0)
+	for index, grant := range grants {
 		for capabilityIndex, capability := range grant.IP {
 			protocol, ports, found := strings.Cut(capability, ":")
-			if capability == "*" || !found || (protocol != protocolTCP && protocol != protocolUDP) {
+			if capability == "*" {
 				continue
 			}
-			if !portSpecParses(ports) {
+			portExpression := ports
+			if !found {
+				// A capability without a protocol is a bare port expression and
+				// applies to both TCP and UDP. Non-port protocols must use the
+				// protocol-qualified form, such as "icmp:*".
+				portExpression = capability
+			} else if !queryProtocol(protocol) {
+				continue
+			}
+			if !portSpecParses(portExpression) {
 				skips = append(skips, RuleSkip{
 					Rule:   fmt.Sprintf("grants[%d].ip[%d]", index, capabilityIndex),
 					Value:  capability,
@@ -151,7 +170,12 @@ func scanRules(policy *tailscale.ACL) []RuleSkip {
 			}
 		}
 	}
-	for index, entry := range policy.ACLs {
+	return skips
+}
+
+func scanACLRules(entries []tailscale.ACLEntry) []RuleSkip {
+	skips := make([]RuleSkip, 0)
+	for index, entry := range entries {
 		field, destinations := "dst", entry.Destination
 		if len(destinations) == 0 {
 			field, destinations = "ports", entry.Ports
@@ -225,7 +249,7 @@ func evaluateAssertion(
 	if err != nil {
 		return AssertionResult{}, fmt.Errorf("tests[%d].%s[%d]: %w", testIndex, expectation, assertionIndex, err)
 	}
-	allowed, evidence, trace, err := policyAllows(policy, source, target)
+	allowed, evidence, trace, _, err := policyAllows(policy, source, target)
 	if err != nil {
 		return AssertionResult{}, fmt.Errorf("tests[%d].%s[%d]: %w", testIndex, expectation, assertionIndex, err)
 	}
@@ -269,16 +293,28 @@ func parseTarget(value string) (target, error) {
 	var host, portText string
 	if strings.HasPrefix(value, "[") {
 		closing := strings.LastIndex(value, "]:")
-		if closing < 0 {
+		if closing <= 1 {
 			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
 		}
 		host, portText = value[1:closing], value[closing+2:]
+		if strings.ContainsAny(host, "[]") {
+			return target{}, fmt.Errorf("destination %q has malformed brackets", value)
+		}
 	} else {
+		if strings.ContainsAny(value, "[]") {
+			return target{}, fmt.Errorf("destination %q has malformed brackets", value)
+		}
+		if address, err := netip.ParseAddr(value); err == nil && address.Is6() {
+			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
+		}
 		separator := strings.LastIndexByte(value, ':')
 		if separator <= 0 || separator == len(value)-1 {
 			return target{}, fmt.Errorf("destination %q must have host:port syntax", value)
 		}
 		host, portText = value[:separator], value[separator+1:]
+		if strings.Count(host, ":") > 1 {
+			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
+		}
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
@@ -287,32 +323,58 @@ func parseTarget(value string) (target, error) {
 	return target{host: host, port: uint16(port)}, nil
 }
 
-func policyAllows(policy *tailscale.ACL, source string, destination target) (bool, string, []string, error) {
+func policyAllows(
+	policy *tailscale.ACL,
+	source string,
+	destination target,
+) (bool, string, []string, *RuleReference, error) {
+	if policy.Grants == nil && policy.ACLs == nil {
+		trace := []string{"implicit default allow: no grants or ACLs section is present"}
+		return true, "implicit default allow policy", trace, nil, nil
+	}
 	trace := make([]string, 0, len(policy.Grants)+len(policy.ACLs)+1)
+	var unresolved error
 	for index, grant := range policy.Grants {
 		matched, decision, err := grantAllows(policy, grant, source, destination)
 		if err != nil {
-			return false, "", nil, fmt.Errorf("matching grant %d: %w", index, err)
+			trace = append(trace, fmt.Sprintf("grant %d: could not evaluate (%s)", index, err))
+			if unresolved == nil {
+				unresolved = fmt.Errorf("matching grant %d: %w", index, err)
+			}
+			continue
 		}
 		trace = append(trace, fmt.Sprintf("grant %d: %s", index, decision))
 		if matched {
-			return true, fmt.Sprintf("matched grant %d", index), trace, nil
+			return true, fmt.Sprintf("matched grant %d", index), trace, &RuleReference{
+				Kind:  RuleGrant,
+				Index: index,
+			}, nil
 		}
 	}
 
 	for index, entry := range policy.ACLs {
 		matched, decision, err := aclAllows(policy, entry, source, destination)
 		if err != nil {
-			return false, "", nil, fmt.Errorf("matching acl %d: %w", index, err)
+			trace = append(trace, fmt.Sprintf("acl %d: could not evaluate (%s)", index, err))
+			if unresolved == nil {
+				unresolved = fmt.Errorf("matching acl %d: %w", index, err)
+			}
+			continue
 		}
 		trace = append(trace, fmt.Sprintf("acl %d: %s", index, decision))
 		if matched {
-			return true, fmt.Sprintf("matched acl %d", index), trace, nil
+			return true, fmt.Sprintf("matched acl %d", index), trace, &RuleReference{
+				Kind:  RuleACL,
+				Index: index,
+			}, nil
 		}
+	}
+	if unresolved != nil {
+		return false, "", trace, nil, unresolved
 	}
 
 	trace = append(trace, "default deny: no network grant or ACL matched")
-	return false, "no network grant or ACL matched", trace, nil
+	return false, "no network grant or ACL matched", trace, nil, nil
 }
 
 func grantAllows(
@@ -361,7 +423,7 @@ func aclAllows(
 	if entry.Action != "" && entry.Action != "accept" {
 		return false, fmt.Sprintf("action %q is not accept", entry.Action), nil
 	}
-	if entry.Protocol != "" && entry.Protocol != protocolTCP && entry.Protocol != protocolUDP {
+	if entry.Protocol != "" && !queryProtocol(entry.Protocol) {
 		return false, fmt.Sprintf("protocol %q did not match", entry.Protocol), nil
 	}
 	destinations := entry.Destination
@@ -406,8 +468,8 @@ func selectorMatches(
 
 func directSelectorMatches(selector, query string, policy *tailscale.ACL, source string) bool {
 	return selector == "*" || selector == query ||
-		(selector == "autogroup:self" && query == source) ||
-		(selector == "autogroup:member" && looksLikeUser(query)) ||
+		(selector == "autogroup:self" && query == source && looksLikeUser(query)) ||
+		((selector == "autogroup:member" || selector == "autogroup:members") && looksLikeUser(query)) ||
 		(selector == "autogroup:internet" && isPublicAddress(query, policy))
 }
 
@@ -436,6 +498,9 @@ func addressSelectorsMatch(selector, query string, policy *tailscale.ACL) bool {
 	queryValues := expandAddressSelector(query, policy)
 	for _, selectorValue := range selectorValues {
 		for _, queryValue := range queryValues {
+			if selectorValue == "autogroup:internet" && isPublicAddress(queryValue, policy) {
+				return true
+			}
 			if addressContains(selectorValue, queryValue) {
 				return true
 			}
@@ -449,37 +514,113 @@ func looksLikeUser(selector string) bool {
 }
 
 func expandAddressSelector(selector string, policy *tailscale.ACL) []string {
+	return expandAddressSelectorSeen(selector, policy, make(map[string]bool))
+}
+
+func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[string]bool) []string {
+	if seen[selector] {
+		return nil
+	}
 	if address, ok := policy.Hosts[selector]; ok {
-		return []string{address}
+		seen[selector] = true
+		defer delete(seen, selector)
+		return expandAddressSelectorSeen(address, policy, seen)
 	}
 	if values, ok := policy.IPSets[selector]; ok {
-		return values
+		seen[selector] = true
+		defer delete(seen, selector)
+		expanded := make([]string, 0, len(values))
+		for _, value := range values {
+			expanded = append(expanded, expandAddressSelectorSeen(value, policy, seen)...)
+		}
+		return expanded
 	}
 	return []string{selector}
 }
 
 func addressContains(selector, query string) bool {
 	selectorPrefix, selectorErr := netip.ParsePrefix(selector)
+	queryPrefix, queryPrefixErr := netip.ParsePrefix(query)
+	if selectorErr == nil && queryPrefixErr == nil {
+		return selectorPrefix.Bits() <= queryPrefix.Bits() && selectorPrefix.Contains(queryPrefix.Addr())
+	}
 	queryAddress, queryErr := netip.ParseAddr(strings.Trim(query, "[]"))
 	if selectorErr == nil && queryErr == nil {
 		return selectorPrefix.Contains(queryAddress)
 	}
 	selectorAddress, selectorAddressErr := netip.ParseAddr(strings.Trim(selector, "[]"))
+	if selectorAddressErr == nil && queryPrefixErr == nil {
+		return queryPrefix.Bits() == queryPrefix.Addr().BitLen() && queryPrefix.Contains(selectorAddress)
+	}
 	return selectorAddressErr == nil && queryErr == nil && selectorAddress == queryAddress
 }
 
 func isPublicAddress(selector string, policy *tailscale.ACL) bool {
 	for _, value := range expandAddressSelector(selector, policy) {
-		address, err := netip.ParseAddr(strings.Trim(value, "[]"))
-		if err != nil {
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			if publicPrefix(prefix) {
+				return true
+			}
 			continue
 		}
-		if address.IsGlobalUnicast() && !address.IsPrivate() && !isTailscaleAddress(address) {
+		address, err := netip.ParseAddr(strings.Trim(value, "[]"))
+		if err == nil && publicAddress(address) {
 			return true
 		}
 	}
 	return false
 }
+
+func publicAddress(address netip.Addr) bool {
+	return address.IsGlobalUnicast() && !address.IsPrivate() && !isTailscaleAddress(address)
+}
+
+// publicPrefix applies publicAddress to the whole range without enumerating
+// it. The exclusion lists mirror netip's non-global-unicast and private ranges
+// and add Tailscale's CGNAT range.
+func publicPrefix(prefix netip.Prefix) bool {
+	prefix = prefix.Masked()
+	if prefix.Addr().Is4In6() {
+		if prefix.Bits() < 96 {
+			return false
+		}
+		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+	}
+
+	var nonPublic []netip.Prefix
+	if prefix.Addr().Is4() {
+		nonPublic = nonPublicIPv4Prefixes
+	} else {
+		nonPublic = nonPublicIPv6Prefixes
+	}
+	for _, excluded := range nonPublic {
+		if prefix.Overlaps(excluded) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	nonPublicIPv4Prefixes = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/32"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("255.255.255.255/32"),
+	}
+	nonPublicIPv6Prefixes = []netip.Prefix{
+		netip.MustParsePrefix("::/128"),
+		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("fc00::/7"),
+		netip.MustParsePrefix("fe80::/10"),
+		netip.MustParsePrefix("ff00::/8"),
+	}
+)
 
 func isTailscaleAddress(address netip.Addr) bool {
 	tailscaleIPv4 := netip.MustParsePrefix("100.64.0.0/10")
@@ -497,7 +638,17 @@ func grantIPMatches(capabilities []string, port uint16) (bool, bool) {
 			return true, false
 		}
 		protocol, ports, found := strings.Cut(capability, ":")
-		if !found || (protocol != protocolTCP && protocol != protocolUDP) {
+		if !found {
+			hit, parsed := portSpecMatches(capability, port)
+			switch {
+			case !parsed:
+				unparseable = true
+			case hit:
+				return true, false
+			}
+			continue
+		}
+		if !queryProtocol(protocol) {
 			continue
 		}
 		hit, parsed := portSpecMatches(ports, port)
@@ -509,6 +660,14 @@ func grantIPMatches(capabilities []string, port uint16) (bool, bool) {
 		}
 	}
 	return false, unparseable
+}
+
+// queryProtocol reports whether protocol can satisfy a reachability question
+// that does not name a protocol. This mirrors native policy tests: an omitted
+// protocol asks whether either TCP or UDP is allowed.
+func queryProtocol(protocol string) bool {
+	return protocol == protocolTCP || protocol == protocolUDP ||
+		protocol == protocolTCPNumber || protocol == protocolUDPNumber
 }
 
 // aclDestinationMatches reports whether any destination covers query, and
@@ -579,6 +738,8 @@ func portSpecMatches(spec string, port uint16) (bool, bool) {
 		end, endErr := strconv.ParseUint(endText, 10, 16)
 		switch {
 		case startErr != nil || endErr != nil:
+			parsed = false
+		case start > end:
 			parsed = false
 		case start <= uint64(port) && uint64(port) <= end:
 			matched = true

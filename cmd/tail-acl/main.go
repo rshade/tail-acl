@@ -1,5 +1,5 @@
 // Command tail-acl makes typed edits to a Tailscale policy file and can merge,
-// validate, test, plan, or upload it with Tailscale's policy-file API.
+// validate, test, check, plan, or upload it with Tailscale's policy-file API.
 //
 // Output contract (AX conventions, see ../../CLAUDE.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,10 +46,12 @@ const (
 
 // Result statuses reported in the envelope's "status" field.
 const (
-	statusOK           = "ok"
-	statusFailed       = "failed"
-	statusNoChanges    = "no_changes"
-	statusChangesFound = "changes_found"
+	statusOK            = "ok"
+	statusFailed        = "failed"
+	statusNoChanges     = "no_changes"
+	statusChangesFound  = "changes_found"
+	verdictReachable    = "reachable"
+	verdictNotReachable = "not reachable"
 )
 
 // Command and sub-command names, output formats, and the tool name.
@@ -61,6 +64,7 @@ const (
 	cmdMerge    = "merge"
 	cmdValidate = "validate"
 	cmdTest     = "test"
+	cmdCheck    = "check"
 	cmdPlan     = "plan"
 	cmdUpload   = "upload"
 
@@ -86,18 +90,25 @@ type options struct {
 // result is the versioned envelope every command returns. Human rendering emits
 // Message (and Diff, when present); JSON rendering emits the whole struct.
 type result struct {
-	SchemaVersion string `json:"schema_version"`
-	Tool          string `json:"tool"`
-	Command       string `json:"command"`
-	Status        string `json:"status"`
-	Message       string `json:"message"`
-	File          string `json:"file,omitempty"`
-	Tailnet       string `json:"tailnet,omitempty"`
-	ETag          string `json:"etag,omitempty"`
-	Diff          string `json:"diff,omitempty"`
-	Changed       *bool  `json:"changed,omitempty"`
-	GrantIndex    *int   `json:"grant_index,omitempty"`
-	MergedFiles   *int   `json:"merged_files,omitempty"`
+	SchemaVersion string   `json:"schema_version"`
+	Tool          string   `json:"tool"`
+	Command       string   `json:"command"`
+	Status        string   `json:"status"`
+	Message       string   `json:"message"`
+	File          string   `json:"file,omitempty"`
+	Tailnet       string   `json:"tailnet,omitempty"`
+	ETag          string   `json:"etag,omitempty"`
+	Diff          string   `json:"diff,omitempty"`
+	Changed       *bool    `json:"changed,omitempty"`
+	GrantIndex    *int     `json:"grant_index,omitempty"`
+	ACLIndex      *int     `json:"acl_index,omitempty"`
+	MergedFiles   *int     `json:"merged_files,omitempty"`
+	Allowed       *bool    `json:"allowed,omitempty"`
+	Source        string   `json:"source,omitempty"`
+	Destination   string   `json:"destination,omitempty"`
+	Port          *uint16  `json:"port,omitempty"`
+	Evidence      string   `json:"evidence,omitempty"`
+	Trace         []string `json:"trace,omitempty"`
 	// Assertions is a pointer so a test run with no declared tests still emits
 	// "assertions": [] rather than dropping the key, while every other command
 	// omits it — the same absent-versus-zero split as Changed and MergedFiles.
@@ -108,7 +119,10 @@ type result struct {
 	TestSummary *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 }
 
-var errAssertionsFailed = errors.New("one or more policy assertions failed")
+var (
+	errAssertionsFailed   = errors.New("one or more policy assertions failed")
+	errReachabilityDenied = errors.New("policy does not allow the requested reachability")
+)
 
 // usageError marks an error as an invocation problem (exit 2) rather than an
 // operation failure (exit 1), so exitCode can tell "you called it wrong" from
@@ -175,7 +189,7 @@ func run(
 		&opts.strict,
 		"strict",
 		false,
-		"test: reject a policy containing an unparseable rule instead of warning",
+		"test/check: reject a policy containing an unparseable rule instead of warning",
 	)
 	format := root.String("format", formatHuman, "output format: human|json")
 	verbose := root.Bool("verbose", false, "log operational detail to stderr")
@@ -250,6 +264,8 @@ func dispatch(
 		return runValidate(ctx, opts, httpClient, apiURL, args[1:])
 	case cmdTest:
 		return runTest(ctx, opts, args[1:], logger)
+	case cmdCheck:
+		return runCheck(ctx, opts, args[1:], logger)
 	case cmdPlan:
 		return runPlan(ctx, opts, httpClient, apiURL, args[1:])
 	case cmdUpload:
@@ -598,6 +614,159 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	return res, nil
 }
 
+func runCheck(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
+	source, target, err := parseCheckArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := aclpolicy.Load(opts.file)
+	if err != nil {
+		return nil, usagef("could not load policy for check: %v", err)
+	}
+	decision, err := aclpolicy.EvaluateReachability(
+		policy,
+		source,
+		target,
+		aclpolicy.ReachabilityOptions{Strict: opts.strict},
+	)
+	if err != nil {
+		return nil, usagef("could not evaluate reachability: %v", err)
+	}
+	for _, skip := range decision.Skipped {
+		logger.WarnContext(ctx, "skipping unparseable policy rule", "rule", skip.Rule,
+			"value", skip.Value, "reason", skip.Reason)
+	}
+	for _, trace := range decision.Trace {
+		logger.DebugContext(ctx, "reachability decision", "decision", trace)
+	}
+
+	res := newCheckResult(opts.file, decision)
+	if !decision.Allowed {
+		return res, errReachabilityDenied
+	}
+	return res, nil
+}
+
+func parseCheckArgs(args []string) (string, string, error) {
+	fs := flag.NewFlagSet("tail-acl check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	source := fs.String("src", "", "source user, group, tag, host, IP, or CIDR")
+	destination := fs.String("dst", "", "destination selector, optionally with :port")
+	port := fs.Int("port", -1, "destination port (alternative to including it in --dst)")
+	if err := fs.Parse(args); err != nil {
+		return "", "", usageError{err}
+	}
+	if len(fs.Args()) != 0 {
+		return "", "", usagef("unexpected check arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	sourceValue := strings.TrimSpace(*source)
+	destinationValue := strings.TrimSpace(*destination)
+	if sourceValue == "" || destinationValue == "" {
+		return "", "", usagef("check requires --src and --dst")
+	}
+	portSet := false
+	fs.Visit(func(f *flag.Flag) {
+		portSet = portSet || f.Name == "port"
+	})
+	if portSet && (*port < 0 || *port > 65535) {
+		return "", "", usagef("--port %d is out of range; want 0-65535", *port)
+	}
+
+	target := destinationValue
+	if portSet {
+		normalizedDestination, err := checkDestinationWithoutPort(destinationValue)
+		if err != nil {
+			return "", "", err
+		}
+		// Brackets make selectors containing colons (tags and IPv6 addresses)
+		// unambiguous to the shared host:port parser.
+		target = fmt.Sprintf("[%s]:%d", normalizedDestination, *port)
+	}
+	return sourceValue, target, nil
+}
+
+func checkDestinationWithoutPort(value string) (string, error) {
+	original := value
+	if strings.HasPrefix(value, "[") || strings.HasSuffix(value, "]") {
+		if len(value) < 3 || value[0] != '[' || value[len(value)-1] != ']' {
+			return "", usagef("--dst %q has malformed brackets", original)
+		}
+		value = value[1 : len(value)-1]
+		if value == "" || strings.ContainsAny(value, "[]") {
+			return "", usagef("--dst %q has malformed brackets", original)
+		}
+	}
+	if _, err := netip.ParseAddr(value); err == nil {
+		return value, nil
+	}
+	if _, err := netip.ParsePrefix(value); err == nil {
+		return value, nil
+	}
+
+	separator := strings.LastIndexByte(value, ':')
+	if separator < 0 {
+		return value, nil
+	}
+	if separator == 0 || separator == len(value)-1 {
+		return "", usagef("--dst %q is malformed", value)
+	}
+	if isDecimal(value[separator+1:]) {
+		return "", usagef("--dst %q already includes a port; do not also use --port", value)
+	}
+	if strings.Contains(value[:separator], ":") {
+		return "", usagef("--dst %q is ambiguous; bracket IPv6 addresses and specify the port once", value)
+	}
+	return value, nil
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func newCheckResult(path string, decision aclpolicy.ReachabilityResult) *result {
+	verdict := verdictNotReachable
+	status := statusFailed
+	if decision.Allowed {
+		verdict = verdictReachable
+		status = statusOK
+	}
+	message := fmt.Sprintf(
+		"%s: %s -> %s:%d (%s)",
+		verdict,
+		decision.Source,
+		decision.Destination,
+		decision.Port,
+		decision.Evidence,
+	)
+	res := newResult(cmdCheck, status, message)
+	res.File = path
+	res.Allowed = &decision.Allowed
+	res.Source = decision.Source
+	res.Destination = decision.Destination
+	res.Port = &decision.Port
+	res.Evidence = decision.Evidence
+	res.Trace = decision.Trace
+	res.Skipped = decision.Skipped
+	if decision.Rule != nil {
+		index := decision.Rule.Index
+		switch decision.Rule.Kind {
+		case aclpolicy.RuleGrant:
+			res.GrantIndex = &index
+		case aclpolicy.RuleACL:
+			res.ACLIndex = &index
+		}
+	}
+	return res
+}
+
 func runPlan(
 	ctx context.Context,
 	opts options,
@@ -697,6 +866,11 @@ func commandCatalog() []schemaCommand {
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{cmdTest, "Run the policy's native tests locally (-strict to reject unparseable rules)", cmdTest},
+		{
+			cmdCheck,
+			"Answer one reachability question locally",
+			"check --src SRC (--dst DST:PORT | --dst DST --port PORT)",
+		},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
 		{cmdUpload, "Upload the policy to the tailnet", cmdUpload},
 	}
@@ -722,12 +896,12 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, plan, or upload it.",
+		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, check, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
 		ExitCodes: map[string]string{
-			"0": "success",
-			"1": "operation or policy assertion failed",
+			"0": "success or reachable",
+			"1": "operation or policy assertion failed, or not reachable",
 			"2": "usage, input, or collection error",
 		},
 	}
@@ -737,7 +911,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *flag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, plan, and upload a Tailscale ACL policy.")
+	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, check, plan, and upload a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
 	fmt.Fprintln(w, "with -format json); logs and errors go to stderr.")
@@ -752,13 +926,15 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
 	fmt.Fprintln(w, "\nExit codes:")
-	fmt.Fprintln(w, "  0  success")
-	fmt.Fprintln(w, "  1  operation or policy assertion failed")
-	fmt.Fprintln(w, "  2  usage, input, or collection error (including an unreadable test policy)")
+	fmt.Fprintln(w, "  0  success; check reports reachable")
+	fmt.Fprintln(w, "  1  operation or policy assertion failed; check reports not reachable")
+	fmt.Fprintln(w, "  2  usage, input, or collection error (including a policy check that cannot be evaluated)")
 }
 
 type stringListFlag []string

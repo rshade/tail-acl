@@ -1,0 +1,93 @@
+[
+  {
+    "allowed": true,
+    "source": "alice@example.com",
+    "destination": "tag:web",
+    "port": 443,
+    "rule": {
+      "kind": "grant",
+      "index": 0
+    },
+    "evidence": "matched grant 0",
+    "trace": [
+      "grant 0: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "allowed": false,
+    "source": "alice@example.com",
+    "destination": "tag:web",
+    "port": 22,
+    "evidence": "no network grant or ACL matched",
+    "trace": [
+      "grant 0: network capability did not match port 22",
+      "grant 1: destination did not match",
+      "grant 2: source did not match",
+      "grant 3: source did not match",
+      "default deny: no network grant or ACL matched"
+    ]
+  },
+  {
+    "allowed": true,
+    "source": "alice@example.com",
+    "destination": "web",
+    "port": 8042,
+    "rule": {
+      "kind": "grant",
+      "index": 1
+    },
+    "evidence": "matched grant 1",
+    "trace": [
+      "grant 0: destination did not match",
+      "grant 1: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "allowed": true,
+    "source": "alice@example.com",
+    "destination": "10.20.16.0/20",
+    "port": 8042,
+    "rule": {
+      "kind": "grant",
+      "index": 1
+    },
+    "evidence": "matched grant 1",
+    "trace": [
+      "grant 0: destination did not match",
+      "grant 1: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "allowed": true,
+    "source": "tag:batch",
+    "destination": "tag:db",
+    "port": 5432,
+    "rule": {
+      "kind": "grant",
+      "index": 2
+    },
+    "evidence": "matched grant 2",
+    "trace": [
+      "grant 0: source did not match",
+      "grant 1: source did not match",
+      "grant 2: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "allowed": true,
+    "source": "10.1.0.0/16",
+    "destination": "tag:metrics",
+    "port": 9100,
+    "rule": {
+      "kind": "grant",
+      "index": 3
+    },
+    "evidence": "matched grant 3",
+    "trace": [
+      "grant 0: source did not match",
+      "grant 1: source did not match",
+      "grant 2: source did not match",
+      "grant 3: source, destination, and network capability matched"
+    ]
+  }
+]
