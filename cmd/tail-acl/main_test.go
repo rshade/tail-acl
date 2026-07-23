@@ -1201,20 +1201,159 @@ func assertCheckJSON(t *testing.T, path string, port uint16, wantCode int, wantA
 	}
 }
 
-func TestCheckCouldNotEvaluateIsExitTwo(t *testing.T) {
+// A rule the evaluator cannot decide gets its own exit code so a shell caller
+// can tell "the policy denies this" from "this policy cannot answer that here".
+func TestCheckIndeterminateIsExitTen(t *testing.T) {
+	t.Parallel()
+	policies := []struct {
+		name   string
+		policy string
+	}{
+		{"via", `{"grants": [{
+			"src": ["alice@example.com"], "dst": ["tag:web"],
+			"ip": ["tcp:443"], "via": ["tag:router"]
+		}]}`},
+		{"srcPosture", `{"grants": [{
+			"src": ["alice@example.com"], "dst": ["tag:web"],
+			"ip": ["tcp:443"], "srcPosture": ["posture:latestMac"]
+		}]}`},
+		{"unresolvable autogroup", `{"grants": [{
+			"src": ["autogroup:admin"], "dst": ["tag:web"], "ip": ["tcp:443"]
+		}]}`},
+	}
+	for _, testCase := range policies {
+		name, policy := testCase.name, testCase.policy
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, policy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{"--file", path, cmdCheck, "--src", "alice@example.com", "--dst", "tag:web:443"},
+				func(string) string { return "" },
+				nil,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != exitIndeterminate {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitIndeterminate, err)
+			}
+			if !strings.Contains(stdout.String(), "indeterminate") {
+				t.Errorf("stdout = %q, want it to report indeterminate", stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "grant 0") {
+				t.Errorf("stdout = %q, want it to name the gating grant", stdout.String())
+			}
+		})
+	}
+}
+
+// An indeterminate answer must not serialize "allowed": false — a consumer
+// reading only that key would take it for a denial.
+func TestCheckIndeterminateOmitsAllowed(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
-	writeTestPolicy(t, path, `{
-		"grants": [{
-			"src": ["alice@example.com"],
-			"dst": ["tag:web"],
-			"ip": ["tcp:443"],
-			"via": ["tag:router"]
-		}]
-	}`)
+	writeTestPolicy(t, path, `{"grants": [{
+		"src": ["autogroup:admin"], "dst": ["tag:web"], "ip": ["tcp:443"]
+	}]}`)
+	var stdout strings.Builder
 	err := run(
 		context.Background(),
-		[]string{"--file", path, cmdCheck, "--src", "alice@example.com", "--dst", "tag:web:443"},
+		[]string{
+			"--file", path, "--format", formatJSON, cmdCheck,
+			"--src", "alice@example.com", "--dst", "tag:web:443",
+		},
+		func(string) string { return "" },
+		nil,
+		"",
+		&stdout,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitIndeterminate {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitIndeterminate, err)
+	}
+	var envelope map[string]any
+	if unmarshalErr := json.Unmarshal([]byte(stdout.String()), &envelope); unmarshalErr != nil {
+		t.Fatalf("decoding envelope: %v\n%s", unmarshalErr, stdout.String())
+	}
+	if got := envelope["access"]; got != "indeterminate" {
+		t.Errorf("access = %v, want indeterminate", got)
+	}
+	if _, present := envelope["allowed"]; present {
+		t.Errorf("allowed is present (%v); an indeterminate answer must omit it", envelope["allowed"])
+	}
+}
+
+func TestCheckProtocolFlagNarrowsTheQuestion(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": [{
+		"src": ["tag:app"], "dst": ["tag:db"], "ip": ["udp:5432"]
+	}]}`)
+	testCases := []struct {
+		protocol string
+		wantCode int
+	}{
+		{"udp", exitOK},
+		{"tcp", exitFailed},
+		{"any", exitOK},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.protocol, func(t *testing.T) {
+			t.Parallel()
+			err := run(
+				context.Background(),
+				[]string{
+					"--file", path, cmdCheck, "--src", "tag:app",
+					"--dst", "tag:db:5432", "--proto", testCase.protocol,
+				},
+				func(string) string { return "" },
+				nil,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+		})
+	}
+}
+
+// Omitting --proto must keep asking the protocol-agnostic question the verb
+// shipped with, so an existing caller's verdicts do not move.
+func TestCheckDefaultsToProtocolAgnostic(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": [{
+		"src": ["tag:app"], "dst": ["tag:db"], "ip": ["udp:5432"]
+	}]}`)
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdCheck, "--src", "tag:app", "--dst", "tag:db:5432"},
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+}
+
+func TestCheckUnknownProtocolIsExitTwo(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	err := run(
+		context.Background(),
+		[]string{
+			"--file", path, cmdCheck, "--src", "tag:app",
+			"--dst", "tag:db:5432", "--proto", "sctp",
+		},
 		func(string) string { return "" },
 		nil,
 		"",
@@ -1223,9 +1362,6 @@ func TestCheckCouldNotEvaluateIsExitTwo(t *testing.T) {
 	)
 	if code := exitCode(err); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
-	}
-	if !strings.Contains(err.Error(), "unsupported via routing") {
-		t.Errorf("error = %v, want unsupported via routing", err)
 	}
 }
 
@@ -1270,7 +1406,7 @@ func TestCheckUsageErrorsAreExitTwo(t *testing.T) {
 
 func TestCheckSeparatePortAcceptsBareIPv6Destination(t *testing.T) {
 	t.Parallel()
-	source, target, err := parseCheckArgs([]string{
+	source, target, protocol, err := parseCheckArgs([]string{
 		"--src", "alice@example.com",
 		"--dst", "2001:db8::1",
 		"--port", "443",
@@ -1281,6 +1417,9 @@ func TestCheckSeparatePortAcceptsBareIPv6Destination(t *testing.T) {
 	if source != "alice@example.com" || target != "[2001:db8::1]:443" {
 		t.Errorf("source, target = %q, %q, want %q, %q",
 			source, target, "alice@example.com", "[2001:db8::1]:443")
+	}
+	if protocol != aclpolicy.ProtocolAny {
+		t.Errorf("protocol = %q, want %q", protocol, aclpolicy.ProtocolAny)
 	}
 }
 
@@ -1326,7 +1465,9 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 		"# static policy hygiene findings",
 		"0  success; check reports reachable",
 		"1  operation or policy assertion failed; check reports not reachable",
-		"2  usage, input, or collection error (including a policy check that cannot be evaluated)",
+		"2  usage, input, or collection error",
+		"10 indeterminate",
+		"Also returned by",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("help missing %q:\n%s", want, stderr.String())

@@ -1,9 +1,11 @@
 [
   {
+    "access": "allow",
     "allowed": true,
     "source": "alice@example.com",
     "destination": "tag:web",
     "port": 443,
+    "protocol": "any",
     "rule": {
       "kind": "grant",
       "index": 0
@@ -14,24 +16,30 @@
     ]
   },
   {
+    "access": "deny",
     "allowed": false,
     "source": "alice@example.com",
     "destination": "tag:web",
     "port": 22,
+    "protocol": "any",
     "evidence": "no network grant or ACL matched",
     "trace": [
       "grant 0: network capability did not match port 22",
       "grant 1: destination did not match",
       "grant 2: source did not match",
       "grant 3: source did not match",
+      "grant 4: destination did not match",
+      "grant 5: source did not match",
       "default deny: no network grant or ACL matched"
     ]
   },
   {
+    "access": "allow",
     "allowed": true,
     "source": "alice@example.com",
     "destination": "web",
     "port": 8042,
+    "protocol": "any",
     "rule": {
       "kind": "grant",
       "index": 1
@@ -43,10 +51,12 @@
     ]
   },
   {
+    "access": "allow",
     "allowed": true,
     "source": "alice@example.com",
     "destination": "10.20.16.0/20",
     "port": 8042,
+    "protocol": "any",
     "rule": {
       "kind": "grant",
       "index": 1
@@ -58,10 +68,12 @@
     ]
   },
   {
+    "access": "allow",
     "allowed": true,
     "source": "tag:batch",
     "destination": "tag:db",
     "port": 5432,
+    "protocol": "any",
     "rule": {
       "kind": "grant",
       "index": 2
@@ -74,10 +86,12 @@
     ]
   },
   {
+    "access": "allow",
     "allowed": true,
     "source": "10.1.0.0/16",
     "destination": "tag:metrics",
     "port": 9100,
+    "protocol": "any",
     "rule": {
       "kind": "grant",
       "index": 3
@@ -85,9 +99,122 @@
     "evidence": "matched grant 3",
     "trace": [
       "grant 0: source did not match",
-      "grant 1: source did not match",
+      "grant 1: destination did not match",
       "grant 2: source did not match",
       "grant 3: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "access": "allow",
+    "allowed": true,
+    "source": "tag:batch",
+    "destination": "tag:db",
+    "port": 5432,
+    "protocol": "udp",
+    "rule": {
+      "kind": "grant",
+      "index": 2
+    },
+    "evidence": "matched grant 2",
+    "trace": [
+      "grant 0: source did not match",
+      "grant 1: source did not match",
+      "grant 2: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "access": "deny",
+    "allowed": false,
+    "source": "tag:batch",
+    "destination": "tag:db",
+    "port": 5432,
+    "protocol": "tcp",
+    "evidence": "no network grant or ACL matched",
+    "trace": [
+      "grant 0: source did not match",
+      "grant 1: source did not match",
+      "grant 2: network capability did not match port 5432 for protocol tcp",
+      "grant 3: source did not match",
+      "grant 4: source did not match",
+      "grant 5: destination did not match",
+      "default deny: no network grant or ACL matched"
+    ]
+  },
+  {
+    "access": "indeterminate",
+    "source": "alice@example.com",
+    "destination": "tag:audit",
+    "port": 8443,
+    "protocol": "any",
+    "rule": {
+      "kind": "grant",
+      "index": 4
+    },
+    "evidence": "grant 4 source selector \"autogroup:admin\" cannot be resolved from the policy file",
+    "trace": [
+      "grant 0: destination did not match",
+      "grant 1: destination did not match",
+      "grant 2: source did not match",
+      "grant 3: source did not match",
+      "grant 4: could not evaluate: source selector \"autogroup:admin\" cannot be resolved from the policy file",
+      "grant 5: source did not match"
+    ]
+  },
+  {
+    "access": "deny",
+    "allowed": false,
+    "source": "alice@example.com",
+    "destination": "tag:audit",
+    "port": 9999,
+    "protocol": "any",
+    "evidence": "no network grant or ACL matched",
+    "trace": [
+      "grant 0: destination did not match",
+      "grant 1: destination did not match",
+      "grant 2: source did not match",
+      "grant 3: source did not match",
+      "grant 4: network capability did not match port 9999",
+      "grant 5: source did not match",
+      "default deny: no network grant or ACL matched"
+    ]
+  },
+  {
+    "access": "allow",
+    "allowed": true,
+    "source": "tag:batch",
+    "destination": "tag:log",
+    "port": 514,
+    "protocol": "any",
+    "rule": {
+      "kind": "grant",
+      "index": 5
+    },
+    "evidence": "matched grant 5",
+    "trace": [
+      "grant 0: source did not match",
+      "grant 1: source did not match",
+      "grant 2: destination did not match",
+      "grant 3: source did not match",
+      "grant 4: source did not match",
+      "grant 5: source, destination, and network capability matched"
+    ]
+  },
+  {
+    "access": "deny",
+    "allowed": false,
+    "source": "alice@example.com",
+    "destination": "tag:log",
+    "port": 514,
+    "protocol": "any",
+    "evidence": "no network grant or ACL matched",
+    "trace": [
+      "grant 0: destination did not match",
+      "grant 1: destination did not match",
+      "grant 2: source did not match",
+      "grant 3: source did not match",
+      "grant 4: destination did not match",
+      "grant 5: source did not match",
+      "default deny: no network grant or ACL matched"
     ]
   }
 ]

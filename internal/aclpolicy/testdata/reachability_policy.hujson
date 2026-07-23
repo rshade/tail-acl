@@ -30,5 +30,19 @@
 			"dst": ["tag:metrics"],
 			"ip": ["6:9100"],
 		},
+		// autogroup:admin membership lives in the control plane, so a query that
+		// clears every other condition of this grant can only be answered
+		// "indeterminate" — never "deny".
+		{
+			"src": ["autogroup:admin"],
+			"dst": ["tag:audit"],
+			"ip": ["tcp:8443"],
+		},
+		// autogroup:tagged is decidable from the query alone.
+		{
+			"src": ["autogroup:tagged"],
+			"dst": ["tag:log"],
+			"ip": ["tcp:514"],
+		},
 	],
 }

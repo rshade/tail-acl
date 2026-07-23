@@ -37,12 +37,15 @@ func selectorMatchesSeen(
 	return addressSelectorsMatch(selector, query, policy)
 }
 
+// autogroup:danger-all matches every device including ones outside the tailnet
+// (it restores the pre-mitigation meaning of "*"), so a grant using it is
+// wide open rather than undecidable.
 func directSelectorMatches(selector, query string, policy *tailscale.ACL, source string) bool {
-	return selector == "*" || selector == query ||
-		(selector == "autogroup:self" && query == source && LooksLikeUser(query)) ||
-		((selector == "autogroup:member" || selector == "autogroup:members") && LooksLikeUser(query)) ||
-		(selector == "autogroup:internet" && IsPublicAddress(query, policy)) ||
-		(selector == "autogroup:tagged" && strings.HasPrefix(query, "tag:"))
+	return selector == "*" || selector == query || selector == autogroupDangerAll ||
+		(selector == autogroupSelf && query == source && LooksLikeUser(query)) ||
+		((selector == autogroupMember || selector == autogroupMembers) && LooksLikeUser(query)) ||
+		(selector == autogroupInternet && IsPublicAddress(query, policy)) ||
+		(selector == autogroupTagged && strings.HasPrefix(query, tagPrefix))
 }
 
 func groupSelectorMatches(

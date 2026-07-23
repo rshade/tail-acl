@@ -1,8 +1,6 @@
 package aclpolicy_test
 
 import (
-	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,18 +99,7 @@ func TestEvaluateTestsGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got = append(got, '\n')
-	want, err := os.ReadFile(filepath.Join("testdata", "tests_report.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("EvaluateTests report:\n%s\nwant:\n%s", got, want)
-	}
+	assertGolden(t, "tests_report.golden.json", report)
 }
 
 func TestEvaluateReachabilityGolden(t *testing.T) {
@@ -122,15 +109,27 @@ func TestEvaluateReachabilityGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	queries := []struct {
-		source string
-		target string
+		source   string
+		target   string
+		protocol aclpolicy.Protocol
 	}{
-		{"alice@example.com", "tag:web:443"},
-		{"alice@example.com", "tag:web:22"},
-		{"alice@example.com", "web:8042"},
-		{"alice@example.com", "10.20.16.0/20:8042"},
-		{"tag:batch", "tag:db:5432"},
-		{"10.1.0.0/16", "tag:metrics:9100"},
+		{source: "alice@example.com", target: "tag:web:443"},
+		{source: "alice@example.com", target: "tag:web:22"},
+		{source: "alice@example.com", target: "web:8042"},
+		{source: "alice@example.com", target: "10.20.16.0/20:8042"},
+		{source: "tag:batch", target: "tag:db:5432"},
+		{source: "10.1.0.0/16", target: "tag:metrics:9100"},
+		// The grant is udp-only, so narrowing to tcp must flip the verdict.
+		{source: "tag:batch", target: "tag:db:5432", protocol: aclpolicy.ProtocolUDP},
+		{source: "tag:batch", target: "tag:db:5432", protocol: aclpolicy.ProtocolTCP},
+		// Gated on autogroup:admin — answerable only in the control plane.
+		{source: "alice@example.com", target: "tag:audit:8443"},
+		// Same grant, but the destination rules it out, so the answer is a
+		// clean deny rather than indeterminate.
+		{source: "alice@example.com", target: "tag:audit:9999"},
+		// autogroup:tagged resolves from the query itself.
+		{source: "tag:batch", target: "tag:log:514"},
+		{source: "alice@example.com", target: "tag:log:514"},
 	}
 	results := make([]aclpolicy.ReachabilityResult, 0, len(queries))
 	for _, query := range queries {
@@ -138,45 +137,20 @@ func TestEvaluateReachabilityGolden(t *testing.T) {
 			policy,
 			query.source,
 			query.target,
-			aclpolicy.ReachabilityOptions{},
+			aclpolicy.ReachabilityOptions{Protocol: query.protocol},
 		)
 		if evaluateErr != nil {
 			t.Fatalf("EvaluateReachability(%q, %q): %v", query.source, query.target, evaluateErr)
 		}
 		results = append(results, decision)
 	}
-	got, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got = append(got, '\n')
-	want, err := os.ReadFile(filepath.Join("testdata", "reachability_report.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("EvaluateReachability report:\n%s\nwant:\n%s", got, want)
-	}
+	assertGolden(t, "reachability_report.golden.json", results)
 }
 
-func TestEvaluateReachabilityUnsupportedRule(t *testing.T) {
-	t.Parallel()
-	policy := &tailscale.ACL{Grants: []tailscale.Grant{{
-		Source:      []string{"alice@example.com"},
-		Destination: []string{"tag:web"},
-		IP:          []string{"tcp:443"},
-		Via:         []string{"tag:router"},
-	}}}
-	_, err := aclpolicy.EvaluateReachability(
-		policy,
-		"alice@example.com",
-		"tag:web:443",
-		aclpolicy.ReachabilityOptions{},
-	)
-	if err == nil || !strings.Contains(err.Error(), "unsupported via routing") {
-		t.Fatalf("error = %v, want unsupported via routing", err)
-	}
-}
+// A rule using via or srcPosture is no longer an error from check; see
+// TestUnevaluatableGateIsIndeterminate in reachability_test.go, which asserts
+// the third verdict that replaced it. EvaluateTests still errors, which
+// TestEvaluateTestsStillErrorsOnUnevaluatableRule locks in.
 
 func TestEvaluateReachabilityStrictRejectsMalformedRule(t *testing.T) {
 	t.Parallel()
@@ -218,8 +192,8 @@ func TestAutogroupInternetRequiresEntireCIDRToBePublic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if decision.Allowed != testCase.wantAllowed {
-				t.Errorf("Allowed = %t, want %t (%#v)", decision.Allowed, testCase.wantAllowed, decision)
+			if (decision.Access == aclpolicy.AccessAllow) != testCase.wantAllowed {
+				t.Errorf("Access = %q, want allowed=%t (%#v)", decision.Access, testCase.wantAllowed, decision)
 			}
 		})
 	}
@@ -305,7 +279,7 @@ func TestEvaluateReachabilityImplicitDefaultAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !decision.Allowed || decision.Rule != nil ||
+	if decision.Access != aclpolicy.AccessAllow || decision.Rule != nil ||
 		!strings.Contains(decision.Evidence, "implicit default allow") {
 		t.Errorf("decision = %#v, want implicit default allow", decision)
 	}
@@ -343,7 +317,7 @@ func assertMalformedCapabilityHandling(t *testing.T, capability string) {
 		decision.Skipped[0].Value != capability {
 		t.Fatalf("Skipped = %#v, want malformed capability %q", decision.Skipped, capability)
 	}
-	if decision.Allowed ||
+	if decision.Access != aclpolicy.AccessDeny ||
 		!strings.Contains(strings.Join(decision.Trace, "\n"), "network capability could not be parsed") {
 		t.Errorf("decision = %#v, want a denied verdict that identifies the parse failure", decision)
 	}

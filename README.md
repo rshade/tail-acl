@@ -51,6 +51,7 @@ tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable r
 tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
 tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
 tail-acl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
+tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
 
 # Statically lint policy hygiene (no credentials or network):
 tail-acl --file acl/acl.generated.json lint
@@ -80,8 +81,8 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
-| `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules) |
-| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` is also accepted) |
+| `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules; an unsettleable assertion is reported as `indeterminate`, not an aborted run) |
+| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
@@ -98,7 +99,11 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 - `0` success; all policy assertions passed; `check` reports reachable; `lint` found nothing at or above the threshold
 - `1` operation or policy assertion failed; `check` reports not reachable; `lint` found issues at or above the threshold
-- `2` usage, input, or collection error (including a local policy decision that cannot be evaluated)
+- `2` usage, input, or collection error
+- `10` `check` is indeterminate, or `test` had an assertion it could not settle —
+  a rule would have applied, but deciding it needs a fact the policy file does
+  not contain. This is deliberately not a denial: see
+  [the safety boundary](#the-safety-boundary) below.
 
 ## Design
 
@@ -157,21 +162,64 @@ the control-plane ACL preview endpoint. A local result is deterministic for an
 unchanged compiled policy, works before credentials or a tailnet are available,
 and is golden-fixture testable. It also makes the command useful in an agent's
 edit → check → plan workflow without leaking a read-only operation onto the
-network. The JSON envelope adds `allowed`, `source`, `destination`, `port`,
-`evidence`, `trace`, and the matching `grant_index` or `acl_index`; these are
-additive schema-version-1 fields.
+network. The JSON envelope adds `access`, `allowed`, `source`, `destination`,
+`port`, `protocol`, `evidence`, `trace`, and the matching `grant_index` or
+`acl_index`; these are additive schema-version-1 fields.
 
-The evaluator treats a port-only question like a native Tailscale policy test
-with no `proto`: either TCP or UDP access is sufficient. It understands network
+`access` is the three-state verdict (`allow`, `deny`, `indeterminate`) and is
+the field to read. `allowed` is the older two-state boolean, kept for existing
+consumers and **emitted only for a definite answer** — an indeterminate result
+omits it rather than serializing `false`, which would read as a denial.
+
+**One field changed meaning.** `grant_index` / `acl_index` previously named the
+rule that *allowed* a query, because they were only ever populated for a match.
+They now name the rule that **decided** the answer, which for an indeterminate
+result is the rule whose unevaluatable condition blocked a verdict. A consumer
+that reads the index without also switching on `access` (or `status`) would
+misread a blocking rule as an allowing one. This is additive in shape but not in
+meaning, so switch on `access` first.
+
+By default the evaluator treats a port-only question like a native Tailscale
+policy test with no `proto`: either TCP or UDP access is sufficient. Pass
+`--proto tcp` or `--proto udp` to narrow the question when the distinction
+matters (`udp:53` versus `tcp:53`); the default stays `any` so an existing
+caller's verdicts do not move. It understands network
 grants and legacy ACLs, groups, hosts, IP sets, exact tag/user selectors,
 supported autogroups, IP/CIDR containment, bare or protocol-qualified ports,
 lists, and ranges. Application capabilities alone do not grant network access.
 As Tailscale does, a policy with neither a `grants` nor an `acls` section uses
 the implicit default-allow policy; an explicitly empty section denies access.
 
-This local choice has an explicit safety boundary. Device posture and `via`
-routing depend on facts outside the policy snapshot, so a matching rule using
-either returns exit `2` rather than guessing. Use Tailscale's credentialed
+### The safety boundary
+
+A policy file does not contain every fact a verdict can depend on. Device
+posture, `via` routing, and the role autogroups (`autogroup:admin`,
+`autogroup:owner`, the `*-admin` family, `autogroup:auditor`,
+`autogroup:shared`) all resolve against control-plane state this evaluator
+never sees — as does any autogroup Tailscale adds after this release.
+
+Which autogroups can be settled locally depends on the **query as well as the
+selector**. `autogroup:tagged` is decidable against `tag:batch` (yes) and
+against a user identity (no), but against a bare `100.64.0.9` it needs the
+device-to-tag map, so that query is indeterminate. Conversely a role autogroup
+is refutable with certainty against a `tag:` source, because a tagged device has
+no user owner — reporting `indeterminate` for a settleable question would train
+callers to ignore exit `10`.
+
+When a rule clears every condition the evaluator *can* decide and is stopped
+only by one it cannot, `check` reports `indeterminate` and exits `10`, naming
+the rule and the condition. It does **not** report a denial. `test` reports the
+same situation as an `indeterminate` assertion and keeps the rest of the report,
+rather than discarding every assertion it had already computed. Collapsing "cannot
+tell" into "no" would emit a confident wrong answer, which is the one outcome a
+reachability tool must never produce.
+
+The narrowing matters: a rule that fails on destination or port could never
+have applied, so it stays a clean `deny` even when its source names an
+unresolvable autogroup. Only a rule that would otherwise have matched clouds
+the verdict.
+
+Use Tailscale's credentialed
 [ACL preview API](https://tailscale.com/docs/reference/trust-credentials) or
 server-side `validate` when those live control-plane semantics are required;
 `check` never silently falls back to the network.

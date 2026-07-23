@@ -20,6 +20,9 @@ const (
 	AssertionPass AssertionStatus = "pass"
 	// AssertionFail means the compiled policy disagreed with the assertion.
 	AssertionFail AssertionStatus = "fail"
+	// AssertionIndeterminate means the assertion could not be settled from the
+	// policy file alone, so it is neither a pass nor a failure.
+	AssertionIndeterminate AssertionStatus = "indeterminate"
 )
 
 // The protocols a port-only query can satisfy. Everything else (for example,
@@ -30,6 +33,10 @@ const (
 	protocolTCPNumber = "6"
 	protocolUDPNumber = "17"
 )
+
+// The selector namespaces and the autogroups this evaluator can resolve without
+// control-plane state live in policycore, which owns selector resolution for
+// both this tool and tailnet-audit. See policycore.AutogroupResolvable.
 
 // AssertionResult describes one accept or deny destination from a policy test.
 // IDs are derived from the policy's array indexes and are stable for unchanged
@@ -55,6 +62,9 @@ type TestSummary struct {
 	Total  int `json:"total"`
 	Passed int `json:"passed"`
 	Failed int `json:"failed"`
+	// Indeterminate is omitted when zero so a report containing no unsettleable
+	// assertion keeps the shape existing consumers already parse.
+	Indeterminate int `json:"indeterminate,omitempty"`
 }
 
 // RuleSkip names one policy rule element the evaluator cannot parse. Such an
@@ -234,9 +244,14 @@ func normalizeTest(index int, test tailscale.ACLTest) (string, []string, error) 
 func (r *TestReport) add(assertion AssertionResult) {
 	r.Assertions = append(r.Assertions, assertion)
 	r.Summary.Total++
-	if assertion.Status == AssertionPass {
+	switch assertion.Status {
+	case AssertionPass:
 		r.Summary.Passed++
-	} else {
+	case AssertionIndeterminate:
+		r.Summary.Indeterminate++
+	case AssertionFail:
+		r.Summary.Failed++
+	default:
 		r.Summary.Failed++
 	}
 }
@@ -251,13 +266,22 @@ func evaluateAssertion(
 	if err != nil {
 		return AssertionResult{}, fmt.Errorf("tests[%d].%s[%d]: %w", testIndex, expectation, assertionIndex, err)
 	}
-	allowed, evidence, trace, _, err := policyAllows(policy, source, target)
-	if err != nil {
-		return AssertionResult{}, fmt.Errorf("tests[%d].%s[%d]: %w", testIndex, expectation, assertionIndex, err)
-	}
+	// Native policy tests carry no protocol, so they ask the protocol-agnostic
+	// question. A rule the evaluator cannot decide stays an error here rather
+	// than becoming check's third verdict: an assertion is a pass/fail claim,
+	// and answering it from an incomplete evaluation would be a guess.
+	decision := policyAllows(policy, source, target, ProtocolAny)
+	allowed, evidence, trace := decision.access == AccessAllow, decision.evidence, decision.trace
 
+	// An assertion the evaluator cannot settle is reported as its own status
+	// rather than aborting the run. Discarding the whole report over one
+	// unresolvable rule loses every assertion already computed, and role
+	// autogroups are common enough that it would fire on most real policies.
 	status := AssertionFail
-	if allowed == wantAllowed {
+	switch {
+	case decision.access == AccessIndeterminate:
+		status = AssertionIndeterminate
+	case allowed == wantAllowed:
 		status = AssertionPass
 	}
 	return AssertionResult{
@@ -268,10 +292,19 @@ func evaluateAssertion(
 		Source:      source,
 		Destination: destination,
 		Expected:    accessText(wantAllowed),
-		Actual:      accessText(allowed),
+		Actual:      actualText(decision.access, allowed),
 		Evidence:    evidence,
 		Trace:       trace,
 	}, nil
+}
+
+// actualText reports what the evaluator concluded, keeping accept/deny wording
+// for a settled answer so existing reports read unchanged.
+func actualText(access Access, allowed bool) string {
+	if access == AccessIndeterminate {
+		return string(AccessIndeterminate)
+	}
+	return accessText(allowed)
 }
 
 func accessText(allowed bool) string {
@@ -341,88 +374,149 @@ func splitUnbracketedTarget(value string) (string, string, error) {
 	return host, value[separator+1:], nil
 }
 
+// reachability is the outcome of walking a policy for one query. It carries the
+// three-state verdict plus the rule that decided it: the allowing rule for an
+// allow, or the rule whose unevaluatable condition clouded the answer for an
+// indeterminate.
+type reachability struct {
+	access   Access
+	evidence string
+	trace    []string
+	rule     *RuleReference
+	// gate is the bare reason an indeterminate verdict could not be settled,
+	// kept separate from the rendered evidence so callers can reword it without
+	// parsing prose back out of a sentence.
+	gate string
+}
+
+// ruleOutcome is one rule's contribution. gate is non-empty when the rule
+// matched every condition the evaluator understands and was stopped only by one
+// it cannot decide from the policy file alone.
+type ruleOutcome struct {
+	matched  bool
+	decision string
+	gate     string
+}
+
+// policyAllows walks grants then legacy ACLs. A definite allow short-circuits,
+// because an explicit allow settles the question no matter what else the policy
+// contains. A denial is only reported once every rule has been examined and
+// none was left unresolved — otherwise the answer is indeterminate, since one
+// of the rules passed over might well have allowed the traffic.
 func policyAllows(
 	policy *tailscale.ACL,
 	source string,
 	destination target,
-) (bool, string, []string, *RuleReference, error) {
+	protocol Protocol,
+) reachability {
 	if policy.Grants == nil && policy.ACLs == nil {
-		trace := []string{"implicit default allow: no grants or ACLs section is present"}
-		return true, "implicit default allow policy", trace, nil, nil
+		return reachability{
+			access:   AccessAllow,
+			evidence: "implicit default allow policy",
+			trace:    []string{"implicit default allow: no grants or ACLs section is present"},
+		}
 	}
 	trace := make([]string, 0, len(policy.Grants)+len(policy.ACLs)+1)
-	var unresolved error
+	var gate string
+	var gateRule *RuleReference
+
+	record := func(kind RuleKind, index int, outcome ruleOutcome) *RuleReference {
+		trace = append(trace, fmt.Sprintf("%s %d: %s", kind, index, outcome.decision))
+		reference := &RuleReference{Kind: kind, Index: index}
+		if outcome.gate != "" && gate == "" {
+			gate, gateRule = outcome.gate, reference
+		}
+		return reference
+	}
+
 	for index, grant := range policy.Grants {
-		matched, decision, err := grantAllows(policy, grant, source, destination)
-		if err != nil {
-			trace = append(trace, fmt.Sprintf("grant %d: could not evaluate (%s)", index, err))
-			if unresolved == nil {
-				unresolved = fmt.Errorf("matching grant %d: %w", index, err)
+		outcome := grantAllows(policy, grant, source, destination, protocol)
+		reference := record(RuleGrant, index, outcome)
+		if outcome.matched {
+			return reachability{
+				access:   AccessAllow,
+				evidence: fmt.Sprintf("matched grant %d", index),
+				trace:    trace,
+				rule:     reference,
 			}
-			continue
-		}
-		trace = append(trace, fmt.Sprintf("grant %d: %s", index, decision))
-		if matched {
-			return true, fmt.Sprintf("matched grant %d", index), trace, &RuleReference{
-				Kind:  RuleGrant,
-				Index: index,
-			}, nil
 		}
 	}
-
 	for index, entry := range policy.ACLs {
-		matched, decision, err := aclAllows(policy, entry, source, destination)
-		if err != nil {
-			trace = append(trace, fmt.Sprintf("acl %d: could not evaluate (%s)", index, err))
-			if unresolved == nil {
-				unresolved = fmt.Errorf("matching acl %d: %w", index, err)
+		outcome := aclAllows(policy, entry, source, destination, protocol)
+		reference := record(RuleACL, index, outcome)
+		if outcome.matched {
+			return reachability{
+				access:   AccessAllow,
+				evidence: fmt.Sprintf("matched acl %d", index),
+				trace:    trace,
+				rule:     reference,
 			}
-			continue
 		}
-		trace = append(trace, fmt.Sprintf("acl %d: %s", index, decision))
-		if matched {
-			return true, fmt.Sprintf("matched acl %d", index), trace, &RuleReference{
-				Kind:  RuleACL,
-				Index: index,
-			}, nil
-		}
-	}
-	if unresolved != nil {
-		return false, "", trace, nil, unresolved
 	}
 
+	if gate != "" {
+		return reachability{
+			access:   AccessIndeterminate,
+			evidence: fmt.Sprintf("%s %d %s", gateRule.Kind, gateRule.Index, gate),
+			trace:    trace,
+			rule:     gateRule,
+			gate:     gate,
+		}
+	}
 	trace = append(trace, "default deny: no network grant or ACL matched")
-	return false, "no network grant or ACL matched", trace, nil, nil
+	return reachability{
+		access:   AccessDeny,
+		evidence: "no network grant or ACL matched",
+		trace:    trace,
+	}
 }
 
+// grantAllows checks the conditions the evaluator can decide before the ones it
+// cannot. A grant that fails on destination or port could never have applied,
+// so it is a clean non-match even when its source names an unresolvable
+// autogroup — only a grant that clears every other hurdle clouds the verdict.
 func grantAllows(
 	policy *tailscale.ACL,
 	grant tailscale.Grant,
 	source string,
 	destination target,
-) (bool, string, error) {
-	if !policycore.AnySelectorMatches(grant.Source, source, policy, source) {
-		return false, "source did not match", nil
+	protocol Protocol,
+) ruleOutcome {
+	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, policy, source)
+	if !sourceMatched && sourceGate == "" {
+		return ruleOutcome{decision: "source did not match"}
 	}
-	if !policycore.AnySelectorMatches(grant.Destination, destination.host, policy, source) {
-		return false, "destination did not match", nil
+	destinationMatched, destinationGate := anySelectorMatches(grant.Destination, destination.host, policy, source)
+	if !destinationMatched && destinationGate == "" {
+		return ruleOutcome{decision: "destination did not match"}
 	}
-	if matched, unparseable := grantIPMatches(grant.IP, destination.port); !matched {
-		if unparseable {
-			return false, "network capability could not be parsed", nil
-		}
-		return false, fmt.Sprintf(
-			"network capability did not match port %d",
+	matched, unparseable := grantIPMatches(grant.IP, destination.port, protocol)
+	if !matched && !unparseable {
+		// The port was decidable and did not match, so this grant is ruled out
+		// whatever else on it could not be resolved. This is the narrowing rule.
+		return ruleOutcome{decision: fmt.Sprintf(
+			"network capability did not match port %d%s",
 			destination.port,
-		), nil
+			protocolSuffix(protocol),
+		)}
 	}
-	if len(grant.SrcPosture) != 0 {
-		return false, "", errors.New("uses unsupported srcPosture")
+	gate := firstGate(
+		selectorGate("source", sourceMatched, sourceGate),
+		selectorGate("destination", destinationMatched, destinationGate),
+		postureGate(grant.SrcPosture),
+		viaGate(grant.Via),
+	)
+	if gate != "" {
+		// Reached either because the grant matched but is gated, or because a
+		// malformed capability left the port undecidable. A capability that
+		// could not be parsed cannot rule the grant out, so it must not turn an
+		// unresolved condition into a confident denial.
+		return ruleOutcome{decision: "could not evaluate: " + gate, gate: gate}
 	}
-	if len(grant.Via) != 0 {
-		return false, "", errors.New("uses unsupported via routing")
+	if !matched {
+		return ruleOutcome{decision: "network capability could not be parsed"}
 	}
-	return true, "source, destination, and network capability matched", nil
+	return ruleOutcome{matched: true, decision: "source, destination, and network capability matched"}
 }
 
 func aclAllows(
@@ -430,40 +524,111 @@ func aclAllows(
 	entry tailscale.ACLEntry,
 	source string,
 	destination target,
-) (bool, string, error) {
+	protocol Protocol,
+) ruleOutcome {
 	sources := entry.Source
 	if len(sources) == 0 {
 		sources = entry.Users
 	}
-	if !policycore.AnySelectorMatches(sources, source, policy, source) {
-		return false, "source did not match", nil
+	sourceMatched, sourceGate := anySelectorMatches(sources, source, policy, source)
+	if !sourceMatched && sourceGate == "" {
+		return ruleOutcome{decision: "source did not match"}
 	}
 	if entry.Action != "" && entry.Action != "accept" {
-		return false, fmt.Sprintf("action %q is not accept", entry.Action), nil
+		return ruleOutcome{decision: fmt.Sprintf("action %q is not accept", entry.Action)}
 	}
-	if entry.Protocol != "" && !queryProtocol(entry.Protocol) {
-		return false, fmt.Sprintf("protocol %q did not match", entry.Protocol), nil
+	if entry.Protocol != "" && !capabilityProtocolMatches(entry.Protocol, protocol) {
+		return ruleOutcome{decision: fmt.Sprintf("protocol %q did not match", entry.Protocol)}
 	}
 	destinations := entry.Destination
 	if len(destinations) == 0 {
 		destinations = entry.Ports
 	}
-	if matched, unparseable := aclDestinationMatches(destinations, destination, policy, source); !matched {
-		if unparseable {
-			return false, "destination could not be parsed", nil
+	destinationMatched, unparseable, destinationGate := aclDestinationMatches(
+		destinations, destination, policy, source,
+	)
+	if !destinationMatched && !unparseable && destinationGate == "" {
+		// Decidably not this rule's destination, so it is ruled out regardless
+		// of anything unresolved on its source. This is the narrowing rule.
+		return ruleOutcome{decision: "destination or port did not match"}
+	}
+	gate := firstGate(
+		selectorGate("source", sourceMatched, sourceGate),
+		selectorGate("destination", destinationMatched, destinationGate),
+		postureGate(entry.SourcePosture),
+	)
+	if gate != "" {
+		// See grantAllows: a destination that could not be parsed leaves the
+		// rule undecided, so it must not swallow an unresolved condition.
+		return ruleOutcome{decision: "could not evaluate: " + gate, gate: gate}
+	}
+	if !destinationMatched {
+		return ruleOutcome{decision: "destination could not be parsed"}
+	}
+	return ruleOutcome{matched: true, decision: "source, destination, and port matched"}
+}
+
+// protocolSuffix names the protocol in a trace line only when the query was
+// narrowed to one, so the protocol-agnostic default reads the way it always has.
+func protocolSuffix(protocol Protocol) string {
+	if protocol == ProtocolAny || protocol == "" {
+		return ""
+	}
+	return " for protocol " + string(protocol)
+}
+
+func firstGate(gates ...string) string {
+	for _, gate := range gates {
+		if gate != "" {
+			return gate
 		}
-		return false, "destination or port did not match", nil
 	}
-	if len(entry.SourcePosture) != 0 {
-		return false, "", errors.New("uses unsupported srcPosture")
+	return ""
+}
+
+func selectorGate(field string, matched bool, selector string) string {
+	if matched || selector == "" {
+		return ""
 	}
-	return true, "source, destination, and port matched", nil
+	return fmt.Sprintf("%s selector %q cannot be resolved from the policy file", field, selector)
+}
+
+// postureGate and viaGate keep the wording of the errors these conditions used
+// to raise, so EvaluateTests still reports them exactly as it always has.
+func postureGate(posture []string) string {
+	if len(posture) == 0 {
+		return ""
+	}
+	return "uses unsupported srcPosture"
+}
+
+func viaGate(via []string) string {
+	if len(via) == 0 {
+		return ""
+	}
+	return "uses unsupported via routing"
+}
+
+// anySelectorMatches reports whether any selector matches query, and when none
+// does, the first selector whose meaning the evaluator could not determine.
+//
+// Resolution itself lives in policycore so this tool and tailnet-audit cannot
+// drift on what one policy means; this adapter only reshapes the three-state
+// answer into the (matched, gate) pair the rule walkers consume.
+func anySelectorMatches(
+	selectors []string,
+	query string,
+	policy *tailscale.ACL,
+	source string,
+) (bool, string) {
+	match, unresolved := policycore.AnySelectorMatchesTri(selectors, query, policy, source)
+	return match == policycore.Matched, unresolved
 }
 
 // grantIPMatches reports whether any network capability covers port, and
 // whether one was skipped because its port expression did not parse. See
 // scanRules for why an unparseable element is worth distinguishing.
-func grantIPMatches(capabilities []string, port uint16) (bool, bool) {
+func grantIPMatches(capabilities []string, port uint16, query Protocol) (bool, bool) {
 	unparseable := false
 	for _, capability := range capabilities {
 		if capability == "*" {
@@ -471,6 +636,8 @@ func grantIPMatches(capabilities []string, port uint16) (bool, bool) {
 		}
 		protocol, ports, found := strings.Cut(capability, ":")
 		if !found {
+			// A capability without a protocol is a bare port expression and
+			// applies to every protocol, so narrowing the query cannot exclude it.
 			hit, parsed := portSpecMatches(capability, port)
 			switch {
 			case !parsed:
@@ -480,7 +647,7 @@ func grantIPMatches(capabilities []string, port uint16) (bool, bool) {
 			}
 			continue
 		}
-		if !queryProtocol(protocol) {
+		if !capabilityProtocolMatches(protocol, query) {
 			continue
 		}
 		hit, parsed := portSpecMatches(ports, port)
@@ -502,16 +669,38 @@ func queryProtocol(protocol string) bool {
 		protocol == protocolTCPNumber || protocol == protocolUDPNumber
 }
 
-// aclDestinationMatches reports whether any destination covers query, and
-// whether one was skipped because it did not parse. See scanRules for why an
+// capabilityProtocolMatches reports whether a rule's protocol token can satisfy
+// a query for the given protocol. Both the named and numeric spellings of TCP
+// and UDP are recognized; any other protocol carries no port access and so can
+// never satisfy a port-based question.
+func capabilityProtocolMatches(token string, query Protocol) bool {
+	var named Protocol
+	switch token {
+	case protocolTCP, protocolTCPNumber:
+		named = ProtocolTCP
+	case protocolUDP, protocolUDPNumber:
+		named = ProtocolUDP
+	default:
+		return false
+	}
+	return query == ProtocolAny || query == "" || query == named
+}
+
+// aclDestinationMatches reports whether any destination covers query, whether
+// one was skipped because it did not parse, and the first selector whose
+// meaning the evaluator could not determine. See scanRules for why an
 // unparseable element is worth distinguishing.
+//
+// A legacy destination is one "selector:port" string, so the port is checked
+// first: an entry the port rules out could never have applied, and must stay a
+// clean non-match rather than clouding the verdict with its selector.
 func aclDestinationMatches(
 	destinations []string,
 	query target,
 	policy *tailscale.ACL,
 	source string,
-) (bool, bool) {
-	unparseable := false
+) (bool, bool, string) {
+	unparseable, unresolved := false, ""
 	for _, destination := range destinations {
 		host, ports, ok := splitSelectorPort(destination)
 		if !ok {
@@ -523,11 +712,17 @@ func aclDestinationMatches(
 			unparseable = true
 			continue
 		}
-		if hit && policycore.SelectorMatches(host, query.host, policy, source) {
-			return true, false
+		if !hit {
+			continue
+		}
+		if policycore.SelectorMatches(host, query.host, policy, source) {
+			return true, false, ""
+		}
+		if unresolved == "" && !policycore.AutogroupResolvable(host, query.host) {
+			unresolved = host
 		}
 	}
-	return false, unparseable
+	return false, unparseable, unresolved
 }
 
 func splitSelectorPort(value string) (string, string, bool) {

@@ -4,7 +4,8 @@
 // Output contract (AX conventions, see ../../CLAUDE.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
 // -format json — while logs and errors go to stderr. Exit codes: 0 success,
-// 1 the operation or an assertion failed, 2 usage/input/collection failed.
+// 1 the operation or an assertion failed, 2 usage/input/collection failed, and
+// 10 the question could not be settled from the policy file alone.
 package main
 
 import (
@@ -42,6 +43,10 @@ const (
 	exitOK     = 0
 	exitFailed = 1 // a valid operation or policy assertion failed
 	exitUsage  = 2 // usage, input, credentials, or collection failed
+	// exitIndeterminate is a per-scenario code from the AX scheme's reserved
+	// 10+ range. check uses it for a question the policy file alone cannot
+	// settle, which is neither a denial (exit 1) nor a caller mistake (exit 2).
+	exitIndeterminate = 10
 )
 
 // Result statuses reported in the envelope's "status" field.
@@ -50,8 +55,13 @@ const (
 	statusFailed        = "failed"
 	statusNoChanges     = "no_changes"
 	statusChangesFound  = "changes_found"
+	statusIndeterminate = "indeterminate"
 	verdictReachable    = "reachable"
 	verdictNotReachable = "not reachable"
+	// verdictIndeterminate names the third answer in human output. It reads as
+	// a verdict rather than an error because the policy is well-formed and the
+	// question is well-posed; the fact needed to settle it just is not here.
+	verdictIndeterminate = "indeterminate"
 )
 
 // Command and sub-command names, output formats, and the tool name.
@@ -92,25 +102,31 @@ type options struct {
 // result is the versioned envelope every command returns. Human rendering emits
 // Message (and Diff, when present); JSON rendering emits the whole struct.
 type result struct {
-	SchemaVersion string   `json:"schema_version"`
-	Tool          string   `json:"tool"`
-	Command       string   `json:"command"`
-	Status        string   `json:"status"`
-	Message       string   `json:"message"`
-	File          string   `json:"file,omitempty"`
-	Tailnet       string   `json:"tailnet,omitempty"`
-	ETag          string   `json:"etag,omitempty"`
-	Diff          string   `json:"diff,omitempty"`
-	Changed       *bool    `json:"changed,omitempty"`
-	GrantIndex    *int     `json:"grant_index,omitempty"`
-	ACLIndex      *int     `json:"acl_index,omitempty"`
-	MergedFiles   *int     `json:"merged_files,omitempty"`
-	Allowed       *bool    `json:"allowed,omitempty"`
-	Source        string   `json:"source,omitempty"`
-	Destination   string   `json:"destination,omitempty"`
-	Port          *uint16  `json:"port,omitempty"`
-	Evidence      string   `json:"evidence,omitempty"`
-	Trace         []string `json:"trace,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	Tool          string `json:"tool"`
+	Command       string `json:"command"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	File          string `json:"file,omitempty"`
+	Tailnet       string `json:"tailnet,omitempty"`
+	ETag          string `json:"etag,omitempty"`
+	Diff          string `json:"diff,omitempty"`
+	Changed       *bool  `json:"changed,omitempty"`
+	GrantIndex    *int   `json:"grant_index,omitempty"`
+	ACLIndex      *int   `json:"acl_index,omitempty"`
+	MergedFiles   *int   `json:"merged_files,omitempty"`
+	// Access is the three-state reachability verdict. Allowed is the older
+	// two-state field and is emitted only for a definite answer: an
+	// indeterminate result omits it rather than serializing false, which a
+	// consumer reading just that key would misread as a denial.
+	Access      aclpolicy.Access   `json:"access,omitempty"`
+	Allowed     *bool              `json:"allowed,omitempty"`
+	Source      string             `json:"source,omitempty"`
+	Destination string             `json:"destination,omitempty"`
+	Port        *uint16            `json:"port,omitempty"`
+	Protocol    aclpolicy.Protocol `json:"protocol,omitempty"`
+	Evidence    string             `json:"evidence,omitempty"`
+	Trace       []string           `json:"trace,omitempty"`
 	// Assertions is a pointer so a test run with no declared tests still emits
 	// "assertions": [] rather than dropping the key, while every other command
 	// omits it — the same absent-versus-zero split as Changed and MergedFiles.
@@ -130,6 +146,10 @@ var (
 	errAssertionsFailed   = errors.New("one or more policy assertions failed")
 	errReachabilityDenied = errors.New("policy does not allow the requested reachability")
 	errLintFindings       = errors.New("policy lint found issues at or above the severity threshold")
+	// errReachabilityIndeterminate carries exit 10. It is deliberately not a
+	// usageError: the caller did nothing wrong and the policy is not at fault —
+	// the answer simply is not derivable from a policy file.
+	errReachabilityIndeterminate = errors.New("reachability cannot be determined from the policy file alone")
 )
 
 // usageError marks an error as an invocation problem (exit 2) rather than an
@@ -161,6 +181,8 @@ func exitCode(err error) int {
 	switch {
 	case err == nil, errors.Is(err, flag.ErrHelp):
 		return exitOK
+	case errors.Is(err, errReachabilityIndeterminate):
+		return exitIndeterminate
 	case errors.As(err, &ue):
 		return exitUsage
 	default:
@@ -676,6 +698,9 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 		report.Summary.Passed,
 		report.Summary.Failed,
 	)
+	if report.Summary.Indeterminate != 0 {
+		message += fmt.Sprintf(", %d indeterminate", report.Summary.Indeterminate)
+	}
 	if report.Summary.Total == 0 {
 		message = fmt.Sprintf("no policy tests declared in %s", path)
 	}
@@ -684,15 +709,22 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	res.Assertions = &report.Assertions
 	res.Skipped = report.Skipped
 	res.TestSummary = &report.Summary
+	// A real disagreement outranks an unsettled one: a failing assertion is a
+	// definite finding, so it decides the exit code even when another assertion
+	// could not be evaluated.
 	if report.Summary.Failed != 0 {
 		res.Status = statusFailed
 		return res, errAssertionsFailed
+	}
+	if report.Summary.Indeterminate != 0 {
+		res.Status = statusIndeterminate
+		return res, errReachabilityIndeterminate
 	}
 	return res, nil
 }
 
 func runCheck(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
-	source, target, err := parseCheckArgs(args)
+	source, target, protocol, err := parseCheckArgs(args)
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +736,7 @@ func runCheck(ctx context.Context, opts options, args []string, logger *slog.Log
 		policy,
 		source,
 		target,
-		aclpolicy.ReachabilityOptions{Strict: opts.strict},
+		aclpolicy.ReachabilityOptions{Strict: opts.strict, Protocol: protocol},
 	)
 	if err != nil {
 		return nil, usagef("could not evaluate reachability: %v", err)
@@ -718,48 +750,64 @@ func runCheck(ctx context.Context, opts options, args []string, logger *slog.Log
 	}
 
 	res := newCheckResult(opts.file, decision)
-	if !decision.Allowed {
+	switch decision.Access {
+	case aclpolicy.AccessAllow:
+		return res, nil
+	case aclpolicy.AccessIndeterminate:
+		return res, errReachabilityIndeterminate
+	case aclpolicy.AccessDeny:
+		return res, errReachabilityDenied
+	default:
 		return res, errReachabilityDenied
 	}
-	return res, nil
 }
 
-func parseCheckArgs(args []string) (string, string, error) {
+func parseCheckArgs(args []string) (string, string, aclpolicy.Protocol, error) {
 	fs := flag.NewFlagSet("tail-acl check", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	source := fs.String("src", "", "source user, group, tag, host, IP, or CIDR")
 	destination := fs.String("dst", "", "destination selector, optionally with :port")
 	port := fs.Int("port", -1, "destination port (alternative to including it in --dst)")
+	protocol := fs.String("proto", string(aclpolicy.ProtocolAny), "IP protocol to ask about: tcp|udp|any")
 	if err := fs.Parse(args); err != nil {
-		return "", "", usageError{err}
+		return "", "", "", usageError{err}
 	}
 	if len(fs.Args()) != 0 {
-		return "", "", usagef("unexpected check arguments: %s", strings.Join(fs.Args(), " "))
+		return "", "", "", usagef("unexpected check arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	sourceValue := strings.TrimSpace(*source)
 	destinationValue := strings.TrimSpace(*destination)
 	if sourceValue == "" || destinationValue == "" {
-		return "", "", usagef("check requires --src and --dst")
+		return "", "", "", usagef("check requires --src and --dst")
+	}
+	protocolValue := aclpolicy.Protocol(strings.ToLower(strings.TrimSpace(*protocol)))
+	switch protocolValue {
+	case aclpolicy.ProtocolAny, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP:
+	default:
+		return "", "", "", usagef(
+			"unknown --proto %q; want %s, %s, or %s",
+			*protocol, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP, aclpolicy.ProtocolAny,
+		)
 	}
 	portSet := false
 	fs.Visit(func(f *flag.Flag) {
 		portSet = portSet || f.Name == "port"
 	})
 	if portSet && (*port < 0 || *port > 65535) {
-		return "", "", usagef("--port %d is out of range; want 0-65535", *port)
+		return "", "", "", usagef("--port %d is out of range; want 0-65535", *port)
 	}
 
 	target := destinationValue
 	if portSet {
 		normalizedDestination, err := checkDestinationWithoutPort(destinationValue)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		// Brackets make selectors containing colons (tags and IPv6 addresses)
 		// unambiguous to the shared host:port parser.
 		target = fmt.Sprintf("[%s]:%d", normalizedDestination, *port)
 	}
-	return sourceValue, target, nil
+	return sourceValue, target, protocolValue, nil
 }
 
 func checkDestinationWithoutPort(value string) (string, error) {
@@ -809,11 +857,13 @@ func isDecimal(value string) bool {
 }
 
 func newCheckResult(path string, decision aclpolicy.ReachabilityResult) *result {
-	verdict := verdictNotReachable
-	status := statusFailed
-	if decision.Allowed {
-		verdict = verdictReachable
-		status = statusOK
+	verdict, status := verdictNotReachable, statusFailed
+	switch decision.Access {
+	case aclpolicy.AccessAllow:
+		verdict, status = verdictReachable, statusOK
+	case aclpolicy.AccessIndeterminate:
+		verdict, status = verdictIndeterminate, statusIndeterminate
+	case aclpolicy.AccessDeny:
 	}
 	message := fmt.Sprintf(
 		"%s: %s -> %s:%d (%s)",
@@ -825,7 +875,10 @@ func newCheckResult(path string, decision aclpolicy.ReachabilityResult) *result 
 	)
 	res := newResult(cmdCheck, status, message)
 	res.File = path
-	res.Allowed = &decision.Allowed
+	res.Access = decision.Access
+	res.Protocol = decision.Protocol
+	// Already nil for an indeterminate answer; see aclpolicy.ReachabilityResult.
+	res.Allowed = decision.Allowed
 	res.Source = decision.Source
 	res.Destination = decision.Destination
 	res.Port = &decision.Port
@@ -1022,7 +1075,7 @@ func commandCatalog() []schemaCommand {
 		{
 			cmdCheck,
 			"Answer one reachability question locally",
-			"check --src SRC (--dst DST:PORT | --dst DST --port PORT)",
+			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|any]",
 		},
 		{
 			cmdLint,
@@ -1060,9 +1113,10 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		Commands:      commandCatalog(),
 		LintFindings:  aclpolicy.LintCatalog(),
 		ExitCodes: map[string]string{
-			"0": "success or reachable",
-			"1": "operation or policy assertion failed, or not reachable",
-			"2": "usage, input, or collection error",
+			"0":  "success or reachable",
+			"1":  "operation or policy assertion failed, or not reachable",
+			"2":  "usage, input, or collection error",
+			"10": "indeterminate: check could not settle the question, or test had an unsettleable assertion",
 		},
 	}
 	enc := json.NewEncoder(w)
@@ -1091,6 +1145,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
@@ -1098,7 +1153,11 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "\nExit codes:")
 	fmt.Fprintln(w, "  0  success; check reports reachable")
 	fmt.Fprintln(w, "  1  operation or policy assertion failed; check reports not reachable")
-	fmt.Fprintln(w, "  2  usage, input, or collection error (including a policy check that cannot be evaluated)")
+	fmt.Fprintln(w, "  2  usage, input, or collection error")
+	fmt.Fprintln(w, "  10 indeterminate: a rule would have applied but depends on a fact absent from")
+	fmt.Fprintln(w, "     the policy file (device posture, via routing, or a role autogroup such as")
+	fmt.Fprintln(w, "     autogroup:admin). Not a denial - verify it another way. Also returned by")
+	fmt.Fprintln(w, "     test when an assertion could not be settled.")
 }
 
 type stringListFlag []string
