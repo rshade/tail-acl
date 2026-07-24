@@ -61,6 +61,7 @@ const (
 	cmdGrant    = "grant"
 	cmdTagOwner = "tag-owner"
 	cmdHost     = "host"
+	cmdPosture  = "posture"
 	cmdMerge    = "merge"
 	cmdValidate = "validate"
 	cmdTest     = "test"
@@ -265,6 +266,8 @@ func dispatch(
 		return runTagOwner(opts.file, args[1:])
 	case cmdHost:
 		return runHost(opts.file, args[1:])
+	case cmdPosture:
+		return runPosture(opts.file, args[1:])
 	case cmdMerge:
 		return runMerge(opts.file, args[1:])
 	case cmdValidate:
@@ -364,15 +367,21 @@ func runGrant(path string, args []string) (*result, error) {
 func runGrantAdd(path string, args []string) (*result, error) {
 	fs := flag.NewFlagSet("tail-acl grant add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var source, destination, ip stringListFlag
+	var source, destination, ip, srcPosture stringListFlag
 	fs.Var(&source, "src", "grant source; may be repeated")
 	fs.Var(&destination, "dst", "grant destination; may be repeated")
 	fs.Var(&ip, "ip", "IP protocol and port expression; may be repeated")
+	fs.Var(&srcPosture, "src-posture", "required device posture (posture:NAME); may be repeated")
 	if err := fs.Parse(args); err != nil {
 		return nil, usageError{err}
 	}
 	if len(fs.Args()) != 0 {
 		return nil, usagef("unexpected grant add arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	for _, posture := range srcPosture {
+		if err := aclpolicy.ValidatePostureReference(posture); err != nil {
+			return nil, usageError{err}
+		}
 	}
 	if len(source) == 0 || len(destination) == 0 || len(ip) == 0 {
 		return nil, usagef("grant add requires at least one --src, --dst, and --ip")
@@ -385,6 +394,7 @@ func runGrantAdd(path string, args []string) (*result, error) {
 		Source:      []string(source),
 		Destination: []string(destination),
 		IP:          []string(ip),
+		SrcPosture:  []string(srcPosture),
 	}
 	grantKey, err := aclpolicy.GrantSemanticKey(grant)
 	if err != nil {
@@ -485,6 +495,73 @@ func runHost(path string, args []string) (*result, error) {
 		return nil, err
 	}
 	res := newResult("host set", statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
+	res.File = path
+	return res, nil
+}
+
+func runPosture(path string, args []string) (*result, error) {
+	if len(args) == 0 {
+		return nil, usagef("posture requires set or remove")
+	}
+	switch args[0] {
+	case subSet:
+		return runPostureSet(path, args[1:])
+	case subRemove:
+		return runPostureRemove(path, args[1:])
+	default:
+		return nil, usagef("unknown posture command %q", args[0])
+	}
+}
+
+func runPostureSet(path string, args []string) (*result, error) {
+	if len(args) < 2 { //nolint:mnd // NAME and at least one EXPR required
+		return nil, usagef("usage: tail-acl posture set NAME EXPR [EXPR ...]")
+	}
+	name, exprs := args[0], args[1:]
+	canonical, err := aclpolicy.NormalizePostureName(name)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	if policy.Postures == nil {
+		policy.Postures = make(map[string][]string)
+	}
+	policy.Postures[canonical] = slices.Clone(exprs)
+	if err = aclpolicy.Write(path, policy); err != nil {
+		return nil, err
+	}
+	res := newResult("posture set", statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
+	res.File = path
+	return res, nil
+}
+
+func runPostureRemove(path string, args []string) (*result, error) {
+	if len(args) != 1 {
+		return nil, usagef("usage: tail-acl posture remove NAME")
+	}
+	canonical, err := aclpolicy.NormalizePostureName(args[0])
+	if err != nil {
+		return nil, usageError{err}
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := policy.Postures[canonical]; !ok {
+		res := newResult("posture remove", statusNoChanges,
+			fmt.Sprintf("posture %s not present in %s", canonical, path))
+		res.File = path
+		return res, nil
+	}
+	delete(policy.Postures, canonical)
+	if err = aclpolicy.Write(path, policy); err != nil {
+		return nil, err
+	}
+	res := newResult("posture remove", statusOK,
+		fmt.Sprintf("removed posture %s from %s", canonical, path))
 	res.File = path
 	return res, nil
 }
@@ -929,10 +1006,16 @@ type schemaCommand struct {
 // usage() and the -schema document so a human and an agent see the same set.
 func commandCatalog() []schemaCommand {
 	return []schemaCommand{
-		{"grant add", "Append a grant to the policy", "grant add --src SRC --dst DST --ip PROTO:PORT"},
+		{
+			"grant add",
+			"Append a grant to the policy",
+			"grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME]",
+		},
 		{"grant remove", "Remove a grant by zero-based index", "grant remove --index N"},
 		{"tag-owner add", "Add an owner to a tag", "tag-owner add TAG OWNER"},
 		{"host set", "Set a host alias to an address", "host set NAME ADDRESS"},
+		{"posture set", "Add or replace a posture's expression list", "posture set NAME EXPR [EXPR ...]"},
+		{"posture remove", "Remove a posture definition", "posture remove NAME"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{cmdTest, "Run the policy's native tests locally (-strict to reject unparseable rules)", cmdTest},
@@ -1001,6 +1084,9 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fs.PrintDefaults()
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
+	fmt.Fprintln(w, "  tail-acl --file acl.json posture set posture:labCompliant \"custom:labCompliant == true\"")
+	//nolint:golines // example line needs to be intact
+	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")

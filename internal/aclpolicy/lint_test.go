@@ -265,6 +265,39 @@ func TestLintSeverityHelpers(t *testing.T) {
 	}
 }
 
+// TestEvaluateLintDoesNotFlagSrcPostureOrPostures is a scope-boundary guard: a
+// grant's srcPosture naming an undeclared posture, and a postures entry
+// referenced by no grant, must produce zero lint findings. Dangling/unused
+// posture validation is issue #17's job, not this issue's — see the plan's
+// Risks section. This must fail loudly if a future change wires
+// postures/srcPosture into undefinedReferenceReason or the unused-definition
+// checks prematurely.
+func TestEvaluateLintDoesNotFlagSrcPostureOrPostures(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"group:dev"}},
+		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
+		Postures: map[string][]string{
+			"posture:unused": {"custom:unused == true"},
+		},
+		Grants: []tailscale.Grant{
+			{
+				Source:      []string{"group:dev"},
+				Destination: []string{"tag:web:443"},
+				IP:          []string{"tcp:443"},
+				SrcPosture:  []string{"posture:undeclared"},
+			},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Total != 0 {
+		t.Errorf("findings = %#v, want none (srcPosture/postures are out of lint's scope)", report.Findings)
+	}
+}
+
 func countByID(report aclpolicy.LintReport, id string) int {
 	return len(findingsByID(report, id))
 }

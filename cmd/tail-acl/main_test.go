@@ -32,6 +32,7 @@ func TestTypedPolicyEdits(t *testing.T) {
 		// Adding the same owner is idempotent.
 		{"--file", path, "tag-owner", "add", "tag:web", "autogroup:admin"},
 		{"--file", path, "host", "set", "web", "100.64.0.10"},
+		{"--file", path, "posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
 	}
 	for _, command := range commands {
 		if err := run(
@@ -64,6 +65,10 @@ func TestTypedPolicyEdits(t *testing.T) {
 	if policy.Hosts["web"] != "100.64.0.10" {
 		t.Errorf("Hosts[web] = %q", policy.Hosts["web"])
 	}
+	postures := policy.Postures["posture:labCompliant"]
+	if len(postures) != 1 || postures[0] != "custom:labCompliant == true" {
+		t.Errorf("Postures[posture:labCompliant] = %#v", postures)
+	}
 
 	if err = run(
 		context.Background(),
@@ -82,6 +87,25 @@ func TestTypedPolicyEdits(t *testing.T) {
 	}
 	if len(policy.Grants) != 0 {
 		t.Errorf("Grants after remove = %#v", policy.Grants)
+	}
+
+	if err = run(
+		context.Background(),
+		[]string{"--file", path, "posture", "remove", "posture:labCompliant"},
+		getenv,
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("posture remove: %v", err)
+	}
+	policy, err = aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Postures) != 0 {
+		t.Errorf("Postures after remove = %#v", policy.Postures)
 	}
 }
 
@@ -130,6 +154,8 @@ func TestTypedEditsRejectHuJSONWithoutChangingIt(t *testing.T) {
 		{"grant", "remove", "--index", "0"},
 		{"tag-owner", "add", "tag:web", "autogroup:admin"},
 		{"host", "set", "web", "100.64.0.10"},
+		{"posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
+		{"posture", "remove", "posture:labCompliant"},
 	}
 	const original = "{\n\t// operational documentation must survive\n\t\"grants\": [],\n}\n"
 	for _, command := range commands {
@@ -206,6 +232,369 @@ func TestGrantRemoveRejectsInvalidIndex(t *testing.T) {
 	}
 }
 
+func TestPostureSetAutoPrefixesBareName(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{}`)
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "posture", "set", "labCompliant", "custom:labCompliant == true"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postures := policy.Postures["posture:labCompliant"]
+	if len(postures) != 1 || postures[0] != "custom:labCompliant == true" {
+		t.Errorf("Postures[posture:labCompliant] = %#v", postures)
+	}
+}
+
+func TestPostureSetRejectsInvalidName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"wrong prefix tag", "tag:web"},
+		{"wrong prefix group", "group:x"},
+		{"prefix alone with no name", "posture:"},
+		{"empty name", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.json")
+			writeTestPolicy(t, path, `{}`)
+
+			err := run(
+				context.Background(),
+				[]string{"--file", path, "posture", "set", tc.input, "custom:x == true"},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+			// "posture name" is common to every NormalizePostureName error message;
+			// this pins the failure to name validation, not to "posture" being an
+			// unrecognized top-level command.
+			if err == nil || !strings.Contains(err.Error(), "posture name") {
+				t.Errorf("error = %v, want a posture name validation error", err)
+			}
+
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != "{}" {
+				t.Errorf("file changed: %s", got)
+			}
+		})
+	}
+}
+
+func TestPostureSetRequiresAtLeastOneExpr(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{}`)
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "posture", "set", "posture:labCompliant"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "usage: tail-acl posture set NAME EXPR [EXPR ...]") {
+		t.Errorf("error = %v, want the posture set usage string", err)
+	}
+}
+
+func TestPostureSetReplacesExpressionList(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"postures": {"posture:labCompliant": ["old == true"]}}`)
+
+	err := run(
+		context.Background(),
+		[]string{
+			"--file", path, "posture", "set", "posture:labCompliant",
+			"new == true", "also == true",
+		},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"new == true", "also == true"}
+	got := policy.Postures["posture:labCompliant"]
+	if !slices.Equal(got, want) {
+		t.Errorf("Postures[posture:labCompliant] = %#v, want %#v", got, want)
+	}
+}
+
+func TestPostureRemoveIsIdempotent(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{}`)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 2 {
+		var stdout strings.Builder
+		runErr := run(
+			context.Background(),
+			[]string{"-format", "json", "--file", path, "posture", "remove", "posture:missing"},
+			func(string) string { return "" },
+			http.DefaultClient,
+			"",
+			&stdout,
+			io.Discard,
+		)
+		if runErr != nil {
+			t.Fatalf("run #%d: %v", i, runErr)
+		}
+		var res result
+		if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+			t.Fatalf("run #%d stdout is not valid JSON: %v\n%s", i, err, stdout.String())
+		}
+		if res.Status != statusNoChanges {
+			t.Errorf("run #%d status = %q, want %q", i, res.Status, statusNoChanges)
+		}
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("file changed across no-op removes:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestPostureRemoveDropsKeyWhenPosturesBecomesEmpty(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"postures": {"posture:labCompliant": ["x == true"]}}`)
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "posture", "remove", "posture:labCompliant"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "postures") {
+		t.Errorf("file still mentions postures after the last entry was removed: %s", got)
+	}
+}
+
+func TestGrantAddPopulatesSrcPosture(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{}`)
+
+	err := run(
+		context.Background(),
+		[]string{
+			"--file", path, "grant", "add",
+			"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+			"--src-posture", "posture:labCompliant", "--src-posture", "posture:otherReq",
+		},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Grants) != 1 {
+		t.Fatalf("Grants = %#v", policy.Grants)
+	}
+	got := slices.Clone(policy.Grants[0].SrcPosture)
+	slices.Sort(got)
+	want := []string{"posture:labCompliant", "posture:otherReq"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Grants[0].SrcPosture = %#v, want %#v (order-insensitive)", policy.Grants[0].SrcPosture, want)
+	}
+}
+
+func TestGrantAddSrcPostureParticipatesInIdentity(t *testing.T) {
+	t.Parallel()
+
+	t.Run("identical src-posture set dedupes", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.json")
+		writeTestPolicy(t, path, `{}`)
+		commands := [][]string{
+			{
+				"--file", path, "grant", "add",
+				"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+				"--src-posture", "posture:labCompliant",
+			},
+			{
+				"--file", path, "grant", "add",
+				"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+				"--src-posture", "posture:labCompliant",
+			},
+		}
+		for _, command := range commands {
+			if err := run(
+				context.Background(), command, func(string) string { return "" },
+				http.DefaultClient, "", io.Discard, io.Discard,
+			); err != nil {
+				t.Fatalf("run(%q): %v", command, err)
+			}
+		}
+		policy, err := aclpolicy.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.Grants) != 1 {
+			t.Errorf("Grants = %#v, want one deduplicated grant", policy.Grants)
+		}
+	})
+
+	t.Run("differing src-posture is a distinct grant", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.json")
+		writeTestPolicy(t, path, `{}`)
+		commands := [][]string{
+			{
+				"--file", path, "grant", "add",
+				"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+				"--src-posture", "posture:a",
+			},
+			{
+				"--file", path, "grant", "add",
+				"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+				"--src-posture", "posture:b",
+			},
+		}
+		for _, command := range commands {
+			if err := run(
+				context.Background(), command, func(string) string { return "" },
+				http.DefaultClient, "", io.Discard, io.Discard,
+			); err != nil {
+				t.Fatalf("run(%q): %v", command, err)
+			}
+		}
+		policy, err := aclpolicy.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.Grants) != 2 {
+			t.Errorf("Grants = %#v, want two distinct grants", policy.Grants)
+		}
+	})
+}
+
+// TestGrantAddRejectsMalformedSrcPosture checks the --src-posture shape check.
+// An empty-string --src-posture is deliberately not a table row here:
+// stringListFlag.Set itself rejects it ("value cannot be empty") one layer
+// earlier, before ValidatePostureReference ever sees it — the same exit-2
+// outcome via a different code path, so it would be a near-duplicate of these
+// cases rather than a meaningfully different one.
+func TestGrantAddRejectsMalformedSrcPosture(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+	}{
+		// Bare "labCompliant" is the deliberate asymmetry case: --src-posture
+		// never auto-prefixes a bare name the way "posture set" does, so it
+		// must be rejected rather than silently prefixed.
+		{"bare name is rejected, not auto-prefixed", "labCompliant"},
+		{"wrong prefix", "tag:web"},
+		{"prefix alone with no name", "posture:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.json")
+			writeTestPolicy(t, path, `{}`)
+
+			err := run(
+				context.Background(),
+				[]string{
+					"--file", path, "grant", "add",
+					"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+					"--src-posture", tc.value,
+				},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+			// "posture reference" is unique to ValidatePostureReference's error
+			// message; this pins the failure to the --src-posture shape check, not
+			// to --src-posture being an unrecognized flag.
+			if err == nil || !strings.Contains(err.Error(), "posture reference") {
+				t.Errorf("error = %v, want a posture reference validation error", err)
+			}
+
+			policy, loadErr := aclpolicy.Load(path)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if len(policy.Grants) != 0 {
+				t.Errorf("Grants = %#v, want no grant added", policy.Grants)
+			}
+		})
+	}
+}
+
 func TestMergeUsesSharedHuJSONMerge(t *testing.T) {
 	t.Parallel()
 	dir1 := t.TempDir()
@@ -236,6 +625,64 @@ func TestMergeUsesSharedHuJSONMerge(t *testing.T) {
 	}
 	if len(policy.Grants) != 2 || policy.Grants[0].Source[0] != "one" || policy.Grants[1].Source[0] != "two" {
 		t.Fatalf("merged Grants = %#v", policy.Grants)
+	}
+}
+
+// TestMergeRoundTripsPostureAndSrcPostureGrant authors a postures block and a
+// srcPosture grant through the CLI verbs this issue adds, then confirms merge
+// carries both through into the compiled policy — the workflow the issue's
+// Problem Statement describes.
+func TestMergeRoundTripsPostureAndSrcPostureGrant(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fragment := filepath.Join(dir, "posture.acl.json")
+	writeTestPolicy(t, fragment, `{}`)
+
+	commands := [][]string{
+		{"--file", fragment, "posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
+		{
+			"--file", fragment, "grant", "add",
+			"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+			"--src-posture", "posture:labCompliant",
+		},
+	}
+	for _, command := range commands {
+		if err := run(
+			context.Background(), command, func(string) string { return "" },
+			http.DefaultClient, "", io.Discard, io.Discard,
+		); err != nil {
+			t.Fatalf("run(%q): %v", command, err)
+		}
+	}
+
+	out := filepath.Join(t.TempDir(), "acl.json")
+	err := run(
+		context.Background(),
+		[]string{"--file", out, "merge", "--dir", dir},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := aclpolicy.Load(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postures := policy.Postures["posture:labCompliant"]
+	if len(postures) != 1 || postures[0] != "custom:labCompliant == true" {
+		t.Errorf("merged Postures[posture:labCompliant] = %#v", postures)
+	}
+	if len(policy.Grants) != 1 {
+		t.Fatalf("merged Grants = %#v", policy.Grants)
+	}
+	srcPosture := policy.Grants[0].SrcPosture
+	if len(srcPosture) != 1 || srcPosture[0] != "posture:labCompliant" {
+		t.Errorf("merged Grants[0].SrcPosture = %#v", srcPosture)
 	}
 }
 
@@ -873,6 +1320,7 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"check          Answer one reachability question locally",
+		"posture set    Add or replace a posture's expression list",
 		"check --src alice@example.com --dst tag:web:443",
 		"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
 		"# static policy hygiene findings",
@@ -925,6 +1373,15 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdLint }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdLint)
+	}
+	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == "posture set" }) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, "posture set")
+	}
+	if !slices.ContainsFunc(
+		doc.Commands,
+		func(command schemaCommand) bool { return command.Name == "posture remove" },
+	) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, "posture remove")
 	}
 }
 

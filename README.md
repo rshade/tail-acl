@@ -35,6 +35,9 @@ tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp
 tail-acl --file acl.json grant remove --index 0
 tail-acl --file acl.json tag-owner add tag:web autogroup:admin
 tail-acl --file acl.json host set web 100.64.0.10
+tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
+tail-acl --file acl.json posture remove posture:labCompliant
+tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
 
 # Compile commented HuJSON sources into one strict-JSON policy:
 tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
@@ -69,10 +72,12 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 | Command | Purpose |
 | --- | --- |
-| `grant add` | Append a grant (`--src`, `--dst`, `--ip`; repeatable, order-insensitive, idempotent) |
+| `grant add` | Append a grant (`--src`, `--dst`, `--ip`; `--src-posture` optional; repeatable, order-insensitive, idempotent) |
 | `grant remove` | Remove a grant by zero-based `--index` |
 | `tag-owner add` | Add an owner to a tag |
 | `host set` | Set a host alias to an address |
+| `posture set` | Add or replace a posture's expression list |
+| `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules) |
@@ -105,6 +110,24 @@ target so HuJSON comments and formatting survive. `merge` has two paths:
 calls `Standardize()` and strips comments, which is why compiled output is
 comment-free strict JSON. `plan` validates the candidate server-side before
 diffing, so a broken policy fails the plan rather than the upload.
+
+### Posture authoring: deliberate prefix asymmetry
+
+`posture set` and `posture remove` accept a posture name in two forms: an
+explicit `posture:NAME` or a bare `NAME`, both of which resolve to the canonical
+`posture:NAME` in the policy. A different selector prefix (`tag:`, `group:`,
+etc.) or an empty name is a usage error (exit 2). By contrast, `grant add
+--src-posture` requires the explicit `posture:` prefix and does not auto-complete
+a bare name — a bare `labCompliant` is rejected (exit 2), not silently treated as
+`posture:labCompliant`.
+
+This asymmetry is deliberate: `posture set`/`remove` are *declarations* where the
+subcommand itself establishes the postures namespace, so a bare name is
+unambiguous; `--src-posture` is a *reference* sitting alongside other
+fully-qualified selector flags (`--src`, `--dst`), where the prefix carries
+meaning and silently inventing one would hide a typo. Authoring does not validate
+that a referenced posture is actually defined — that dangling-reference check is
+`tail-acl lint`'s job (issue #17), not authoring's.
 
 `test` is a pure evaluator over the candidate file's network-level grants and
 legacy ACLs. Each `accept` or `deny` destination becomes one stable assertion
