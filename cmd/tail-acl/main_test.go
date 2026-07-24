@@ -793,7 +793,10 @@ func TestCheckUsageErrorsAreExitTwo(t *testing.T) {
 		{"missing source", []string{"--dst", "tag:web:443"}},
 		{"missing inline port", []string{"--src", "alice@example.com", "--dst", "tag:web"}},
 		{"inline and separate ports", []string{"--src", "alice@example.com", "--dst", "tag:web:443", "--port", "443"}},
-		{"out of range inline and separate ports", []string{"--src", "alice@example.com", "--dst", "web:65536", "--port", "443"}},
+		{
+			"out of range inline and separate ports",
+			[]string{"--src", "alice@example.com", "--dst", "web:65536", "--port", "443"},
+		},
 		{"bare IPv6 without brackets", []string{"--src", "alice@example.com", "--dst", "2001:db8::1"}},
 		{"malformed unbracketed IPv6", []string{"--src", "alice@example.com", "--dst", "2001:db8::gg:443"}},
 		{"port too large", []string{"--src", "alice@example.com", "--dst", "tag:web", "--port", "65536"}},

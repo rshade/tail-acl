@@ -292,37 +292,53 @@ func parseTarget(value string) (target, error) {
 		return target{}, errors.New("destination is empty")
 	}
 
-	var host, portText string
-	if strings.HasPrefix(value, "[") {
-		closing := strings.LastIndex(value, "]:")
-		if closing <= 1 {
-			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
-		}
-		host, portText = value[1:closing], value[closing+2:]
-		if strings.ContainsAny(host, "[]") {
-			return target{}, fmt.Errorf("destination %q has malformed brackets", value)
-		}
-	} else {
-		if strings.ContainsAny(value, "[]") {
-			return target{}, fmt.Errorf("destination %q has malformed brackets", value)
-		}
-		if address, err := netip.ParseAddr(value); err == nil && address.Is6() {
-			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
-		}
-		separator := strings.LastIndexByte(value, ':')
-		if separator <= 0 || separator == len(value)-1 {
-			return target{}, fmt.Errorf("destination %q must have host:port syntax", value)
-		}
-		host, portText = value[:separator], value[separator+1:]
-		if strings.Count(host, ":") > 1 {
-			return target{}, fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
-		}
+	host, portText, err := splitTarget(value)
+	if err != nil {
+		return target{}, err
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
 		return target{}, fmt.Errorf("destination %q has invalid port: %w", value, err)
 	}
 	return target{host: host, port: uint16(port)}, nil
+}
+
+func splitTarget(value string) (string, string, error) {
+	if strings.HasPrefix(value, "[") {
+		return splitBracketedTarget(value)
+	}
+
+	return splitUnbracketedTarget(value)
+}
+
+func splitBracketedTarget(value string) (string, string, error) {
+	closing := strings.LastIndex(value, "]:")
+	if closing <= 1 {
+		return "", "", fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
+	}
+	host := value[1:closing]
+	if strings.ContainsAny(host, "[]") {
+		return "", "", fmt.Errorf("destination %q has malformed brackets", value)
+	}
+	return host, value[closing+2:], nil
+}
+
+func splitUnbracketedTarget(value string) (string, string, error) {
+	if strings.ContainsAny(value, "[]") {
+		return "", "", fmt.Errorf("destination %q has malformed brackets", value)
+	}
+	if address, err := netip.ParseAddr(value); err == nil && address.Is6() {
+		return "", "", fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
+	}
+	separator := strings.LastIndexByte(value, ':')
+	if separator <= 0 || separator == len(value)-1 {
+		return "", "", fmt.Errorf("destination %q must have host:port syntax", value)
+	}
+	host := value[:separator]
+	if strings.Count(host, ":") > 1 {
+		return "", "", fmt.Errorf("destination %q must use [ipv6]:port syntax", value)
+	}
+	return host, value[separator+1:], nil
 }
 
 func policyAllows(

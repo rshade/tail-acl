@@ -181,53 +181,9 @@ func TestEvaluateReachabilityUnsupportedRule(t *testing.T) {
 func TestEvaluateReachabilityStrictRejectsMalformedRule(t *testing.T) {
 	t.Parallel()
 	for _, capability := range []string{"tcp:https", "65536", "80-70", "80,abc"} {
-		capability := capability
 		t.Run(capability, func(t *testing.T) {
 			t.Parallel()
-			policy := &tailscale.ACL{Grants: []tailscale.Grant{{
-				Source:      []string{"alice@example.com"},
-				Destination: []string{"tag:web"},
-				IP:          []string{capability},
-			}}}
-			decision, err := aclpolicy.EvaluateReachability(
-				policy,
-				"alice@example.com",
-				"tag:web:443",
-				aclpolicy.ReachabilityOptions{},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(decision.Skipped) != 1 ||
-				decision.Skipped[0].Rule != "grants[0].ip[0]" ||
-				decision.Skipped[0].Value != capability {
-				t.Fatalf("Skipped = %#v, want malformed capability %q", decision.Skipped, capability)
-			}
-			if decision.Allowed ||
-				!strings.Contains(strings.Join(decision.Trace, "\n"), "network capability could not be parsed") {
-				t.Errorf("decision = %#v, want a denied verdict that identifies the parse failure", decision)
-			}
-			report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(report.Skipped) != 1 || report.Skipped[0].Value != capability {
-				t.Errorf("test Skipped = %#v, want malformed capability %q", report.Skipped, capability)
-			}
-
-			_, err = aclpolicy.EvaluateReachability(
-				policy,
-				"alice@example.com",
-				"tag:web:443",
-				aclpolicy.ReachabilityOptions{Strict: true},
-			)
-			if err == nil || !strings.Contains(err.Error(), "grants[0].ip[0]") {
-				t.Fatalf("reachability error = %v, want malformed grant location", err)
-			}
-			_, err = aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{Strict: true})
-			if err == nil || !strings.Contains(err.Error(), "grants[0].ip[0]") {
-				t.Fatalf("test error = %v, want malformed grant location", err)
-			}
+			assertMalformedCapabilityHandling(t, capability)
 		})
 	}
 }
@@ -251,7 +207,6 @@ func TestAutogroupInternetRequiresEntireCIDRToBePublic(t *testing.T) {
 		{"[8000::/1]:443", false},
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.destination, func(t *testing.T) {
 			t.Parallel()
 			decision, err := aclpolicy.EvaluateReachability(
@@ -265,6 +220,75 @@ func TestAutogroupInternetRequiresEntireCIDRToBePublic(t *testing.T) {
 			}
 			if decision.Allowed != testCase.wantAllowed {
 				t.Errorf("Allowed = %t, want %t (%#v)", decision.Allowed, testCase.wantAllowed, decision)
+			}
+		})
+	}
+}
+
+func TestEvaluateReachabilityAcceptsTargetSyntax(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name            string
+		value           string
+		wantDestination string
+		wantPort        uint16
+	}{
+		{"hostname", "web:443", "web", 443},
+		{"tag", "tag:web:443", "tag:web", 443},
+		{"IPv4 address", "100.64.0.1:22", "100.64.0.1", 22},
+		{"bracketed IPv6 address", "[2001:db8::1]:443", "2001:db8::1", 443},
+		{"bracketed IPv6 prefix", "[2001:db8::/32]:443", "2001:db8::/32", 443},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			decision, err := aclpolicy.EvaluateReachability(
+				&tailscale.ACL{},
+				"alice@example.com",
+				testCase.value,
+				aclpolicy.ReachabilityOptions{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Destination != testCase.wantDestination || decision.Port != testCase.wantPort {
+				t.Errorf(
+					"destination = %q:%d, want %q:%d",
+					decision.Destination,
+					decision.Port,
+					testCase.wantDestination,
+					testCase.wantPort,
+				)
+			}
+		})
+	}
+}
+
+func TestEvaluateReachabilityRejectsInvalidTargetSyntax(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name      string
+		value     string
+		wantError string
+	}{
+		{"empty", "", "destination is empty"},
+		{"missing port", "web", "must have host:port syntax"},
+		{"bare IPv6 address", "2001:db8::1", "must use [ipv6]:port syntax"},
+		{"missing IPv6 port", "[2001:db8::1]", "must use [ipv6]:port syntax"},
+		{"malformed brackets", "web]:443", "has malformed brackets"},
+		{"port out of range", "web:65536", "has invalid port"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := aclpolicy.EvaluateReachability(
+				&tailscale.ACL{},
+				"alice@example.com",
+				testCase.value,
+				aclpolicy.ReachabilityOptions{},
+			)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("error = %v, want containing %q", err, testCase.wantError)
 			}
 		})
 	}
@@ -295,6 +319,54 @@ func TestEvaluateTestsMissingSection(t *testing.T) {
 	}
 	if report.Summary != (aclpolicy.TestSummary{}) || report.Assertions == nil || len(report.Assertions) != 0 {
 		t.Errorf("report = %#v, want an empty initialized report", report)
+	}
+}
+
+func assertMalformedCapabilityHandling(t *testing.T, capability string) {
+	t.Helper()
+	policy := &tailscale.ACL{Grants: []tailscale.Grant{{
+		Source:      []string{"alice@example.com"},
+		Destination: []string{"tag:web"},
+		IP:          []string{capability},
+	}}}
+	decision, err := aclpolicy.EvaluateReachability(
+		policy,
+		"alice@example.com",
+		"tag:web:443",
+		aclpolicy.ReachabilityOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decision.Skipped) != 1 ||
+		decision.Skipped[0].Rule != "grants[0].ip[0]" ||
+		decision.Skipped[0].Value != capability {
+		t.Fatalf("Skipped = %#v, want malformed capability %q", decision.Skipped, capability)
+	}
+	if decision.Allowed ||
+		!strings.Contains(strings.Join(decision.Trace, "\n"), "network capability could not be parsed") {
+		t.Errorf("decision = %#v, want a denied verdict that identifies the parse failure", decision)
+	}
+	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Value != capability {
+		t.Errorf("test Skipped = %#v, want malformed capability %q", report.Skipped, capability)
+	}
+
+	_, err = aclpolicy.EvaluateReachability(
+		policy,
+		"alice@example.com",
+		"tag:web:443",
+		aclpolicy.ReachabilityOptions{Strict: true},
+	)
+	if err == nil || !strings.Contains(err.Error(), "grants[0].ip[0]") {
+		t.Fatalf("reachability error = %v, want malformed grant location", err)
+	}
+	_, err = aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{Strict: true})
+	if err == nil || !strings.Contains(err.Error(), "grants[0].ip[0]") {
+		t.Fatalf("test error = %v, want malformed grant location", err)
 	}
 }
 
