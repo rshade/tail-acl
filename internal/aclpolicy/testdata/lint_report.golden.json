@@ -1,0 +1,128 @@
+{
+  "findings": [
+    {
+      "id": "undefined-reference",
+      "severity": "error",
+      "rule": "acls[0].src[0]",
+      "value": "group:missing2",
+      "evidence": "group:missing2 is not defined in groups",
+      "remediation": "define group:missing2, or correct the reference",
+      "trace": [
+        "acls[0].src[0] references group:missing2",
+        "group:missing2 is not defined in groups"
+      ]
+    },
+    {
+      "id": "dst-tag-no-owner",
+      "severity": "error",
+      "rule": "grants[1].dst[0]",
+      "value": "tag:noowner",
+      "evidence": "destination tag tag:noowner has no entry in tagOwners, so no node can carry it",
+      "remediation": "add a tagOwners entry for tag:noowner, or remove the destination",
+      "trace": [
+        "grants[1].dst[0] destination tag tag:noowner",
+        "tag:noowner is not declared in tagOwners"
+      ]
+    },
+    {
+      "id": "undefined-reference",
+      "severity": "error",
+      "rule": "grants[1].src[0]",
+      "value": "group:missing",
+      "evidence": "group:missing is not defined in groups",
+      "remediation": "define group:missing, or correct the reference",
+      "trace": [
+        "grants[1].src[0] references group:missing",
+        "group:missing is not defined in groups"
+      ]
+    },
+    {
+      "id": "overbroad-wildcard",
+      "severity": "warn",
+      "rule": "grants[2]",
+      "value": "src=*, dst=*",
+      "evidence": "grant lets any source reach any destination (src and dst are both *)",
+      "remediation": "restrict the source or destination, or pass -wildcard off if this is intended",
+      "trace": [
+        "grants[2] source contains *",
+        "grants[2] destination contains *",
+        "any source may reach any destination"
+      ]
+    },
+    {
+      "id": "duplicate-grant",
+      "severity": "warn",
+      "rule": "grants[3]",
+      "evidence": "grant 3 is identical to grant 0",
+      "remediation": "remove the duplicate grant",
+      "trace": [
+        "grants[3] canonicalizes to the same selectors as grants[0]"
+      ]
+    },
+    {
+      "id": "undefined-reference",
+      "severity": "error",
+      "rule": "grants[5].dst[0]",
+      "value": "typo-host",
+      "evidence": "typo-host is not defined in hosts",
+      "remediation": "define typo-host, or correct the reference",
+      "trace": [
+        "grants[5].dst[0] references typo-host",
+        "typo-host is not defined in hosts"
+      ]
+    },
+    {
+      "id": "grant-empty",
+      "severity": "warn",
+      "rule": "grants[6]",
+      "evidence": "grant can never match: dst is empty",
+      "remediation": "populate the empty selector list, or remove the grant",
+      "trace": [
+        "grants[6] dst is empty",
+        "a grant with an empty required selector list matches no traffic"
+      ]
+    },
+    {
+      "id": "unused-group",
+      "severity": "info",
+      "rule": "groups[group:unused]",
+      "value": "group:unused",
+      "evidence": "group group:unused is defined but no rule references it",
+      "remediation": "reference group:unused, or remove the definition",
+      "trace": [
+        "group group:unused is defined in groups",
+        "no grant, acl, group, tagOwner, or test references group:unused"
+      ]
+    },
+    {
+      "id": "unused-host",
+      "severity": "info",
+      "rule": "hosts[legacy]",
+      "value": "legacy",
+      "evidence": "host legacy is defined but no rule references it",
+      "remediation": "reference legacy, or remove the definition",
+      "trace": [
+        "host legacy is defined in hosts",
+        "no grant, acl, group, tagOwner, or test references legacy"
+      ]
+    },
+    {
+      "id": "unused-tag",
+      "severity": "info",
+      "rule": "tagOwners[tag:orphan]",
+      "value": "tag:orphan",
+      "evidence": "tag tag:orphan is defined but no rule references it",
+      "remediation": "reference tag:orphan, or remove the definition",
+      "trace": [
+        "tag tag:orphan is defined in tagOwners",
+        "no grant, acl, group, tagOwner, or test references tag:orphan"
+      ]
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "error": 4,
+    "warn": 3,
+    "info": 3
+  }
+}

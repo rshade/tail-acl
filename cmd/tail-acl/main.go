@@ -1,5 +1,5 @@
 // Command tail-acl makes typed edits to a Tailscale policy file and can merge,
-// validate, test, check, plan, or upload it with Tailscale's policy-file API.
+// validate, test, check, lint, plan, or upload it with Tailscale's policy-file API.
 //
 // Output contract (AX conventions, see ../../CLAUDE.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
@@ -65,6 +65,7 @@ const (
 	cmdValidate = "validate"
 	cmdTest     = "test"
 	cmdCheck    = "check"
+	cmdLint     = "lint"
 	cmdPlan     = "plan"
 	cmdUpload   = "upload"
 
@@ -117,11 +118,17 @@ type result struct {
 	// and a plain omitempty slice is right here.
 	Skipped     []aclpolicy.RuleSkip   `json:"skipped,omitempty"`
 	TestSummary *aclpolicy.TestSummary `json:"test_summary,omitempty"`
+	// Findings is a pointer for the same reason as Assertions: a lint run with a
+	// clean policy still emits "findings": [] rather than dropping the key, while
+	// every other command omits it.
+	Findings    *[]aclpolicy.LintFinding `json:"findings,omitempty"`
+	LintSummary *aclpolicy.LintSummary   `json:"lint_summary,omitempty"`
 }
 
 var (
 	errAssertionsFailed   = errors.New("one or more policy assertions failed")
 	errReachabilityDenied = errors.New("policy does not allow the requested reachability")
+	errLintFindings       = errors.New("policy lint found issues at or above the severity threshold")
 )
 
 // usageError marks an error as an invocation problem (exit 2) rather than an
@@ -266,6 +273,8 @@ func dispatch(
 		return runTest(ctx, opts, args[1:], logger)
 	case cmdCheck:
 		return runCheck(ctx, opts, args[1:], logger)
+	case cmdLint:
+		return runLint(ctx, opts, args[1:], logger)
 	case cmdPlan:
 		return runPlan(ctx, opts, httpClient, apiURL, args[1:])
 	case cmdUpload:
@@ -316,6 +325,24 @@ func render(w io.Writer, format string, res *result) error {
 			}
 		}
 	}
+	if res.Findings != nil {
+		for _, finding := range *res.Findings {
+			locator := finding.Rule
+			if finding.Value != "" {
+				locator = finding.Rule + " " + finding.Value
+			}
+			if _, err := fmt.Fprintf(
+				w,
+				"%s %s %s: %s\n",
+				strings.ToUpper(string(finding.Severity)),
+				finding.ID,
+				locator,
+				finding.Evidence,
+			); err != nil {
+				return err
+			}
+		}
+	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
 	return err
 }
@@ -359,12 +386,12 @@ func runGrantAdd(path string, args []string) (*result, error) {
 		Destination: []string(destination),
 		IP:          []string(ip),
 	}
-	grantKey, err := grantSemanticKey(grant)
+	grantKey, err := aclpolicy.GrantSemanticKey(grant)
 	if err != nil {
 		return nil, err
 	}
 	for i := range policy.Grants {
-		existingKey, keyErr := grantSemanticKey(policy.Grants[i])
+		existingKey, keyErr := aclpolicy.GrantSemanticKey(policy.Grants[i])
 		if keyErr != nil {
 			return nil, keyErr
 		}
@@ -412,33 +439,6 @@ func grantResult(command, status, message, path string, index int) *result {
 	res.File = path
 	res.GrantIndex = &index
 	return res
-}
-
-// grantSemanticKey treats grant selector lists as sets, so repeated add
-// commands remain idempotent even when their flags are supplied in a different
-// order. JSON encoding also treats omitted and explicitly empty optional fields
-// alike through the Grant type's omitempty tags.
-func grantSemanticKey(grant tailscale.Grant) (string, error) {
-	grant.Source = sortedStrings(grant.Source)
-	grant.Destination = sortedStrings(grant.Destination)
-	grant.IP = sortedStrings(grant.IP)
-	grant.SrcPosture = sortedStrings(grant.SrcPosture)
-	grant.Via = sortedStrings(grant.Via)
-
-	encoded, err := json.Marshal(grant)
-	if err != nil {
-		return "", fmt.Errorf("canonicalizing grant: %w", err)
-	}
-	return string(encoded), nil
-}
-
-func sortedStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	result := slices.Clone(values)
-	slices.Sort(result)
-	return result
 }
 
 func runTagOwner(path string, args []string) (*result, error) {
@@ -767,6 +767,76 @@ func newCheckResult(path string, decision aclpolicy.ReachabilityResult) *result 
 	return res
 }
 
+func runLint(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
+	lintOpts, threshold, err := parseLintArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := aclpolicy.Load(opts.file)
+	if err != nil {
+		return nil, usagef("could not load policy for lint: %v", err)
+	}
+	report, err := aclpolicy.EvaluateLint(policy, lintOpts)
+	if err != nil {
+		return nil, usagef("could not lint policy: %v", err)
+	}
+	for _, finding := range report.Findings {
+		for _, decision := range finding.Trace {
+			logger.DebugContext(ctx, "lint decision",
+				"finding", finding.ID, "rule", finding.Rule, "decision", decision)
+		}
+	}
+
+	res := newLintResult(opts.file, report)
+	if report.CountAtLeast(threshold) > 0 {
+		res.Status = statusFailed
+		return res, errLintFindings
+	}
+	return res, nil
+}
+
+func parseLintArgs(args []string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
+	fs := flag.NewFlagSet("tail-acl lint", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	severity := fs.String("severity", string(aclpolicy.LintWarn),
+		"minimum finding severity that sets a non-zero exit: info|warn|error")
+	wildcard := fs.String("wildcard", string(aclpolicy.WildcardAnyToAny),
+		"over-broad wildcard policy: any-to-any|any|off")
+	if err := fs.Parse(args); err != nil {
+		return aclpolicy.LintOptions{}, "", usageError{err}
+	}
+	if len(fs.Args()) != 0 {
+		return aclpolicy.LintOptions{}, "", usagef("unexpected lint arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	threshold, ok := aclpolicy.ParseLintSeverity(*severity)
+	if !ok {
+		return aclpolicy.LintOptions{}, "", usagef("unknown -severity %q; want info, warn, or error", *severity)
+	}
+	wildcardPolicy, ok := aclpolicy.ParseWildcardPolicy(*wildcard)
+	if !ok {
+		return aclpolicy.LintOptions{}, "", usagef("unknown -wildcard %q; want any-to-any, any, or off", *wildcard)
+	}
+	return aclpolicy.LintOptions{Wildcard: wildcardPolicy}, threshold, nil
+}
+
+func newLintResult(path string, report aclpolicy.LintReport) *result {
+	message := fmt.Sprintf(
+		"%d findings: %d error, %d warn, %d info",
+		report.Summary.Total,
+		report.Summary.Error,
+		report.Summary.Warn,
+		report.Summary.Info,
+	)
+	if report.Summary.Total == 0 {
+		message = fmt.Sprintf("no policy hygiene findings in %s", path)
+	}
+	res := newResult(cmdLint, statusOK, message)
+	res.File = path
+	res.Findings = &report.Findings
+	res.LintSummary = &report.Summary
+	return res
+}
+
 func runPlan(
 	ctx context.Context,
 	opts options,
@@ -871,6 +941,11 @@ func commandCatalog() []schemaCommand {
 			"Answer one reachability question locally",
 			"check --src SRC (--dst DST:PORT | --dst DST --port PORT)",
 		},
+		{
+			cmdLint,
+			"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
+			"lint [-severity info|warn|error] [-wildcard any-to-any|any|off]",
+		},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
 		{cmdUpload, "Upload the policy to the tailnet", cmdUpload},
 	}
@@ -885,20 +960,22 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		flags = append(flags, schemaFlag{Name: f.Name, Usage: f.Usage, Default: f.DefValue})
 	})
 	doc := struct {
-		Name          string            `json:"name"`
-		Version       string            `json:"version"`
-		SchemaVersion string            `json:"schema_version"`
-		Description   string            `json:"description"`
-		Flags         []schemaFlag      `json:"flags"`
-		Commands      []schemaCommand   `json:"commands"`
-		ExitCodes     map[string]string `json:"exit_codes"`
+		Name          string                `json:"name"`
+		Version       string                `json:"version"`
+		SchemaVersion string                `json:"schema_version"`
+		Description   string                `json:"description"`
+		Flags         []schemaFlag          `json:"flags"`
+		Commands      []schemaCommand       `json:"commands"`
+		LintFindings  []aclpolicy.LintCheck `json:"lint_findings"`
+		ExitCodes     map[string]string     `json:"exit_codes"`
 	}{
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, check, plan, or upload it.",
+		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, check, lint, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
+		LintFindings:  aclpolicy.LintCatalog(),
 		ExitCodes: map[string]string{
 			"0": "success or reachable",
 			"1": "operation or policy assertion failed, or not reachable",
@@ -911,7 +988,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *flag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, check, plan, and upload a Tailscale ACL policy.")
+	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, check, lint, plan, and upload a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
 	fmt.Fprintln(w, "with -format json); logs and errors go to stderr.")
@@ -928,6 +1005,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")

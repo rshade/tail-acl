@@ -874,6 +874,8 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	for _, want := range []string{
 		"check          Answer one reachability question locally",
 		"check --src alice@example.com --dst tag:web:443",
+		"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
+		"# static policy hygiene findings",
 		"0  success; check reports reachable",
 		"1  operation or policy assertion failed; check reports not reachable",
 		"2  usage, input, or collection error (including a policy check that cannot be evaluated)",
@@ -899,9 +901,10 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Name      string            `json:"name"`
-		Commands  []schemaCommand   `json:"commands"`
-		ExitCodes map[string]string `json:"exit_codes"`
+		Name         string                `json:"name"`
+		Commands     []schemaCommand       `json:"commands"`
+		LintFindings []aclpolicy.LintCheck `json:"lint_findings"`
+		ExitCodes    map[string]string     `json:"exit_codes"`
 	}
 	if err := json.Unmarshal([]byte(stdout.String()), &doc); err != nil {
 		t.Fatalf("schema is not valid JSON: %v\n%s", err, stdout.String())
@@ -909,11 +912,19 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	if doc.Name != "tail-acl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
 		t.Errorf("schema = %#v", doc)
 	}
+	if !slices.ContainsFunc(doc.LintFindings, func(check aclpolicy.LintCheck) bool {
+		return check.ID == aclpolicy.LintUndefinedReference
+	}) {
+		t.Errorf("schema lint_findings = %#v, want the finding catalog", doc.LintFindings)
+	}
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdTest }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdTest)
 	}
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdCheck }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdCheck)
+	}
+	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdLint }) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdLint)
 	}
 }
 
@@ -1076,6 +1087,233 @@ func TestValidateRequiresCredentials(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitUsage {
 		t.Errorf("exit code = %d, want %d", code, exitUsage)
+	}
+}
+
+func TestLintHumanOutputAndExitCodes(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name       string
+		policy     string
+		wantCode   int
+		wantOutput []string
+	}{
+		{
+			name: "clean policy",
+			policy: `{
+				"groups": {"group:dev": ["alice@example.com"]},
+				"tagOwners": {"tag:web": ["group:dev"]},
+				"grants": [{"src": ["group:dev"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]
+			}`,
+			wantCode:   exitOK,
+			wantOutput: []string{"tail-acl: no policy hygiene findings"},
+		},
+		{
+			name:     "errors present",
+			policy:   `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`,
+			wantCode: exitFailed,
+			wantOutput: []string{
+				"ERROR dst-tag-no-owner grants[0].dst[0] tag:web",
+				"ERROR undefined-reference grants[0].src[0] group:missing",
+				"tail-acl: 2 findings: 2 error, 0 warn, 0 info",
+			},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, testCase.policy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{"--file", path, cmdLint},
+				func(string) string { return "" },
+				nil, // lint is offline and must not need an HTTP client.
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+			for _, want := range testCase.wantOutput {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want quiet", stderr.String())
+			}
+		})
+	}
+}
+
+func TestLintJSONEnvelope(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, cmdLint},
+		func(string) string { return "" },
+		nil,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.SchemaVersion != schemaVersion || res.Command != cmdLint || res.Status != statusFailed {
+		t.Errorf("envelope = %#v", res)
+	}
+	if res.Findings == nil || len(*res.Findings) != 2 {
+		t.Fatalf("Findings = %#v, want two", res.Findings)
+	}
+	if res.LintSummary == nil || res.LintSummary.Error != 2 || res.LintSummary.Total != 2 {
+		t.Errorf("LintSummary = %#v", res.LintSummary)
+	}
+	for _, finding := range *res.Findings {
+		if finding.ID == "" || finding.Severity == "" || finding.Rule == "" || len(finding.Trace) == 0 {
+			t.Errorf("finding missing required fields: %#v", finding)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
+func TestLintVerboseTraceGoesToStderr(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-verbose", "--file", path, cmdLint},
+		func(string) string { return "" },
+		nil,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+	if !strings.Contains(stdout.String(), "undefined-reference") {
+		t.Errorf("stdout = %q, want the finding", stdout.String())
+	}
+	for _, want := range []string{"lint decision", "undefined-reference"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
+// TestLintFlags pins the two configurable behaviors: the -severity exit
+// threshold and the -wildcard policy.
+func TestLintFlags(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name     string
+		policy   string
+		args     []string
+		wantCode int
+	}{
+		{
+			name:     "info under default warn threshold exits zero",
+			policy:   `{"groups": {"group:dev": ["alice@example.com"]}, "tagOwners": {"tag:orphan": ["group:dev"]}}`,
+			args:     nil,
+			wantCode: exitOK,
+		},
+		{
+			name:     "severity info promotes info to a failure",
+			policy:   `{"groups": {"group:dev": ["alice@example.com"]}, "tagOwners": {"tag:orphan": ["group:dev"]}}`,
+			args:     []string{"-severity", "info"},
+			wantCode: exitFailed,
+		},
+		{
+			name:     "any-to-any wildcard warns by default",
+			policy:   `{"grants": [{"src": ["*"], "dst": ["*:443"], "ip": ["tcp:443"]}]}`,
+			args:     nil,
+			wantCode: exitFailed,
+		},
+		{
+			name:     "wildcard off suppresses the wildcard finding",
+			policy:   `{"grants": [{"src": ["*"], "dst": ["*:443"], "ip": ["tcp:443"]}]}`,
+			args:     []string{"-wildcard", "off"},
+			wantCode: exitOK,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, testCase.policy)
+			err := run(
+				context.Background(),
+				append([]string{"--file", path, cmdLint}, testCase.args...),
+				func(string) string { return "" },
+				nil,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Errorf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+		})
+	}
+}
+
+func TestLintCollectionFailureIsExitTwo(t *testing.T) {
+	t.Parallel()
+	err := run(
+		context.Background(),
+		[]string{"--file", filepath.Join(t.TempDir(), "missing.hujson"), cmdLint},
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+}
+
+func TestLintUsageErrorsAreExitTwo(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	for _, args := range [][]string{
+		{"-severity", "bogus"},
+		{"-wildcard", "bogus"},
+		{"unexpected-arg"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+			err := run(
+				context.Background(),
+				append([]string{"--file", path, cmdLint}, args...),
+				func(string) string { return "" },
+				nil,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+		})
 	}
 }
 

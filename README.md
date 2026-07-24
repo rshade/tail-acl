@@ -1,10 +1,11 @@
 # tail-acl
 
-Compile, validate, test, check, plan, and upload a Tailscale ACL policy. `tail-acl` makes
-typed edits to a policy file, deep-merges commented HuJSON sources into one
-strict-JSON policy, runs its native network assertions and ad-hoc reachability
-checks locally, and talks to Tailscale's policy-file API to validate a candidate,
-diff it against the live tailnet, or upload it.
+Compile, validate, test, check, lint, plan, and upload a Tailscale ACL policy.
+`tail-acl` makes typed edits to a policy file, deep-merges commented HuJSON
+sources into one strict-JSON policy, runs its native network assertions,
+ad-hoc reachability checks, and static hygiene lints locally, and talks to
+Tailscale's policy-file API to validate a candidate, diff it against the live
+tailnet, or upload it.
 
 > **Module** `github.com/rshade/tailscale-utils/tail-acl`. Conforms to the AX
 > conventions in [`../CLAUDE.md`](../CLAUDE.md#ax-conventions-the-shared-standard):
@@ -48,6 +49,11 @@ tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:w
 tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
 tail-acl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
 
+# Statically lint policy hygiene (no credentials or network):
+tail-acl --file acl/acl.generated.json lint
+tail-acl --file acl/acl.generated.json lint -severity error   # only fail on errors
+tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
+
 # Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
@@ -71,6 +77,7 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` is also accepted) |
+| `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
 
@@ -84,8 +91,8 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 ### Exit codes
 
-- `0` success; all policy assertions passed; `check` reports reachable
-- `1` operation or policy assertion failed; `check` reports not reachable
+- `0` success; all policy assertions passed; `check` reports reachable; `lint` found nothing at or above the threshold
+- `1` operation or policy assertion failed; `check` reports not reachable; `lint` found issues at or above the threshold
 - `2` usage, input, or collection error (including a local policy decision that cannot be evaluated)
 
 ## Design
@@ -145,6 +152,37 @@ either returns exit `2` rather than guessing. Use Tailscale's credentialed
 [ACL preview API](https://tailscale.com/docs/reference/trust-credentials) or
 server-side `validate` when those live control-plane semantics are required;
 `check` never silently falls back to the network.
+
+### `lint`: static policy hygiene
+
+`valid` is not `healthy`: a policy can pass validation while carrying grants
+that match nothing, destination tags no one owns, references to tags/groups
+that were renamed away, or an over-broad `*` that grants more than intended.
+`lint` is a pure pass over the loaded policy — no credentials, no network — that
+reports these as findings, each with a stable id, severity, a locator (e.g.
+`grants[2].dst[0]`), evidence, a remediation hint, and a decision trace.
+
+| Finding | Severity | Fires when |
+| --- | --- | --- |
+| `undefined-reference` | error | a `src`/`dst` names a `group:`/`tag:`/`ipset:`/host alias that is not defined |
+| `dst-tag-no-owner` | error | a destination `tag:` has no `tagOwners` entry, so no node can carry it |
+| `overbroad-wildcard` | warn | an over-broad `*` (see `-wildcard`) |
+| `grant-empty` | warn | a grant has an empty required selector list and can never match |
+| `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
+| `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule |
+
+`-severity info|warn|error` (default `warn`) sets the lowest severity that makes
+the run exit `1`; below it the finding is still reported but the run exits `0`.
+`-wildcard any-to-any|any|off` (default `any-to-any`) tunes the wildcard check:
+`any-to-any` flags only a grant whose `src` and `dst` are both `*` (a standalone
+`*` is common and allowed), `any` flags every `*`, and `off` disables it.
+Autogroups are treated as defined by their `autogroup:` prefix alone, so a new
+autogroup Tailscale ships never false-positives as an undefined reference.
+
+Lint is deliberately **node-blind**: whether a tag is carried by a real device
+is a control-plane coverage question that belongs to `tailnet-audit`, not here.
+The discriminator is "does the finding need the live device inventory?" — if
+yes, it is not a `lint` finding.
 
 ## License
 
