@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
+
+	"github.com/rshade/tailscale-utils/policycore"
 )
 
 // AssertionStatus is the machine-readable outcome of one policy assertion.
@@ -383,10 +385,10 @@ func grantAllows(
 	source string,
 	destination target,
 ) (bool, string, error) {
-	if !anySelectorMatches(grant.Source, source, policy, source) {
+	if !policycore.AnySelectorMatches(grant.Source, source, policy, source) {
 		return false, "source did not match", nil
 	}
-	if !anySelectorMatches(grant.Destination, destination.host, policy, source) {
+	if !policycore.AnySelectorMatches(grant.Destination, destination.host, policy, source) {
 		return false, "destination did not match", nil
 	}
 	if matched, unparseable := grantIPMatches(grant.IP, destination.port); !matched {
@@ -417,7 +419,7 @@ func aclAllows(
 	if len(sources) == 0 {
 		sources = entry.Users
 	}
-	if !anySelectorMatches(sources, source, policy, source) {
+	if !policycore.AnySelectorMatches(sources, source, policy, source) {
 		return false, "source did not match", nil
 	}
 	if entry.Action != "" && entry.Action != "accept" {
@@ -440,192 +442,6 @@ func aclAllows(
 		return false, "", errors.New("uses unsupported srcPosture")
 	}
 	return true, "source, destination, and port matched", nil
-}
-
-func anySelectorMatches(selectors []string, query string, policy *tailscale.ACL, source string) bool {
-	for _, selector := range selectors {
-		if selectorMatches(selector, query, policy, source, make(map[string]bool)) {
-			return true
-		}
-	}
-	return false
-}
-
-func selectorMatches(
-	selector, query string,
-	policy *tailscale.ACL,
-	source string,
-	seenGroups map[string]bool,
-) bool {
-	if directSelectorMatches(selector, query, policy, source) {
-		return true
-	}
-	if groupSelectorMatches(selector, query, policy, source, seenGroups) {
-		return true
-	}
-	return addressSelectorsMatch(selector, query, policy)
-}
-
-func directSelectorMatches(selector, query string, policy *tailscale.ACL, source string) bool {
-	return selector == "*" || selector == query ||
-		(selector == "autogroup:self" && query == source && looksLikeUser(query)) ||
-		((selector == "autogroup:member" || selector == "autogroup:members") && looksLikeUser(query)) ||
-		(selector == "autogroup:internet" && isPublicAddress(query, policy))
-}
-
-func groupSelectorMatches(
-	selector, query string,
-	policy *tailscale.ACL,
-	source string,
-	seenGroups map[string]bool,
-) bool {
-	members, ok := policy.Groups[selector]
-	if !ok || seenGroups[selector] {
-		return false
-	}
-	seenGroups[selector] = true
-	defer delete(seenGroups, selector)
-	for _, member := range members {
-		if selectorMatches(member, query, policy, source, seenGroups) {
-			return true
-		}
-	}
-	return false
-}
-
-func addressSelectorsMatch(selector, query string, policy *tailscale.ACL) bool {
-	selectorValues := expandAddressSelector(selector, policy)
-	queryValues := expandAddressSelector(query, policy)
-	for _, selectorValue := range selectorValues {
-		for _, queryValue := range queryValues {
-			if selectorValue == "autogroup:internet" && isPublicAddress(queryValue, policy) {
-				return true
-			}
-			if addressContains(selectorValue, queryValue) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func looksLikeUser(selector string) bool {
-	return strings.Contains(selector, "@") && !strings.HasPrefix(selector, "group:")
-}
-
-func expandAddressSelector(selector string, policy *tailscale.ACL) []string {
-	return expandAddressSelectorSeen(selector, policy, make(map[string]bool))
-}
-
-func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[string]bool) []string {
-	if seen[selector] {
-		return nil
-	}
-	if address, ok := policy.Hosts[selector]; ok {
-		seen[selector] = true
-		defer delete(seen, selector)
-		return expandAddressSelectorSeen(address, policy, seen)
-	}
-	if values, ok := policy.IPSets[selector]; ok {
-		seen[selector] = true
-		defer delete(seen, selector)
-		expanded := make([]string, 0, len(values))
-		for _, value := range values {
-			expanded = append(expanded, expandAddressSelectorSeen(value, policy, seen)...)
-		}
-		return expanded
-	}
-	return []string{selector}
-}
-
-func addressContains(selector, query string) bool {
-	selectorPrefix, selectorErr := netip.ParsePrefix(selector)
-	queryPrefix, queryPrefixErr := netip.ParsePrefix(query)
-	if selectorErr == nil && queryPrefixErr == nil {
-		return selectorPrefix.Bits() <= queryPrefix.Bits() && selectorPrefix.Contains(queryPrefix.Addr())
-	}
-	queryAddress, queryErr := netip.ParseAddr(strings.Trim(query, "[]"))
-	if selectorErr == nil && queryErr == nil {
-		return selectorPrefix.Contains(queryAddress)
-	}
-	selectorAddress, selectorAddressErr := netip.ParseAddr(strings.Trim(selector, "[]"))
-	if selectorAddressErr == nil && queryPrefixErr == nil {
-		return queryPrefix.Bits() == queryPrefix.Addr().BitLen() && queryPrefix.Contains(selectorAddress)
-	}
-	return selectorAddressErr == nil && queryErr == nil && selectorAddress == queryAddress
-}
-
-func isPublicAddress(selector string, policy *tailscale.ACL) bool {
-	for _, value := range expandAddressSelector(selector, policy) {
-		if prefix, err := netip.ParsePrefix(value); err == nil {
-			if publicPrefix(prefix) {
-				return true
-			}
-			continue
-		}
-		address, err := netip.ParseAddr(strings.Trim(value, "[]"))
-		if err == nil && publicAddress(address) {
-			return true
-		}
-	}
-	return false
-}
-
-func publicAddress(address netip.Addr) bool {
-	return address.IsGlobalUnicast() && !address.IsPrivate() && !isTailscaleAddress(address)
-}
-
-// publicPrefix applies publicAddress to the whole range without enumerating
-// it. The exclusion lists mirror netip's non-global-unicast and private ranges
-// and add Tailscale's CGNAT range.
-func publicPrefix(prefix netip.Prefix) bool {
-	prefix = prefix.Masked()
-	if prefix.Addr().Is4In6() {
-		if prefix.Bits() < 96 {
-			return false
-		}
-		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
-	}
-
-	var nonPublic []netip.Prefix
-	if prefix.Addr().Is4() {
-		nonPublic = nonPublicIPv4Prefixes
-	} else {
-		nonPublic = nonPublicIPv6Prefixes
-	}
-	for _, excluded := range nonPublic {
-		if prefix.Overlaps(excluded) {
-			return false
-		}
-	}
-	return true
-}
-
-var (
-	nonPublicIPv4Prefixes = []netip.Prefix{
-		netip.MustParsePrefix("0.0.0.0/32"),
-		netip.MustParsePrefix("10.0.0.0/8"),
-		netip.MustParsePrefix("100.64.0.0/10"),
-		netip.MustParsePrefix("127.0.0.0/8"),
-		netip.MustParsePrefix("169.254.0.0/16"),
-		netip.MustParsePrefix("172.16.0.0/12"),
-		netip.MustParsePrefix("192.168.0.0/16"),
-		netip.MustParsePrefix("224.0.0.0/4"),
-		netip.MustParsePrefix("255.255.255.255/32"),
-	}
-	nonPublicIPv6Prefixes = []netip.Prefix{
-		netip.MustParsePrefix("::/128"),
-		netip.MustParsePrefix("::1/128"),
-		netip.MustParsePrefix("fc00::/7"),
-		netip.MustParsePrefix("fe80::/10"),
-		netip.MustParsePrefix("ff00::/8"),
-	}
-)
-
-func isTailscaleAddress(address netip.Addr) bool {
-	tailscaleIPv4 := netip.MustParsePrefix("100.64.0.0/10")
-	tailscaleIPv6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
-	return tailscaleIPv4.Contains(address) || tailscaleIPv6.Contains(address)
 }
 
 // grantIPMatches reports whether any network capability covers port, and
@@ -691,7 +507,7 @@ func aclDestinationMatches(
 			unparseable = true
 			continue
 		}
-		if hit && selectorMatches(host, query.host, policy, source, make(map[string]bool)) {
+		if hit && policycore.SelectorMatches(host, query.host, policy, source) {
 			return true, false
 		}
 	}
