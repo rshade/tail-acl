@@ -11,7 +11,10 @@ worse than duplicated code, so the logic lives here rather than in each tool.
 
 In scope — resolving a selector to the values it names:
 
-- `*`, `autogroup:self`, `autogroup:member`, `autogroup:internet`
+- `*` and the full autogroup vocabulary, split into role autogroups (resolved
+  from the tailnet's user roster) and autogroups resolved from the policy
+  document alone — `autogroupSpecFor` in `autogroup.go` is the single,
+  authoritative enumeration; this README does not restate it
 - `tag:` and user selectors
 - `group:` expansion, including nesting, with a cycle guard
 - `Hosts` and `IPSets` expansion, with a cycle guard
@@ -25,8 +28,25 @@ Out of scope — kept in `tail-acl`:
 
 ## Usage
 
+A `Matcher` carries the policy plus the live tailnet facts the policy document
+cannot supply:
+
 ```go
-matched := policycore.AnySelectorMatches(rule.Source, "tag:web", policy, "")
+matcher := policycore.Matcher{Policy: policy}
+matched := matcher.AnyMatches(rule.Source, "tag:web", "")
+```
+
+A caller that has read the tailnet's user roster supplies it, which is what lets
+the role autogroups resolve:
+
+```go
+matcher := policycore.Matcher{Policy: policy, Roles: roles, HaveRoles: true}
+```
+
+A caller with no tailnet access uses the roster-blind entry point instead:
+
+```go
+matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, "")
 ```
 
 ## Module layout

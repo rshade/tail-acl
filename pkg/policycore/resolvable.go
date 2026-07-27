@@ -81,31 +81,11 @@ func AutogroupResolvable(selector, query string) bool {
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true
 	}
-	switch selector {
-	case autogroupDangerAll:
-		// Matches every device, so there is nothing to look up.
-		return true
-	case autogroupInternet:
-		// Decided by address arithmetic on the query alone.
-		return true
-	case autogroupSelf:
-		return classifyQuery(query) == queryUser
-	case autogroupMember, autogroupMembers, autogroupTagged:
-		// A user is a member and is never tagged; a tag is the converse. A bare
-		// device address is neither until the control plane says whose it is.
-		return classifyQuery(query) != queryDevice
-	case autogroupAdmin, autogroupOwner, autogroupBillingAdmin, autogroupITAdmin,
-		autogroupNetworkAdmin, autogroupAuditor:
-		// A tagged device has no user owner, so a tag refutes a role autogroup
-		// with certainty. Anything else needs the control plane's role map.
-		return classifyQuery(query) == queryTag
-	default:
-		// autogroup:shared, and any autogroup added to Tailscale after this
-		// release. Shared membership is about devices reaching in from another
-		// tailnet rather than roles held by users, so a tag refutes nothing
-		// about it; an unknown autogroup is refutable against nothing at all.
+	spec, ok := autogroupSpecFor(selector)
+	if !ok {
 		return false
 	}
+	return spec.settles(classifyQuery(query))
 }
 
 // KnownAutogroup reports whether selector is an autogroup whose membership this
@@ -118,13 +98,8 @@ func AutogroupResolvable(selector, query string) bool {
 // offline fact confirms them. Use AutogroupResolvable when a query is in hand —
 // a known autogroup can still be undecidable against a given query.
 func KnownAutogroup(selector string) bool {
-	switch selector {
-	case autogroupSelf, autogroupMember, autogroupMembers,
-		autogroupTagged, autogroupInternet, autogroupDangerAll:
-		return true
-	default:
-		return false
-	}
+	spec, ok := autogroupSpecFor(selector)
+	return ok && spec.matches != nil
 }
 
 // SelectorMatchesTri resolves one selector against query, reporting

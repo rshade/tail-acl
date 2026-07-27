@@ -80,26 +80,27 @@ func TestSelectorMatches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := policycore.SelectorMatches(tt.selector, tt.query, policy, tt.source)
+			matcher := policycore.Matcher{Policy: policy}
+			got := matcher.Matches(tt.selector, tt.query, tt.source)
 			if got != tt.want {
-				t.Errorf("SelectorMatches(%q, %q) = %v; want %v", tt.selector, tt.query, got, tt.want)
+				t.Errorf("Matches(%q, %q) = %v; want %v", tt.selector, tt.query, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestAnySelectorMatches(t *testing.T) {
+func TestAnyMatches(t *testing.T) {
 	t.Parallel()
 
-	policy := &tailscale.ACL{}
-	if !policycore.AnySelectorMatches([]string{"tag:db", "tag:web"}, "tag:web", policy, "") {
-		t.Error("AnySelectorMatches: want true when one selector matches")
+	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	if !matcher.AnyMatches([]string{"tag:db", "tag:web"}, "tag:web", "") {
+		t.Error("AnyMatches: want true when one selector matches")
 	}
-	if policycore.AnySelectorMatches([]string{"tag:db"}, "tag:web", policy, "") {
-		t.Error("AnySelectorMatches: want false when no selector matches")
+	if matcher.AnyMatches([]string{"tag:db"}, "tag:web", "") {
+		t.Error("AnyMatches: want false when no selector matches")
 	}
-	if policycore.AnySelectorMatches(nil, "tag:web", policy, "") {
-		t.Error("AnySelectorMatches(nil): want false")
+	if matcher.AnyMatches(nil, "tag:web", "") {
+		t.Error("AnyMatches(nil): want false")
 	}
 }
 
@@ -123,5 +124,182 @@ func TestLooksLikeUser(t *testing.T) {
 				t.Errorf("LooksLikeUser(%q) = %v; want %v", tt.value, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatcherResolvesRoleAutogroups(t *testing.T) {
+	t.Parallel()
+
+	roles := map[string]tailscale.UserRole{
+		"ada@example.com":  tailscale.UserRoleAdmin,
+		"root@example.com": tailscale.UserRoleOwner,
+		"nic@example.com":  tailscale.UserRoleNetworkAdmin,
+		"ida@example.com":  tailscale.UserRoleITAdmin,
+		"bil@example.com":  tailscale.UserRoleBillingAdmin,
+		"aud@example.com":  tailscale.UserRoleAuditor,
+		"joe@example.com":  tailscale.UserRoleMember,
+	}
+	matcher := policycore.Matcher{Policy: &tailscale.ACL{}, Roles: roles, HaveRoles: true}
+	tests := []struct {
+		name     string
+		selector string
+		query    string
+		want     bool
+	}{
+		{name: "admin matches admin", selector: "autogroup:admin", query: "ada@example.com", want: true},
+		{name: "admin ignores member", selector: "autogroup:admin", query: "joe@example.com", want: false},
+		{name: "admin is not owner", selector: "autogroup:admin", query: "root@example.com", want: false},
+		{name: "owner is not admin", selector: "autogroup:owner", query: "ada@example.com", want: false},
+		{name: "owner matches owner", selector: "autogroup:owner", query: "root@example.com", want: true},
+		{name: "network admin", selector: "autogroup:network-admin", query: "nic@example.com", want: true},
+		{name: "it admin", selector: "autogroup:it-admin", query: "ida@example.com", want: true},
+		{name: "billing admin", selector: "autogroup:billing-admin", query: "bil@example.com", want: true},
+		{name: "auditor", selector: "autogroup:auditor", query: "aud@example.com", want: true},
+		{name: "login case is ignored", selector: "autogroup:admin", query: "ADA@Example.com", want: true},
+		{name: "unknown login", selector: "autogroup:admin", query: "eve@example.com", want: false},
+		{name: "tag never matches a role", selector: "autogroup:admin", query: "tag:web", want: false},
+		{name: "address never matches a role", selector: "autogroup:admin", query: "100.64.0.1", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := matcher.Matches(tt.selector, tt.query, tt.query); got != tt.want {
+				t.Errorf("Matches(%q, %q) = %v; want %v", tt.selector, tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatcherWithoutRolesResolvesNoRoleAutogroup(t *testing.T) {
+	t.Parallel()
+
+	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	for _, selector := range roleAutogroupSelectors() {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if matcher.Matches(selector, "ada@example.com", "ada@example.com") {
+				t.Errorf("Matches(%q) = true with no role data; want false", selector)
+			}
+			if matcher.Recognized(selector) {
+				t.Errorf("Recognized(%q) = true with no role data; want false", selector)
+			}
+		})
+	}
+}
+
+// TestRecognizedTracksRoleResolution is the anti-drift guard: every selector
+// IsRoleAutogroup claims must become recognized exactly when role data is
+// present, so the set the package resolves and the set it says it understands
+// cannot diverge.
+func TestRecognizedTracksRoleResolution(t *testing.T) {
+	t.Parallel()
+
+	withRoles := policycore.Matcher{
+		Policy:    &tailscale.ACL{},
+		Roles:     map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
+		HaveRoles: true,
+	}
+	for _, selector := range roleAutogroupSelectors() {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if !policycore.IsRoleAutogroup(selector) {
+				t.Fatalf("IsRoleAutogroup(%q) = false; want true", selector)
+			}
+			if !withRoles.Recognized(selector) {
+				t.Errorf("Recognized(%q) = false with role data; want true", selector)
+			}
+		})
+	}
+}
+
+func TestMatcherRecognizesRoleAutogroupsWithEmptyRoster(t *testing.T) {
+	t.Parallel()
+
+	matcher := policycore.Matcher{
+		Policy:    &tailscale.ACL{},
+		Roles:     map[string]tailscale.UserRole{},
+		HaveRoles: true,
+	}
+	for _, selector := range roleAutogroupSelectors() {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if !matcher.Recognized(selector) {
+				t.Errorf("Recognized(%q) = false after an empty roster was read; want true", selector)
+			}
+			if matcher.Matches(selector, "ada@example.com", "ada@example.com") {
+				t.Errorf("Matches(%q) = true with an empty roster; want false", selector)
+			}
+		})
+	}
+}
+
+func TestMatcherIgnoresRolesWithoutRosterAvailability(t *testing.T) {
+	t.Parallel()
+
+	matcher := policycore.Matcher{
+		Policy: &tailscale.ACL{},
+		Roles:  map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
+	}
+	if matcher.Recognized("autogroup:admin") {
+		t.Error("Recognized(autogroup:admin) = true without roster availability; want false")
+	}
+	if matcher.Matches("autogroup:admin", "ada@example.com", "ada@example.com") {
+		t.Error("Matches(autogroup:admin) = true without roster availability; want false")
+	}
+}
+
+func TestRecognized(t *testing.T) {
+	t.Parallel()
+
+	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	tests := []struct {
+		name     string
+		selector string
+		want     bool
+	}{
+		{name: "plain tag", selector: "tag:web", want: true},
+		{name: "user", selector: "ada@example.com", want: true},
+		{name: "group", selector: "group:eng", want: true},
+		{name: "wildcard", selector: "*", want: true},
+		{name: "address", selector: "100.64.0.0/10", want: true},
+		{name: "autogroup:self", selector: "autogroup:self", want: true},
+		{name: "autogroup:member", selector: "autogroup:member", want: true},
+		{name: "autogroup:members", selector: "autogroup:members", want: true},
+		{name: "autogroup:tagged", selector: "autogroup:tagged", want: true},
+		{name: "autogroup:internet", selector: "autogroup:internet", want: true},
+		{name: "autogroup:shared", selector: "autogroup:shared", want: false},
+		// danger-all matches every device, so it is resolved rather than
+		// undecidable: a grant using it is wide open, and reporting it
+		// unresolved would claim coverage might be understated for a selector
+		// that covers everything.
+		{name: "autogroup:danger-all", selector: "autogroup:danger-all", want: true},
+		{name: "autogroup:nonroot", selector: "autogroup:nonroot", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := matcher.Recognized(tt.selector); got != tt.want {
+				t.Errorf("Recognized(%q) = %v; want %v", tt.selector, got, tt.want)
+			}
+		})
+	}
+}
+
+// roleAutogroupSelectors lists every role autogroup the package resolves. It is
+// a test-local literal on purpose: an independent restatement of the set is what
+// makes the anti-drift tests meaningful.
+func roleAutogroupSelectors() []string {
+	return []string{
+		"autogroup:owner",
+		"autogroup:admin",
+		"autogroup:it-admin",
+		"autogroup:network-admin",
+		"autogroup:billing-admin",
+		"autogroup:auditor",
 	}
 }

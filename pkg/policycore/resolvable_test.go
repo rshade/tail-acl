@@ -210,3 +210,92 @@ func TestDangerAllMatchesEveryDevice(t *testing.T) {
 		}
 	}
 }
+
+// allAutogroupSelectors lists every autogroup this package could be asked
+// about, including the ones it deliberately does not resolve. Like
+// roleAutogroupSelectors it is a test-local literal on purpose: an independent
+// restatement of the set is what makes the drift guards meaningful. It must
+// never be refactored to read from the package's own descriptor, or the guards
+// become tautologies.
+func allAutogroupSelectors() []string {
+	return append(roleAutogroupSelectors(),
+		"autogroup:self",
+		"autogroup:member",
+		"autogroup:members",
+		"autogroup:tagged",
+		"autogroup:internet",
+		"autogroup:danger-all",
+		"autogroup:shared",
+		"autogroup:nonroot",
+	)
+}
+
+// TestKnownAutogroupAndRoleAutogroupAreExclusive proves no autogroup is both
+// confirmable offline and resolved from the user roster.
+//
+// KnownAutogroup vouches for selectors this package can confirm from the policy
+// document alone; a role autogroup can only ever be refuted offline (a tagged
+// device has no user owner) and needs the roster to be confirmed. A selector
+// claimed by both would mean one of the two answers is wrong, and callers would
+// get a confident verdict from a question that was never settled.
+func TestKnownAutogroupAndRoleAutogroupAreExclusive(t *testing.T) {
+	t.Parallel()
+
+	for _, selector := range allAutogroupSelectors() {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if policycore.KnownAutogroup(selector) && policycore.IsRoleAutogroup(selector) {
+				t.Errorf(
+					"%q is both KnownAutogroup and IsRoleAutogroup; "+
+						"a role autogroup is never confirmable without the roster",
+					selector,
+				)
+			}
+		})
+	}
+}
+
+// TestRoleAutogroupsAgreeAcrossEveryView is the drift guard for the role set.
+//
+// The six role autogroups are consumed by four different views, and before the
+// descriptor refactor the set was enumerated in two places that could disagree.
+// Driving an independent list through IsRoleAutogroup, KnownAutogroup, and
+// AutogroupResolvable (Matcher.directMatches is covered separately by
+// selector_test.go) catches a role this list still expects that the switch no
+// longer provides: one missing from the resolver understates coverage, one
+// missing from the decidability rule turns a settleable tag query into a
+// spurious Unresolvable and a spurious exit 10. It does not catch the
+// reverse — a role added to the switch but never added to this list — which
+// is the correct blind spot, since this list exists to check the descriptor,
+// not the other way around.
+func TestRoleAutogroupsAgreeAcrossEveryView(t *testing.T) {
+	t.Parallel()
+
+	for _, selector := range roleAutogroupSelectors() {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if !policycore.IsRoleAutogroup(selector) {
+				t.Errorf("IsRoleAutogroup(%q) = false; want true", selector)
+			}
+			if policycore.KnownAutogroup(selector) {
+				t.Errorf("KnownAutogroup(%q) = true; want false, the roster is required", selector)
+			}
+			if !policycore.AutogroupResolvable(selector, "tag:web") {
+				t.Errorf(
+					"AutogroupResolvable(%q, \"tag:web\") = false; "+
+						"a tagged device has no user owner, so a tag refutes it with certainty",
+					selector,
+				)
+			}
+			if policycore.AutogroupResolvable(selector, "ada@example.com") {
+				t.Errorf(
+					"AutogroupResolvable(%q, \"ada@example.com\") = true; "+
+						"deciding which role a login holds needs the roster",
+					selector,
+				)
+			}
+		})
+	}
+}
