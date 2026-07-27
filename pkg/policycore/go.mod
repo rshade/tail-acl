@@ -1,6 +1,6 @@
 module github.com/rshade/tailscale-utils/policycore
 
-go 1.26.4
+go 1.26.5
 
 require tailscale.com/client/tailscale/v2 v2.10.1
 

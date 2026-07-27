@@ -1,6 +1,6 @@
 module github.com/rshade/tailscale-utils/tail-acl
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/hexops/gotextdiff v1.0.3
