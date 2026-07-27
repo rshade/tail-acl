@@ -148,6 +148,59 @@ func TestKnownAutogroupExcludesRolesAndTracksTheMatchableSet(t *testing.T) {
 	}
 }
 
+// TestKnownAutogroupMatchesResolverParity is the drift guard #34 asks for.
+//
+// It deliberately does not compare against a list of autogroups — a list is a
+// third copy of the same knowledge, and a test that restates what it checks
+// cannot detect divergence. Instead it asserts a biconditional over a corpus:
+// KnownAutogroup vouches for a selector if and only if the resolver can
+// actually match it against some query.
+//
+// Both directions matter. A selector KnownAutogroup vouches for but the
+// resolver never matches is failure mode (b) — the unresolved-selector safety
+// valve silently drops it. A selector the resolver matches but KnownAutogroup
+// omits is failure mode (a) — a resolved selector reported as unresolved.
+func TestKnownAutogroupMatchesResolverParity(t *testing.T) {
+	t.Parallel()
+
+	const source = "alice@example.com"
+	policy := &tailscale.ACL{}
+
+	// Every autogroup this package names, plus forms it deliberately does not
+	// resolve, plus a stand-in for one Tailscale adds after this release.
+	candidates := []string{
+		"autogroup:self", "autogroup:member", "autogroup:members",
+		"autogroup:tagged", "autogroup:internet", "autogroup:danger-all",
+		"autogroup:shared", "autogroup:admin", "autogroup:owner",
+		"autogroup:billing-admin", "autogroup:it-admin",
+		"autogroup:network-admin", "autogroup:auditor",
+		"autogroup:invented-after-this-release",
+	}
+	// Spans every queryTarget: a user (equal to source, for self), a tag, a
+	// tailnet device address, and a public address (for internet).
+	queries := []string{source, "bob@example.com", "tag:web", "100.64.0.9", "8.8.8.8"}
+
+	for _, selector := range candidates {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+			matchable := false
+			for _, query := range queries {
+				if policycore.SelectorMatches(selector, query, policy, source) {
+					matchable = true
+					break
+				}
+			}
+			if known := policycore.KnownAutogroup(selector); known != matchable {
+				t.Errorf(
+					"KnownAutogroup(%q) = %v but resolver matchable = %v; "+
+						"the recognized set and the resolver have drifted",
+					selector, known, matchable,
+				)
+			}
+		})
+	}
+}
+
 func TestDangerAllMatchesEveryDevice(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{}
