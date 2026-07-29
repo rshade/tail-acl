@@ -1,0 +1,42 @@
+{
+	"tagOwners": {
+		"tag:web": ["autogroup:admin"],
+		"tag:ssh-only": ["autogroup:admin"],
+	},
+	"grants": [
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:web"],
+			"ip": ["tcp:443"],
+		},
+	],
+	"ssh": [
+		{
+			"action": "check",
+			"src": ["autogroup:member"],
+			"dst": ["tag:web"],
+			"users": ["ubuntu", "root"],
+			"checkPeriod": "12h",
+			"acceptEnv": ["LANG", "LC_*"],
+		},
+	],
+	"sshTests": [
+		{
+			"src": "alice@example.com",
+			"dst": ["tag:ssh-only"],
+			"accept": ["ubuntu"],
+			"check": ["root"],
+			"deny": ["guest"],
+			"srcPostureAttrs": {
+				"node:os": "linux",
+				"custom:securityScore": 90,
+			},
+		},
+	],
+	"tests": [
+		{
+			"src": "autogroup:member",
+			"accept": ["tag:web:443"],
+		},
+	],
+}

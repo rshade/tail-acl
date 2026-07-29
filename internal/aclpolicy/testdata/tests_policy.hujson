@@ -24,4 +24,11 @@
 			"deny": ["tag:web:22", "tag:web:443"],
 		},
 	],
+	"sshTests": [
+		{
+			"src": "alice@example.com",
+			"dst": ["tag:web"],
+			"accept": ["ubuntu"],
+		},
+	],
 }

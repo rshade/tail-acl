@@ -133,8 +133,13 @@ type result struct {
 	Assertions *[]aclpolicy.AssertionResult `json:"assertions,omitempty"`
 	// Skipped is an exception list, so absent genuinely means "nothing skipped"
 	// and a plain omitempty slice is right here.
-	Skipped     []aclpolicy.RuleSkip   `json:"skipped,omitempty"`
-	TestSummary *aclpolicy.TestSummary `json:"test_summary,omitempty"`
+	Skipped []aclpolicy.RuleSkip `json:"skipped,omitempty"`
+	// SSHTestsSkipped counts top-level sshTests assertions that were loaded but
+	// not evaluated. It is a plain omitempty int for the same reason as Skipped:
+	// absent genuinely means none were skipped, so a consumer never has to
+	// distinguish zero from unset.
+	SSHTestsSkipped int                    `json:"ssh_tests_skipped,omitempty"`
+	TestSummary     *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 	// Findings is a pointer for the same reason as Assertions: a lint run with a
 	// clean policy still emits "findings": [] rather than dropping the key, while
 	// every other command omits it.
@@ -600,7 +605,7 @@ func requireJSONEditTarget(path string) error {
 
 // loadForEdit enforces the .json-only guard and loads the policy so every typed
 // edit shares one place that prevents rewriting HuJSON as comment-stripped JSON.
-func loadForEdit(path string) (*tailscale.ACL, error) {
+func loadForEdit(path string) (*aclpolicy.Policy, error) {
 	if err := requireJSONEditTarget(path); err != nil {
 		return nil, err
 	}
@@ -667,7 +672,7 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	if err != nil {
 		return nil, usagef("could not load policy tests: %v", err)
 	}
-	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{Strict: opts.strict})
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{Strict: opts.strict})
 	if err != nil {
 		return nil, usagef("could not evaluate policy tests: %v", err)
 	}
@@ -677,6 +682,13 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	for _, skip := range report.Skipped {
 		logger.WarnContext(ctx, "skipping unparseable policy rule", "rule", skip.Rule,
 			"value", skip.Value, "reason", skip.Reason)
+	}
+	// sshTests are loaded so typed edits preserve them, but this evaluator is
+	// network-only. Warn for the same reason as the skipped rules above: a run
+	// reporting "0 failed" must never imply assertions it never evaluated.
+	if len(policy.SSHTests) != 0 {
+		logger.WarnContext(ctx, "sshTests are preserved but not evaluated",
+			"ssh_tests", len(policy.SSHTests))
 	}
 	for _, assertion := range report.Assertions {
 		for _, decision := range assertion.Trace {
@@ -704,10 +716,17 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	if report.Summary.Total == 0 {
 		message = fmt.Sprintf("no policy tests declared in %s", path)
 	}
+	// Without this the zero-network-test message reads "no policy tests
+	// declared" for a policy whose only assertions are sshTests, which is the
+	// opposite of true.
+	if sshTests := len(policy.SSHTests); sshTests != 0 {
+		message += fmt.Sprintf(" (%d sshTests preserved but not evaluated)", sshTests)
+	}
 	res := newResult(cmdTest, status, message)
 	res.File = path
 	res.Assertions = &report.Assertions
 	res.Skipped = report.Skipped
+	res.SSHTestsSkipped = len(policy.SSHTests)
 	res.TestSummary = &report.Summary
 	// A real disagreement outranks an unsettled one: a failing assertion is a
 	// definite finding, so it decides the exit code even when another assertion
@@ -733,7 +752,7 @@ func runCheck(ctx context.Context, opts options, args []string, logger *slog.Log
 		return nil, usagef("could not load policy for check: %v", err)
 	}
 	decision, err := aclpolicy.EvaluateReachability(
-		policy,
+		&policy.ACL,
 		source,
 		target,
 		aclpolicy.ReachabilityOptions{Strict: opts.strict, Protocol: protocol},
@@ -906,7 +925,7 @@ func runLint(ctx context.Context, opts options, args []string, logger *slog.Logg
 	if err != nil {
 		return nil, usagef("could not load policy for lint: %v", err)
 	}
-	report, err := aclpolicy.EvaluateLint(policy, lintOpts)
+	report, err := aclpolicy.EvaluatePolicyLint(policy, lintOpts)
 	if err != nil {
 		return nil, usagef("could not lint policy: %v", err)
 	}
@@ -1071,7 +1090,11 @@ func commandCatalog() []schemaCommand {
 		{"posture remove", "Remove a posture definition", "posture remove NAME"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
-		{cmdTest, "Run the policy's native tests locally (-strict to reject unparseable rules)", cmdTest},
+		{
+			cmdTest,
+			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules)",
+			cmdTest,
+		},
 		{
 			cmdCheck,
 			"Answer one reachability question locally",

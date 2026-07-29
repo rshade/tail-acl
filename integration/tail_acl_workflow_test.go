@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 )
 
 const (
@@ -103,6 +105,57 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	output = runner.mustSucceed(t, "--file", originalPath, "plan")
 	assertContains(t, output, "plan valid; no changes", "ETag "+originalETag)
 	api.assertRequestCounts(t, 5, 1, 1, 2)
+}
+
+func TestTailACLTypedEditPreservesSSHExtensions(t *testing.T) {
+	t.Parallel()
+	const originalPolicy = `{
+	"ssh": [{
+		"action": "accept",
+		"src": ["autogroup:member"],
+		"dst": ["tag:web"],
+		"users": ["ubuntu"],
+		"acceptEnv": ["LANG", "LC_*"]
+	}],
+	"sshTests": [{
+		"src": "alice@example.com",
+		"dst": ["tag:web"],
+		"accept": ["ubuntu"],
+		"check": ["root"],
+		"deny": ["guest"],
+		"srcPostureAttrs": {"node:os": "linux"}
+	}]
+}`
+
+	tempDir := t.TempDir()
+	path := writePolicy(t, tempDir, "acl.json", originalPolicy)
+	runner := cliRunner{binary: buildTailACL(t, tempDir)}
+	runner.mustSucceed(
+		t,
+		"--file", path,
+		"grant", "add",
+		"--src", "autogroup:member",
+		"--dst", "tag:web",
+		"--ip", "tcp:443",
+	)
+
+	policy, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Grants) != 1 {
+		t.Fatalf("Grants = %#v, want the authored grant", policy.Grants)
+	}
+	if len(policy.SSH) != 1 || len(policy.SSH[0].AcceptEnv) != 2 {
+		t.Errorf("SSH = %#v, want acceptEnv preserved", policy.SSH)
+	}
+	if len(policy.SSHTests) != 1 ||
+		len(policy.SSHTests[0].Accept) != 1 ||
+		len(policy.SSHTests[0].Check) != 1 ||
+		len(policy.SSHTests[0].Deny) != 1 ||
+		policy.SSHTests[0].SrcPostureAttrs["node:os"] != "linux" {
+		t.Errorf("SSHTests = %#v, want every assertion field preserved", policy.SSHTests)
+	}
 }
 
 type cliRunner struct {

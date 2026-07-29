@@ -1,8 +1,11 @@
 package aclpolicy_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -38,24 +41,161 @@ func TestLoadHuJSONIntoTailscaleTypes(t *testing.T) {
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "acl.json")
-	writeFile(t, path, `{"unknownPolicyField": true}`)
+	testCases := []struct {
+		name   string
+		policy string
+		field  string
+	}{
+		{"upstream field typo", `{"tagOwner": {}}`, "tagOwner"},
+		{"local field typo", `{"sshTets": []}`, "sshTets"},
+		{
+			"nested local field typo",
+			`{"ssh": [{"action": "accept", "src": ["*"], "dst": ["*"], "users": ["root"], "acceptEnvv": ["LANG"]}]}`,
+			"acceptEnvv",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.json")
+			writeFile(t, path, testCase.policy)
 
-	_, err := aclpolicy.Load(path)
-	if err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("Load error = %v, want unknown field", err)
+			_, err := aclpolicy.Load(path)
+			if err == nil || !strings.Contains(err.Error(), `unknown field "`+testCase.field+`"`) {
+				t.Fatalf("Load error = %v, want unknown field %q", err, testCase.field)
+			}
+		})
+	}
+}
+
+func TestLoadPreservesSSHTests(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "sshtests_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.SSHTests) != 1 {
+		t.Fatalf("SSHTests = %#v, want one assertion", policy.SSHTests)
+	}
+	got := policy.SSHTests[0]
+	if got.Source != "alice@example.com" ||
+		!reflect.DeepEqual(got.Destination, []string{"tag:ssh-only"}) ||
+		!reflect.DeepEqual(got.Accept, []string{"ubuntu"}) ||
+		!reflect.DeepEqual(got.Check, []string{"root"}) ||
+		!reflect.DeepEqual(got.Deny, []string{"guest"}) {
+		t.Errorf("SSHTests[0] = %#v", got)
+	}
+	wantAttrs := map[string]any{
+		"node:os":              "linux",
+		"custom:securityScore": float64(90),
+	}
+	if !reflect.DeepEqual(got.SrcPostureAttrs, wantAttrs) {
+		t.Errorf("SSHTests[0].SrcPostureAttrs = %#v, want %#v", got.SrcPostureAttrs, wantAttrs)
+	}
+	if len(policy.SSH) != 1 || !reflect.DeepEqual(policy.SSH[0].AcceptEnv, []string{"LANG", "LC_*"}) {
+		t.Errorf("SSH = %#v, want acceptEnv preserved", policy.SSH)
+	}
+}
+
+func TestWritePreservesSSHTests(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "sshtests_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSSH, err := json.Marshal(policy.SSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTests, err := json.Marshal(policy.SSHTests)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "acl.json")
+	if err = aclpolicy.Write(path, policy); err != nil {
+		t.Fatal(err)
+	}
+	after, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSSH, err := json.Marshal(after.SSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTests, err := json.Marshal(after.SSHTests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterSSH, beforeSSH) {
+		t.Errorf("SSH changed across Load -> Write -> Load:\nbefore: %s\nafter:  %s", beforeSSH, afterSSH)
+	}
+	if !bytes.Equal(afterTests, beforeTests) {
+		t.Errorf("SSHTests changed across Load -> Write -> Load:\nbefore: %s\nafter:  %s", beforeTests, afterTests)
+	}
+}
+
+func TestLoadSyncsShadowedSSH(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "sshtests_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.ACL.SSH) != len(policy.SSH) {
+		t.Fatalf("len(ACL.SSH) = %d, len(SSH) = %d", len(policy.ACL.SSH), len(policy.SSH))
+	}
+	for i := range policy.SSH {
+		if !reflect.DeepEqual(policy.ACL.SSH[i], policy.SSH[i].ACLSSH) {
+			t.Errorf("ACL.SSH[%d] = %#v, want %#v", i, policy.ACL.SSH[i], policy.SSH[i].ACLSSH)
+		}
+	}
+}
+
+// TestWriteRejectsSSHOnlyInMirror pins the one way this package could silently
+// drop policy data. Policy.SSH shadows the embedded ACL.SSH, so a Policy whose
+// rules live only in the mirror marshals to no "ssh" key at all. Nothing builds
+// that state today; the guard exists so a future caller that copies Load's
+// mirror assignment in reverse fails loudly instead of writing an empty policy.
+func TestWriteRejectsSSHOnlyInMirror(t *testing.T) {
+	t.Parallel()
+	policy := &aclpolicy.Policy{
+		ACL: tailscale.ACL{
+			SSH: []tailscale.ACLSSH{{
+				Action:      "accept",
+				Source:      []string{"autogroup:member"},
+				Destination: []string{"tag:web"},
+				Users:       []string{"ubuntu"},
+			}},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "acl.json")
+
+	err := aclpolicy.Write(path, policy)
+	if err == nil {
+		t.Fatal("Write accepted a Policy whose ssh rules exist only in the ACL.SSH mirror")
+	}
+	if !strings.Contains(err.Error(), "ACL.SSH") {
+		t.Errorf("Write error = %v, want it to name the shadowed mirror", err)
+	}
+	// The refusal must precede the write, so a rejected policy never lands on
+	// disk half-encoded.
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("Write created %s despite rejecting the policy", path)
 	}
 }
 
 func TestWriteAndLoad(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.json")
-	policy := &tailscale.ACL{
-		Grants: []tailscale.Grant{{
-			Source:      []string{"autogroup:member"},
-			Destination: []string{"tag:web"},
-			IP:          []string{"tcp:443"},
-		}},
+	policy := &aclpolicy.Policy{
+		ACL: tailscale.ACL{
+			Grants: []tailscale.Grant{{
+				Source:      []string{"autogroup:member"},
+				Destination: []string{"tag:web"},
+				IP:          []string{"tcp:443"},
+			}},
+		},
 	}
 	if err := aclpolicy.Write(path, policy); err != nil {
 		t.Fatal(err)
@@ -87,6 +227,9 @@ func TestRepositoryPolicyUsesSupportedTailscaleTypes(t *testing.T) {
 	if len(policy.Grants) == 0 || len(policy.NodeAttrs) == 0 || len(policy.SSH) == 0 {
 		t.Fatalf("repository policy was incompletely decoded: %#v", policy)
 	}
+	if len(policy.SSHTests) == 0 || len(policy.SSH[0].AcceptEnv) == 0 {
+		t.Fatalf("repository SSH extensions were incompletely decoded: %#v", policy)
+	}
 }
 
 func TestEvaluateTestsGolden(t *testing.T) {
@@ -95,7 +238,7 @@ func TestEvaluateTestsGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +277,7 @@ func TestEvaluateReachabilityGolden(t *testing.T) {
 	results := make([]aclpolicy.ReachabilityResult, 0, len(queries))
 	for _, query := range queries {
 		decision, evaluateErr := aclpolicy.EvaluateReachability(
-			policy,
+			&policy.ACL,
 			query.source,
 			query.target,
 			aclpolicy.ReachabilityOptions{Protocol: query.protocol},

@@ -21,7 +21,23 @@ import (
 func TestTypedPolicyEdits(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.json")
-	writeTestPolicy(t, path, `{}`)
+	writeTestPolicy(t, path, `{
+		"ssh": [{
+			"action": "accept",
+			"src": ["autogroup:member"],
+			"dst": ["tag:web"],
+			"users": ["ubuntu"],
+			"acceptEnv": ["LANG", "LC_*"]
+		}],
+		"sshTests": [{
+			"src": "alice@example.com",
+			"dst": ["tag:web"],
+			"accept": ["ubuntu"],
+			"check": ["root"],
+			"deny": ["guest"],
+			"srcPostureAttrs": {"node:os": "linux"}
+		}]
+	}`)
 	getenv := func(string) string { return "" }
 
 	commands := [][]string{
@@ -69,6 +85,7 @@ func TestTypedPolicyEdits(t *testing.T) {
 	if len(postures) != 1 || postures[0] != "custom:labCompliant == true" {
 		t.Errorf("Postures[posture:labCompliant] = %#v", postures)
 	}
+	assertSSHExtensionsPreserved(t, policy)
 
 	if err = run(
 		context.Background(),
@@ -106,6 +123,57 @@ func TestTypedPolicyEdits(t *testing.T) {
 	}
 	if len(policy.Postures) != 0 {
 		t.Errorf("Postures after remove = %#v", policy.Postures)
+	}
+	assertSSHExtensionsPreserved(t, policy)
+}
+
+func TestLocalCommandsLoadSSHExtensions(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"tagOwners": {
+			"tag:ssh-only": ["autogroup:admin"]
+		},
+		"grants": [{
+			"src": ["autogroup:member"],
+			"dst": ["100.64.0.1"],
+			"ip": ["tcp:443"]
+		}],
+		"ssh": [{
+			"action": "accept",
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:self"],
+			"users": ["ubuntu"],
+			"acceptEnv": ["LANG"]
+		}],
+		"sshTests": [{
+			"src": "alice@example.com",
+			"dst": ["tag:ssh-only"],
+			"accept": ["ubuntu"]
+		}],
+		"tests": [{
+			"src": "autogroup:member",
+			"accept": ["100.64.0.1:443"]
+		}]
+	}`)
+
+	commands := [][]string{
+		{"--file", path, cmdTest},
+		{"--file", path, cmdCheck, "--src", "autogroup:member", "--dst", "100.64.0.1:443"},
+		{"--file", path, cmdLint},
+	}
+	for _, command := range commands {
+		if err := run(
+			context.Background(),
+			command,
+			func(string) string { return "" },
+			nil,
+			"",
+			io.Discard,
+			io.Discard,
+		); err != nil {
+			t.Errorf("run(%q): %v", command, err)
+		}
 	}
 }
 
@@ -838,6 +906,77 @@ func TestPolicyTestJSONFailureEnvelope(t *testing.T) {
 	if res.TestSummary == nil || res.TestSummary.Total != 2 || res.TestSummary.Passed != 1 ||
 		res.TestSummary.Failed != 1 {
 		t.Errorf("TestSummary = %#v", res.TestSummary)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
+// TestPolicyTestReportsUnevaluatedSSHTests pins the signal that keeps a
+// network-only run honest. sshTests load so typed edits preserve them, so a
+// policy whose only assertions are sshTests must not claim no tests were
+// declared, and must tell a machine consumer what went unevaluated.
+func TestPolicyTestReportsUnevaluatedSSHTests(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"tagOwners": {"tag:web": ["autogroup:admin"]},
+		"sshTests": [
+			{"src": "alice@example.com", "dst": ["tag:web"], "accept": ["ubuntu"], "deny": ["guest"]},
+			{"src": "bob@example.com", "dst": ["tag:web"], "check": ["root"]}
+		]
+	}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.SSHTestsSkipped != 2 {
+		t.Errorf("SSHTestsSkipped = %d, want 2", res.SSHTestsSkipped)
+	}
+	if !strings.Contains(res.Message, "2 sshTests preserved but not evaluated") {
+		t.Errorf("Message = %q, want the unevaluated sshTests named", res.Message)
+	}
+	if !strings.Contains(stderr.String(), "sshTests are preserved but not evaluated") {
+		t.Errorf("stderr = %q, want a warning about unevaluated sshTests", stderr.String())
+	}
+}
+
+// TestPolicyTestOmitsSSHTestsSkippedWhenAbsent pins the other half of that
+// contract: a policy without sshTests emits the byte-for-byte envelope it
+// always did, so reporting the skip costs existing consumers nothing.
+func TestPolicyTestOmitsSSHTestsSkippedWhenAbsent(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"tagOwners": {"tag:web": ["autogroup:admin"]}}`)
+
+	var stdout, stderr strings.Builder
+	if err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stdout.String(), "ssh_tests_skipped") {
+		t.Errorf("envelope carries ssh_tests_skipped with no sshTests:\n%s", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want quiet", stderr.String())
@@ -1716,6 +1855,19 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 				"tail-acl: 2 findings: 2 error, 0 warn, 0 info",
 			},
 		},
+		{
+			name: "invalid SSH-only selectors",
+			policy: `{
+				"ssh": [{"action": "accept", "src": ["group:ghost"], "dst": ["*"], "users": ["ubuntu"]}],
+				"sshTests": [{"src": "alice@example.com", "dst": ["tag:missing"], "accept": ["ubuntu"]}]
+			}`,
+			wantCode: exitFailed,
+			wantOutput: []string{
+				"ERROR undefined-reference ssh[0].src[0] group:ghost",
+				"ERROR dst-tag-no-owner sshTests[0].dst[0] tag:missing",
+				"tail-acl: 2 findings: 2 error, 0 warn, 0 info",
+			},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -1919,5 +2071,24 @@ func writeTestPolicy(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertSSHExtensionsPreserved(t *testing.T, policy *aclpolicy.Policy) {
+	t.Helper()
+	if len(policy.SSH) != 1 || !slices.Equal(policy.SSH[0].AcceptEnv, []string{"LANG", "LC_*"}) {
+		t.Errorf("SSH extensions were not preserved across typed edits: %#v", policy.SSH)
+	}
+	if len(policy.SSHTests) != 1 {
+		t.Fatalf("SSHTests were not preserved across typed edits: %#v", policy.SSHTests)
+	}
+	test := policy.SSHTests[0]
+	if test.Source != "alice@example.com" ||
+		!slices.Equal(test.Destination, []string{"tag:web"}) ||
+		!slices.Equal(test.Accept, []string{"ubuntu"}) ||
+		!slices.Equal(test.Check, []string{"root"}) ||
+		!slices.Equal(test.Deny, []string{"guest"}) ||
+		test.SrcPostureAttrs["node:os"] != "linux" {
+		t.Errorf("SSHTests were not preserved across typed edits: %#v", policy.SSHTests)
 	}
 }

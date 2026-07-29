@@ -81,7 +81,7 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
-| `test` | Evaluate every top-level `tests` `accept`/`deny` assertion locally (`-strict` to reject unparseable rules; an unsettleable assertion is reported as `indeterminate`, not an aborted run) |
+| `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; an unsettleable assertion is `indeterminate`) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
@@ -107,10 +107,12 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 ## Design
 
-Typed edits go through Tailscale's public `tailscale.ACL` schema with
-unknown-field rejection and atomic writes, so an edit can never silently drop
-policy data the client does not model, and typed edits refuse a non-`.json`
-target so HuJSON comments and formatting survive. `merge` has two paths:
+Typed edits go through a local `Policy` type that embeds Tailscale's public
+`tailscale.ACL` schema and extends the pinned client where it lags the documented
+policy-file schema (currently `sshTests` and `ssh[].acceptEnv`). Decoding still
+rejects every unmodelled field, and writes are atomic, so an edit can never
+silently drop policy data. Typed edits refuse a non-`.json` target so HuJSON
+comments and formatting survive. `merge` has two paths:
 `MergePair` preserves comments (single base + snippet), while `MergeDirectories`
 calls `Standardize()` and strips comments, which is why compiled output is
 comment-free strict JSON. `plan` validates the candidate server-side before
@@ -135,10 +137,16 @@ that a referenced posture is actually defined — that dangling-reference check 
 `tail-acl lint`'s job (issue #17), not authoring's.
 
 `test` is a pure evaluator over the candidate file's network-level grants and
-legacy ACLs. Each `accept` or `deny` destination becomes one stable assertion
-result with pass/fail status, evidence, and a decision trace. The evaluator
-supports groups, hosts, IP sets, literal IPs/CIDRs, tags and other exact
-selectors, `autogroup:member`, `autogroup:self`, `autogroup:internet`, and
+legacy ACLs. Each top-level `tests` `accept` or `deny` destination becomes one
+stable assertion result with pass/fail status, evidence, and a decision trace.
+Top-level `sshTests` assertions are loaded and preserved across typed edits but
+are not evaluated: SSH assertions use SSH usernames and three verdicts
+(`accept`, `check`, and `deny`), so they require a separate evaluator. A run
+never stays quiet about that gap — it warns on stderr and reports the count as
+`ssh_tests_skipped` in the JSON envelope, so a passing run can never be read as
+having checked assertions it skipped. The
+network evaluator supports groups, hosts, IP sets, literal IPs/CIDRs, tags and
+other exact selectors, `autogroup:member`, `autogroup:self`, `autogroup:internet`, and
 single/list/range port expressions. Application-only capabilities do not grant
 network access. Because posture and `via` routing depend on semantics that
 cannot be reproduced safely from the policy alone, a matching rule that uses

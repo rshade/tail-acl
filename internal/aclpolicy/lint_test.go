@@ -1,9 +1,6 @@
 package aclpolicy_test
 
 import (
-	"bytes"
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -18,22 +15,11 @@ func TestEvaluateLintGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	report, err := aclpolicy.EvaluatePolicyLint(policy, aclpolicy.LintOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got = append(got, '\n')
-	want, err := os.ReadFile(filepath.Join("testdata", "lint_report.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("EvaluateLint report:\n%s\nwant:\n%s", got, want)
-	}
+	assertGolden(t, "lint_report.golden.json", report)
 }
 
 func TestEvaluateLintCleanPolicyHasNoFindings(t *testing.T) {
@@ -239,10 +225,134 @@ func TestEvaluateLintUnusedCountsIndirectReferences(t *testing.T) {
 	}
 }
 
+func TestEvaluatePolicyLintCountsSSHTestReferences(t *testing.T) {
+	t.Parallel()
+	policy := &aclpolicy.Policy{
+		ACL: tailscale.ACL{
+			TagOwners: map[string][]string{
+				"tag:ssh-only": {"autogroup:admin"},
+			},
+		},
+		SSHTests: []aclpolicy.SSHTest{{
+			Source:      "alice@example.com",
+			Destination: []string{"tag:ssh-only"},
+			Accept:      []string{"ubuntu"},
+		}},
+	}
+	report, err := aclpolicy.EvaluatePolicyLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUnusedTag); got != 0 {
+		t.Errorf("unused-tag findings = %d, want none (%#v)", got, report.Findings)
+	}
+}
+
+// TestEvaluatePolicyLintCountsSSHRuleReferences builds the Policy by hand rather
+// than through Load, so it also pins that EvaluatePolicyLint derives SSH rules
+// from Policy.SSH instead of the ACL.SSH mirror that only Load populates.
+func TestEvaluatePolicyLintCountsSSHRuleReferences(t *testing.T) {
+	t.Parallel()
+	policy := &aclpolicy.Policy{
+		ACL: tailscale.ACL{
+			TagOwners: map[string][]string{
+				"tag:ssh-only": {"autogroup:admin"},
+				"tag:recorder": {"autogroup:admin"},
+			},
+		},
+		SSH: []aclpolicy.SSHRule{{
+			ACLSSH: tailscale.ACLSSH{
+				Action:      "accept",
+				Source:      []string{"autogroup:member"},
+				Destination: []string{"tag:ssh-only"},
+				Users:       []string{"ubuntu"},
+				Recorder:    []string{"tag:recorder"},
+			},
+		}},
+	}
+	report, err := aclpolicy.EvaluatePolicyLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUnusedTag); got != 0 {
+		t.Errorf("unused-tag findings = %d, want none (%#v)", got, report.Findings)
+	}
+}
+
+// TestEvaluateLintCountsSSHRuleReferences covers the same gap on the raw-ACL
+// entry point, which the pinned client models without any local extension.
+func TestEvaluateLintCountsSSHRuleReferences(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:ssh-only": {"autogroup:admin"}},
+		SSH: []tailscale.ACLSSH{{
+			Action:      "accept",
+			Source:      []string{"autogroup:member"},
+			Destination: []string{"tag:ssh-only"},
+			Users:       []string{"ubuntu"},
+		}},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUnusedTag); got != 0 {
+		t.Errorf("unused-tag findings = %d, want none (%#v)", got, report.Findings)
+	}
+}
+
+func TestEvaluatePolicyLintFlagsInvalidSSHSelectors(t *testing.T) {
+	t.Parallel()
+	policy := &aclpolicy.Policy{
+		SSH: []aclpolicy.SSHRule{{
+			ACLSSH: tailscale.ACLSSH{
+				Action:      "accept",
+				Source:      []string{"group:ghost"},
+				Destination: []string{"tag:missing"},
+				Users:       []string{"ubuntu"},
+				Recorder:    []string{"recorder-missing"},
+			},
+		}},
+		SSHTests: []aclpolicy.SSHTest{{
+			Source:      "ipset:ghost",
+			Destination: []string{"tag:test-missing"},
+			Accept:      []string{"ubuntu"},
+		}},
+	}
+	report, err := aclpolicy.EvaluatePolicyLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"undefined-reference|ssh[0].src[0]|group:ghost":           false,
+		"dst-tag-no-owner|ssh[0].dst[0]|tag:missing":              false,
+		"undefined-reference|ssh[0].recorder[0]|recorder-missing": false,
+		"undefined-reference|sshTests[0].src|ipset:ghost":         false,
+		"dst-tag-no-owner|sshTests[0].dst[0]|tag:test-missing":    false,
+	}
+	for _, finding := range report.Findings {
+		key := finding.ID + "|" + finding.Rule + "|" + finding.Value
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Errorf("missing finding %q in %#v", key, report.Findings)
+		}
+	}
+	if report.Summary.Error != len(want) || report.Summary.Total != len(want) {
+		t.Errorf("summary = %#v, want %d errors and no other findings", report.Summary, len(want))
+	}
+}
+
 func TestEvaluateLintNilPolicy(t *testing.T) {
 	t.Parallel()
 	if _, err := aclpolicy.EvaluateLint(nil, aclpolicy.LintOptions{}); err == nil {
 		t.Fatal("EvaluateLint(nil) returned no error")
+	}
+	if _, err := aclpolicy.EvaluatePolicyLint(nil, aclpolicy.LintOptions{}); err == nil {
+		t.Fatal("EvaluatePolicyLint(nil) returned no error")
 	}
 }
 

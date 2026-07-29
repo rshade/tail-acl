@@ -123,12 +123,26 @@
 			"src":    ["autogroup:member"],
 			"dst":    ["autogroup:self"],
 			"users":  ["autogroup:nonroot", "root"],
+			"acceptEnv": ["LANG", "LC_*"],
 		},
 		{
 			"action": "accept",
 			"src":    ["autogroup:member"],
 			"dst":    ["tag:relay-server"],
 			"users":  ["autogroup:nonroot", "root"],
+		},
+	],
+
+	"sshTests": [
+		{
+			"src": "owner@example.com",
+			"dst": ["tag:relay-server"],
+			"accept": ["root"],
+			"check": ["ubuntu"],
+			"deny": ["guest"],
+			"srcPostureAttrs": {
+				"node:os": "linux",
+			},
 		},
 	],
 

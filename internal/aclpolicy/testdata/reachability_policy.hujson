@@ -45,4 +45,11 @@
 			"ip": ["tcp:514"],
 		},
 	],
+	"sshTests": [
+		{
+			"src": "alice@example.com",
+			"dst": ["tag:web"],
+			"accept": ["ubuntu"],
+		},
+	],
 }

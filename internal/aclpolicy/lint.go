@@ -195,6 +195,30 @@ func EvaluateLint(policy *tailscale.ACL, opts LintOptions) (LintReport, error) {
 	if policy == nil {
 		return LintReport{}, errors.New("policy is nil")
 	}
+	return evaluateLint(policy, policy.SSH, nil, opts)
+}
+
+// EvaluatePolicyLint statically checks a loaded policy, including local schema
+// extensions that the pinned Tailscale client does not expose.
+func EvaluatePolicyLint(policy *Policy, opts LintOptions) (LintReport, error) {
+	if policy == nil {
+		return LintReport{}, errors.New("policy is nil")
+	}
+	// sshRules(), not policy.ACL.SSH: the mirror is only populated by Load, so
+	// reading it here would silently under-report references for a Policy built
+	// any other way.
+	return evaluateLint(&policy.ACL, policy.sshRules(), policy.SSHTests, opts)
+}
+
+func evaluateLint(
+	policy *tailscale.ACL,
+	sshRules []tailscale.ACLSSH,
+	sshTests []SSHTest,
+	opts LintOptions,
+) (LintReport, error) {
+	if policy == nil {
+		return LintReport{}, errors.New("policy is nil")
+	}
 	wildcard := opts.Wildcard
 	if wildcard == "" {
 		wildcard = WildcardAnyToAny
@@ -203,12 +227,14 @@ func EvaluateLint(policy *tailscale.ACL, opts LintOptions) (LintReport, error) {
 	findings := make([]LintFinding, 0)
 	findings = append(findings, lintGrants(policy, wildcard)...)
 	findings = append(findings, lintACLs(policy, wildcard)...)
+	findings = append(findings, lintSSHRules(policy, sshRules)...)
+	findings = append(findings, lintSSHTests(policy, sshTests)...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {
 		return LintReport{}, err
 	}
 	findings = append(findings, duplicates...)
-	findings = append(findings, lintUnusedDefinitions(policy)...)
+	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
 
 	// Sort into a stable order so the output is deterministic even though the
 	// unused-definition checks iterate over maps.
@@ -282,6 +308,34 @@ func lintACLs(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 	return findings
 }
 
+func lintSSHRules(policy *tailscale.ACL, rules []tailscale.ACLSSH) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, rule := range rules {
+		locator := fmt.Sprintf("ssh[%d]", index)
+		findings = append(findings,
+			sourceReferenceFindings(policy, locator+fieldSrc, rule.Source)...)
+		findings = append(findings,
+			nodeDestinationReferenceFindings(policy, locator+fieldDst, rule.Destination)...)
+		// Recorder entries are node selectors, just like SSH destinations.
+		findings = append(findings,
+			nodeDestinationReferenceFindings(policy, locator+".recorder", rule.Recorder)...)
+	}
+	return findings
+}
+
+func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, test := range tests {
+		locator := fmt.Sprintf("sshTests[%d]", index)
+		if finding, ok := sourceReferenceFinding(policy, locator+fieldSrc, test.Source); ok {
+			findings = append(findings, finding)
+		}
+		findings = append(findings,
+			nodeDestinationReferenceFindings(policy, locator+fieldDst, test.Destination)...)
+	}
+	return findings
+}
+
 // emptyGrantReason reports why a grant can never match, or "" if it can. A grant
 // with no App capability needs source, destination, and IP to match traffic; an
 // App-only grant legitimately omits IP.
@@ -348,16 +402,23 @@ func wildcardSideFinding(locator string) LintFinding {
 func sourceReferenceFindings(policy *tailscale.ACL, locator string, sources []string) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, selector := range sources {
-		selector = strings.TrimSpace(selector)
-		if selector == "" || selector == "*" {
-			continue
-		}
-		if reason := undefinedReferenceReason(selector, policy); reason != "" {
-			rule := fmt.Sprintf("%s[%d]", locator, index)
-			findings = append(findings, undefinedReferenceFinding(rule, selector, reason))
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if finding, ok := sourceReferenceFinding(policy, rule, selector); ok {
+			findings = append(findings, finding)
 		}
 	}
 	return findings
+}
+
+func sourceReferenceFinding(policy *tailscale.ACL, rule, selector string) (LintFinding, bool) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" || selector == "*" {
+		return LintFinding{}, false
+	}
+	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+		return undefinedReferenceFinding(rule, selector, reason), true
+	}
+	return LintFinding{}, false
 }
 
 func destinationReferenceFindings(policy *tailscale.ACL, locator string, destinations []string) []LintFinding {
@@ -368,28 +429,60 @@ func destinationReferenceFindings(policy *tailscale.ACL, locator string, destina
 			continue
 		}
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if strings.HasPrefix(host, "tag:") {
-			if _, ok := policy.TagOwners[host]; !ok {
-				findings = append(findings, LintFinding{
-					ID:          LintDstTagNoOwner,
-					Severity:    LintError,
-					Rule:        rule,
-					Value:       host,
-					Evidence:    "destination tag " + host + " has no entry in tagOwners, so no node can carry it",
-					Remediation: "add a tagOwners entry for " + host + ", or remove the destination",
-					Trace: []string{
-						rule + " destination tag " + host,
-						host + " is not declared in tagOwners",
-					},
-				})
-			}
-			continue
-		}
-		if reason := undefinedReferenceReason(host, policy); reason != "" {
-			findings = append(findings, undefinedReferenceFinding(rule, host, reason))
+		if finding, ok := destinationReferenceFinding(policy, rule, host); ok {
+			findings = append(findings, finding)
 		}
 	}
 	return findings
+}
+
+// nodeDestinationReferenceFindings validates SSH dst and recorder selectors.
+// Unlike network destinations, these selectors have no trailing port to strip.
+func nodeDestinationReferenceFindings(
+	policy *tailscale.ACL,
+	locator string,
+	destinations []string,
+) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, destination := range destinations {
+		selector := strings.TrimSpace(destination)
+		if selector == "" || selector == "*" {
+			continue
+		}
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if finding, ok := destinationReferenceFinding(policy, rule, selector); ok {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+func destinationReferenceFinding(
+	policy *tailscale.ACL,
+	rule string,
+	selector string,
+) (LintFinding, bool) {
+	if strings.HasPrefix(selector, "tag:") {
+		if _, ok := policy.TagOwners[selector]; !ok {
+			return LintFinding{
+				ID:          LintDstTagNoOwner,
+				Severity:    LintError,
+				Rule:        rule,
+				Value:       selector,
+				Evidence:    "destination tag " + selector + " has no entry in tagOwners, so no node can carry it",
+				Remediation: "add a tagOwners entry for " + selector + ", or remove the destination",
+				Trace: []string{
+					rule + " destination tag " + selector,
+					selector + " is not declared in tagOwners",
+				},
+			}, true
+		}
+		return LintFinding{}, false
+	}
+	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+		return undefinedReferenceFinding(rule, selector, reason), true
+	}
+	return LintFinding{}, false
 }
 
 func undefinedReferenceFinding(rule, value, reason string) LintFinding {
@@ -471,8 +564,12 @@ func lintDuplicateGrants(policy *tailscale.ACL) ([]LintFinding, error) {
 	return findings, nil
 }
 
-func lintUnusedDefinitions(policy *tailscale.ACL) []LintFinding {
-	referenced := collectReferences(policy)
+func lintUnusedDefinitions(
+	policy *tailscale.ACL,
+	sshRules []tailscale.ACLSSH,
+	sshTests []SSHTest,
+) []LintFinding {
+	referenced := collectReferences(policy, sshRules, sshTests)
 	findings := make([]LintFinding, 0)
 	add := func(id, kind, name, container string) {
 		findings = append(findings, LintFinding{
@@ -484,7 +581,7 @@ func lintUnusedDefinitions(policy *tailscale.ACL) []LintFinding {
 			Remediation: "reference " + name + ", or remove the definition",
 			Trace: []string{
 				fmt.Sprintf("%s %s is defined in %s", kind, name, container),
-				"no grant, acl, group, tagOwner, or test references " + name,
+				"no grant, acl, ssh, group, tagOwner, test, or sshTest references " + name,
 			},
 		})
 	}
@@ -511,10 +608,15 @@ func lintUnusedDefinitions(policy *tailscale.ACL) []LintFinding {
 	return findings
 }
 
-// collectReferences gathers every selector the policy uses anywhere, normalized
-// to its host (port stripped) for destination positions. A definition is unused
-// when its name is absent from this set.
-func collectReferences(policy *tailscale.ACL) map[string]bool {
+// collectReferences gathers every selector the policy uses anywhere. Network
+// destination positions are normalized to their host (port stripped); SSH test
+// destinations remain node selectors. A definition is unused when its name is
+// absent from this set.
+func collectReferences(
+	policy *tailscale.ACL,
+	sshRules []tailscale.ACLSSH,
+	sshTests []SSHTest,
+) map[string]bool {
 	referenced := make(map[string]bool)
 	for _, grant := range policy.Grants {
 		addReferences(referenced, grant.Source)
@@ -531,6 +633,8 @@ func collectReferences(policy *tailscale.ACL) map[string]bool {
 		addReferences(referenced, owners)
 	}
 	addTestReferences(referenced, policy.Tests)
+	addSSHRuleReferences(referenced, sshRules)
+	addSSHTestReferences(referenced, sshTests)
 	return referenced
 }
 
@@ -565,6 +669,29 @@ func addTestReferences(referenced map[string]bool, tests []tailscale.ACLTest) {
 		}
 		addDestinationReferences(referenced, accept)
 		addDestinationReferences(referenced, test.Deny)
+	}
+}
+
+func addSSHRuleReferences(referenced map[string]bool, rules []tailscale.ACLSSH) {
+	for _, rule := range rules {
+		addReferences(referenced, rule.Source)
+		// Like SSH test destinations, an SSH rule's dst and recorder are node
+		// selectors rather than network host:port targets, so a tag such as
+		// tag:web must retain both colon-separated components. users is
+		// deliberately absent: those are SSH login names, not policy
+		// definitions.
+		addReferences(referenced, rule.Destination)
+		addReferences(referenced, rule.Recorder)
+	}
+}
+
+func addSSHTestReferences(referenced map[string]bool, tests []SSHTest) {
+	for _, test := range tests {
+		addReference(referenced, test.Source)
+		// SSH test destinations are node selectors, not network host:port
+		// targets, so a tag such as tag:web must retain both colon-separated
+		// components.
+		addReferences(referenced, test.Destination)
 	}
 }
 

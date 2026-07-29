@@ -91,7 +91,7 @@
       "remediation": "reference group:unused, or remove the definition",
       "trace": [
         "group group:unused is defined in groups",
-        "no grant, acl, group, tagOwner, or test references group:unused"
+        "no grant, acl, ssh, group, tagOwner, test, or sshTest references group:unused"
       ]
     },
     {
@@ -103,7 +103,7 @@
       "remediation": "reference legacy, or remove the definition",
       "trace": [
         "host legacy is defined in hosts",
-        "no grant, acl, group, tagOwner, or test references legacy"
+        "no grant, acl, ssh, group, tagOwner, test, or sshTest references legacy"
       ]
     },
     {
@@ -115,7 +115,7 @@
       "remediation": "reference tag:orphan, or remove the definition",
       "trace": [
         "tag tag:orphan is defined in tagOwners",
-        "no grant, acl, group, tagOwner, or test references tag:orphan"
+        "no grant, acl, ssh, group, tagOwner, test, or sshTest references tag:orphan"
       ]
     }
   ],
