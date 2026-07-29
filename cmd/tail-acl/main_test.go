@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/tailscale/hujson"
+	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 )
@@ -215,46 +219,431 @@ func TestGrantAddIgnoresFlagOrder(t *testing.T) {
 	}
 }
 
-func TestTypedEditsRejectHuJSONWithoutChangingIt(t *testing.T) {
+type huJSONEditTestCase struct {
+	name    string
+	command []string
+	want    string
+	absent  string
+}
+
+func TestTypedEditsPreserveHuJSON(t *testing.T) {
 	t.Parallel()
-	commands := [][]string{
-		{"grant", "add", "--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443"},
-		{"grant", "remove", "--index", "0"},
-		{"tag-owner", "add", "tag:web", "autogroup:admin"},
-		{"host", "set", "web", "100.64.0.10"},
-		{"posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
-		{"posture", "remove", "posture:labCompliant"},
+	testCases := []huJSONEditTestCase{
+		{
+			commandGrantAdd,
+			[]string{"grant", "add", "--src", "tag:app", "--dst", "tag:db", "--ip", "tcp:5432"},
+			`"tag:app"`,
+			"",
+		},
+		{commandGrantRemove, []string{"grant", "remove", "--index", "0"}, `"group:keep"`, `"group:old"`},
+		{
+			// The owner must be absent from the fixture, or Contains passes on
+			// the unedited input and the subtest asserts nothing. Matching the
+			// whole list also proves the owner landed on tag:web, not tag:db.
+			commandTagOwnerAdd + " existing tag",
+			[]string{"tag-owner", "add", "tag:web", "autogroup:owner"},
+			`"tag:web": ["group:ops", "autogroup:owner"]`,
+			"",
+		},
+		{
+			commandTagOwnerAdd + " new tag",
+			[]string{"tag-owner", "add", "tag:brandnew", "autogroup:owner"},
+			`"tag:brandnew"`,
+			"",
+		},
+		{commandHostSet, []string{"host", "set", "web", "100.64.0.10"}, `"100.64.0.10"`, ""},
+		{
+			commandPostureSet,
+			[]string{"posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
+			`"custom:labCompliant == true"`,
+			`"old == true"`,
+		},
+		{
+			commandPostureRemove,
+			[]string{"posture", "remove", "posture:labCompliant"},
+			`"posture:keep"`,
+			`"posture:labCompliant"`,
+		},
 	}
-	const original = "{\n\t// operational documentation must survive\n\t\"grants\": [],\n}\n"
-	for _, command := range commands {
-		t.Run(strings.Join(command[:2], " "), func(t *testing.T) {
+	const original = `{
+	// Owner: platform-team. Do not hand-edit without review.
+	"tagOwners": {
+		"tag:web": ["group:ops"], // web front ends
+		"tag:db":  ["autogroup:admin"],
+	},
+	"hosts": {
+		"legacy": "100.64.0.9", // old alias
+	},
+	"postures": {
+		"posture:labCompliant": ["old == true"], // lab devices
+		"posture:keep": ["keep == true"],
+	},
+	"grants": [
+		// Existing grant may be removed.
+		{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]},
+		{"src": ["group:keep"], "dst": ["tag:db"], "ip": ["tcp:5432"]},
+	],
+	"groups": {
+		"group:long": ["z@example.com"],
+		"group:a":    ["a@example.com"], // this block is never edited
+	},
+	"tests": [
+		// Network assertions must survive.
+		{"src": "alice@example.com", "deny": ["tag:db:5432"]},
+	],
+}
+`
+	for _, testCase := range testCases {
+		for _, extension := range []string{".json", ".hujson"} {
+			t.Run(testCase.name+extension, func(t *testing.T) {
+				t.Parallel()
+				assertTypedEditPreservation(t, testCase, extension, original)
+			})
+		}
+	}
+}
+
+func assertTypedEditPreservation(t *testing.T, testCase huJSONEditTestCase, extension, original string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl"+extension)
+	writeTestPolicy(t, path, original)
+	args := append([]string{"--file", path}, testCase.command...)
+	if err := run(
+		context.Background(),
+		args,
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("run(%q): %v", testCase.command, err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	output := string(got)
+	for _, preserved := range []string{
+		"// Owner: platform-team. Do not hand-edit without review.",
+		"// web front ends",
+		"// old alias",
+		"// Network assertions must survive.",
+		`{"src": "alice@example.com", "deny": ["tag:db:5432"]},`,
+	} {
+		if !strings.Contains(output, preserved) {
+			t.Errorf("%s output lost %q:\n%s", testCase.name, preserved, output)
+		}
+	}
+	// No command touches "groups" or "tests", so the whole tail from "groups"
+	// onward must come through untouched. Comparing against hujson's own
+	// formatting of the input — rather than the input verbatim — keeps this
+	// assertion about the patch. hujson re-derives column alignment for the
+	// entire document, so an assertion pinned to the input's spacing would be
+	// measuring the formatter instead of the edit.
+	tail := untouchedTail(t, formatLikeHuJSON(t, original))
+	if !strings.Contains(output, tail) {
+		t.Errorf("%s disturbed a region it never edited:\nwant tail:\n%s\ngot:\n%s",
+			testCase.name, tail, output)
+	}
+	if !strings.Contains(output, testCase.want) {
+		t.Errorf("%s output missing edit %q:\n%s", testCase.name, testCase.want, output)
+	}
+	if testCase.absent != "" && strings.Contains(output, testCase.absent) {
+		t.Errorf("%s output still contains %q:\n%s", testCase.name, testCase.absent, output)
+	}
+	if testCase.name == commandPostureSet && !strings.Contains(output, "// lab devices") {
+		t.Errorf("%s output lost the modified entry's comment:\n%s", testCase.name, output)
+	}
+	assertPolicyKeyOrder(t, output, "tagOwners", "hosts", "postures", "grants", "groups", "tests")
+}
+
+func assertPolicyKeyOrder(t *testing.T, policy string, keys ...string) {
+	t.Helper()
+	previous := -1
+	for _, key := range keys {
+		index := strings.Index(policy, `"`+key+`"`)
+		if index < 0 {
+			t.Errorf("policy is missing top-level key %q:\n%s", key, policy)
+			continue
+		}
+		if index <= previous {
+			t.Errorf("top-level key %q is out of order:\n%s", key, policy)
+		}
+		previous = index
+	}
+}
+
+// formatLikeHuJSON renders policy the way a typed edit will, so a test can
+// assert on the untouched parts of the document without also asserting how
+// hujson chose to lay them out.
+func formatLikeHuJSON(t *testing.T, policy string) string {
+	t.Helper()
+	value, err := hujson.Parse([]byte(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.Format()
+	return string(value.Pack())
+}
+
+// untouchedTail returns the part of a formatted policy that no typed edit
+// command touches: everything from the "groups" block onward.
+func untouchedTail(t *testing.T, formatted string) string {
+	t.Helper()
+	const marker = "\t\"groups\": {"
+	start := strings.Index(formatted, marker)
+	if start < 0 {
+		t.Fatalf("formatted policy has no %q block:\n%s", marker, formatted)
+	}
+	return formatted[start:]
+}
+
+// collapseSpaces squeezes runs of spaces so an assertion about policy content
+// does not also pin hujson's derived column alignment.
+func collapseSpaces(s string) string {
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return s
+}
+
+// Load matches struct fields case-insensitively, so a policy in Tailscale's
+// legacy capitalized style validates and populates the typed Policy. The patch
+// pointer must therefore be built from the name the file actually uses, or the
+// edit targets a member that is not there.
+func TestTypedEditsRespectLegacyCapitalizedKeys(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name    string
+		command []string
+		want    string
+	}{
+		{
+			commandTagOwnerAdd,
+			[]string{"tag-owner", "add", "tag:web", "autogroup:owner"},
+			`"tag:web": ["group:ops", "autogroup:owner"]`,
+		},
+		{commandHostSet, []string{"host", "set", "db", "100.64.0.2"}, `"db": "100.64.0.2"`},
+		{
+			commandGrantAdd,
+			[]string{"grant", "add", "--src", "tag:app", "--dst", "tag:db", "--ip", "tcp:5432"},
+			`"tag:app"`,
+		},
+		{commandGrantRemove, []string{"grant", "remove", "--index", "0"}, `"Grants": []`},
+	}
+	const original = `{
+	// Authored in the legacy capitalized style.
+	"TagOwners": {"tag:web": ["group:ops"]},
+	"Hosts": {"legacy": "100.64.0.9"},
+	"Grants": [{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+}
+`
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "acl.hujson")
-			writeTestPolicy(t, path, original)
-			args := append([]string{"--file", path}, command...)
-			err := run(
-				context.Background(),
-				args,
-				func(string) string { return "" },
-				nil, // check is deliberately offline and must not need an HTTP client.
-				"",
-				io.Discard,
-				io.Discard,
-			)
-			if err == nil || !strings.Contains(err.Error(), "typed edits require a .json file") {
-				t.Fatalf("error = %v, want .json requirement", err)
-			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("exit code = %d, want %d for a usage error", code, exitUsage)
-			}
-			got, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if string(got) != original {
-				t.Errorf("HuJSON changed:\n%s", got)
-			}
+			assertLegacyKeysSurvive(t, testCase.name, testCase.command, testCase.want, original)
 		})
+	}
+}
+
+func assertLegacyKeysSurvive(t *testing.T, name string, command []string, want, original string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, original)
+	if err := run(
+		context.Background(),
+		append([]string{"--file", path}, command...),
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("run(%q): %v", command, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(got)
+	// hujson re-derives column alignment, so match on a whitespace-collapsed
+	// copy rather than pinning its spacing.
+	if !strings.Contains(collapseSpaces(output), want) {
+		t.Errorf("%s did not apply: want %q in:\n%s", name, want, output)
+	}
+	// The operator's spelling must survive, and the edit must not introduce a
+	// second, lowercase copy of the same key.
+	for _, key := range []string{"TagOwners", "Hosts", "Grants"} {
+		if !strings.Contains(output, `"`+key+`"`) {
+			t.Errorf("%s renamed %q:\n%s", name, key, output)
+		}
+		if lowered := strings.ToLower(key[:1]) + key[1:]; strings.Contains(output, `"`+lowered+`"`) {
+			t.Errorf("%s added a duplicate %q key:\n%s", name, lowered, output)
+		}
+	}
+}
+
+func TestGrantAddPreservesCommentInEmptyArray(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [
+			// Grants approved in review belong here.
+		],
+	}`)
+	err := run(
+		context.Background(),
+		[]string{
+			"--file", path, "grant", "add",
+			"--src", "autogroup:member", "--dst", "tag:web", "--ip", "tcp:443",
+		},
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "// Grants approved in review belong here.") {
+		t.Errorf("grant add lost the empty array's comment:\n%s", got)
+	}
+}
+
+type canonicalEditTestCase struct {
+	name    string
+	command []string
+	mutate  func(*aclpolicy.Policy)
+}
+
+func TestTypedEditsMatchCanonicalJSONOutput(t *testing.T) {
+	t.Parallel()
+	testCases := []canonicalEditTestCase{
+		{
+			commandGrantAdd,
+			[]string{"grant", "add", "--src", "group:new", "--dst", "tag:db", "--ip", "tcp:5432"},
+			func(policy *aclpolicy.Policy) {
+				policy.Grants = append(policy.Grants, tailscale.Grant{
+					Source:      []string{"group:new"},
+					Destination: []string{"tag:db"},
+					IP:          []string{"tcp:5432"},
+				})
+			},
+		},
+		{
+			commandGrantRemove,
+			[]string{"grant", "remove", "--index", "0"},
+			func(policy *aclpolicy.Policy) {
+				policy.Grants = slices.Delete(policy.Grants, 0, 1)
+			},
+		},
+		{
+			commandTagOwnerAdd,
+			[]string{"tag-owner", "add", "tag:web", "autogroup:admin"},
+			func(policy *aclpolicy.Policy) {
+				policy.TagOwners["tag:web"] = append(policy.TagOwners["tag:web"], "autogroup:admin")
+			},
+		},
+		{
+			commandHostSet,
+			[]string{"host", "set", "web", "100.64.0.10"},
+			func(policy *aclpolicy.Policy) {
+				policy.Hosts["web"] = "100.64.0.10"
+			},
+		},
+		{
+			commandPostureSet,
+			[]string{"posture", "set", "posture:labCompliant", "custom:labCompliant == true"},
+			func(policy *aclpolicy.Policy) {
+				policy.Postures["posture:labCompliant"] = []string{"custom:labCompliant == true"}
+			},
+		},
+		{
+			commandPostureRemove,
+			[]string{"posture", "remove", "posture:labCompliant"},
+			func(policy *aclpolicy.Policy) {
+				delete(policy.Postures, "posture:labCompliant")
+			},
+		},
+	}
+	const input = `{
+		"tagOwners": {"tag:web": ["group:ops"], "tag:db": ["autogroup:admin"]},
+		"hosts": {"web": "100.64.0.9"},
+		"postures": {
+			"posture:labCompliant": ["old == true"],
+			"posture:keep": ["keep == true"]
+		},
+		"grants": [
+			{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]},
+			{"src": ["group:keep"], "dst": ["tag:db"], "ip": ["tcp:5432"]}
+		]
+	}`
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			assertCanonicalEditOutput(t, testCase, input)
+		})
+	}
+}
+
+func assertCanonicalEditOutput(t *testing.T, testCase canonicalEditTestCase, input string) {
+	t.Helper()
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.json")
+	actualPath := filepath.Join(dir, "actual.json")
+	expectedPath := filepath.Join(dir, "expected.json")
+	writeTestPolicy(t, sourcePath, input)
+	policy, err := aclpolicy.Load(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = aclpolicy.Write(actualPath, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err = aclpolicy.Write(expectedPath, policy); err != nil {
+		t.Fatal(err)
+	}
+	expectedPolicy, err := aclpolicy.Load(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testCase.mutate(expectedPolicy)
+	if err = aclpolicy.Write(expectedPath, expectedPolicy); err != nil {
+		t.Fatal(err)
+	}
+
+	args := append([]string{"--file", actualPath}, testCase.command...)
+	if err = run(
+		context.Background(),
+		args,
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("run(%q): %v", testCase.command, err)
+	}
+	actual, err := os.ReadFile(actualPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, expected) {
+		t.Errorf(
+			"canonical JSON changed from the previous writer:\nactual:\n%s\nexpected:\n%s",
+			actual,
+			expected,
+		)
 	}
 }
 
@@ -470,30 +859,71 @@ func TestPostureRemoveIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestPostureRemoveDropsKeyWhenPosturesBecomesEmpty(t *testing.T) {
+// Removing the last member must empty the container, not delete the key.
+// Deleting the key carries its comments out with it, which is exactly the data
+// loss comment-preserving edits exist to prevent.
+func TestRemovingLastEntryKeepsTheCommentedBlock(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "acl.json")
-	writeTestPolicy(t, path, `{"postures": {"posture:labCompliant": ["x == true"]}}`)
+	testCases := []struct {
+		name    string
+		command []string
+		policy  string
+		want    string
+	}{
+		{
+			commandPostureRemove,
+			[]string{"posture", "remove", "posture:labCompliant"},
+			"{\n\t// Postures: approved by compliance, do not delete this block.\n" +
+				"\t\"postures\": {\"posture:labCompliant\": [\"x == true\"]},\n}\n",
+			`"postures": {}`,
+		},
+		{
+			commandGrantRemove,
+			[]string{"grant", "remove", "--index", "0"},
+			"{\n\t// SECURITY: this grants block is reviewed quarterly. Ticket SEC-1234.\n" +
+				"\t\"grants\": [{\"src\": [\"group:a\"], \"dst\": [\"tag:b\"], \"ip\": [\"tcp:1\"]}],\n}\n",
+			`"grants": []`,
+		},
+	}
+	for _, testCase := range testCases {
+		for _, extension := range []string{".json", ".hujson"} {
+			t.Run(testCase.name+extension, func(t *testing.T) {
+				t.Parallel()
+				assertEmptiedBlockKeepsComment(t, testCase.command, testCase.policy, testCase.want, extension)
+			})
+		}
+	}
+}
 
-	err := run(
+func assertEmptiedBlockKeepsComment(t *testing.T, command []string, policy, want, extension string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl"+extension)
+	writeTestPolicy(t, path, policy)
+	if err := run(
 		context.Background(),
-		[]string{"--file", path, "posture", "remove", "posture:labCompliant"},
+		append([]string{"--file", path}, command...),
 		func(string) string { return "" },
 		http.DefaultClient,
 		"",
 		io.Discard,
 		io.Discard,
-	)
-	if err != nil {
+	); err != nil {
 		t.Fatal(err)
 	}
-
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "postures") {
-		t.Errorf("file still mentions postures after the last entry was removed: %s", got)
+	output := string(got)
+	comment := strings.SplitN(strings.SplitN(policy, "\n\t", 2)[1], "\n", 2)[0]
+	if !strings.Contains(output, comment) {
+		t.Errorf("removing the last entry lost %q:\n%s", comment, output)
+	}
+	if !strings.Contains(output, want) {
+		t.Errorf("output missing %q:\n%s", want, output)
+	}
+	if _, err = aclpolicy.Load(path); err != nil {
+		t.Errorf("emptied policy no longer loads: %v\n%s", err, output)
 	}
 }
 
@@ -1599,6 +2029,8 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	for _, want := range []string{
 		"check          Answer one reachability question locally",
 		"posture set    Add or replace a posture's expression list",
+		"typed edits preserve comments in JSON and HuJSON",
+		"tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
 		"check --src alice@example.com --dst tag:web:443",
 		"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
 		"# static policy hygiene findings",
@@ -1631,6 +2063,7 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	var doc struct {
 		Name         string                `json:"name"`
 		Commands     []schemaCommand       `json:"commands"`
+		Capabilities schemaCapabilities    `json:"capabilities"`
 		LintFindings []aclpolicy.LintCheck `json:"lint_findings"`
 		ExitCodes    map[string]string     `json:"exit_codes"`
 	}
@@ -1639,6 +2072,10 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	if doc.Name != "tail-acl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
 		t.Errorf("schema = %#v", doc)
+	}
+	if !slices.Equal(doc.Capabilities.TypedEdits.Formats, []string{"json", "hujson"}) ||
+		!doc.Capabilities.TypedEdits.PreservesComments {
+		t.Errorf("schema typed edit capabilities = %#v", doc.Capabilities.TypedEdits)
 	}
 	if !slices.ContainsFunc(doc.LintFindings, func(check aclpolicy.LintCheck) bool {
 		return check.ID == aclpolicy.LintUndefinedReference
@@ -1654,14 +2091,17 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdLint }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdLint)
 	}
-	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == "posture set" }) {
-		t.Errorf("schema commands = %#v, want %q", doc.Commands, "posture set")
+	if !slices.ContainsFunc(
+		doc.Commands,
+		func(command schemaCommand) bool { return command.Name == commandPostureSet },
+	) {
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureSet)
 	}
 	if !slices.ContainsFunc(
 		doc.Commands,
-		func(command schemaCommand) bool { return command.Name == "posture remove" },
+		func(command schemaCommand) bool { return command.Name == commandPostureRemove },
 	) {
-		t.Errorf("schema commands = %#v, want %q", doc.Commands, "posture remove")
+		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureRemove)
 	}
 }
 

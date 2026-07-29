@@ -30,10 +30,10 @@ go build -ldflags "-X main.version=v0.1.0" -o tail-acl ./cmd/tail-acl
 ## Usage
 
 ```sh
-# Typed edits (require a .json target so HuJSON comments are never rewritten):
+# Typed edits (comments and key order survive in .json and .hujson):
 tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
 tail-acl --file acl.json grant remove --index 0
-tail-acl --file acl.json tag-owner add tag:web autogroup:admin
+tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
 tail-acl --file acl.json posture remove posture:labCompliant
@@ -111,8 +111,27 @@ Typed edits go through a local `Policy` type that embeds Tailscale's public
 `tailscale.ACL` schema and extends the pinned client where it lags the documented
 policy-file schema (currently `sshTests` and `ssh[].acceptEnv`). Decoding still
 rejects every unmodelled field, and writes are atomic, so an edit can never
-silently drop policy data. Typed edits refuse a non-`.json` target so HuJSON
-comments and formatting survive. `merge` has two paths:
+silently drop policy data. Duplicate object members are rejected too: Go's JSON
+decoder resolves them last-wins while HuJSON resolves them first-wins, so a
+policy carrying both would be validated through one member and patched through
+the other.
+
+Typed edits apply an RFC 6902 patch to either `.json` or `.hujson` input.
+**Comments, key order, and the key's own spelling survive** — a policy authored
+in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
+the last entry from a block empties it rather than deleting the key, so a
+comment attached to that block is not carried out with it.
+
+Layout, however, is **not** preserved: the file is rewritten in HuJSON's
+canonical format. Indentation is normalized to tabs, column alignment is
+re-derived for the whole document, line endings become LF, and a file that is
+already non-standard JSON gains trailing commas throughout. A policy that is
+strict JSON stays strict JSON, so `jq` and API consumers are unaffected. The
+practical consequence is that the first typed edit against a policy not already
+in canonical form produces a diff touching every line; running one edit on its
+own first keeps that reformat out of the review for the real change.
+
+`merge` has two paths:
 `MergePair` preserves comments (single base + snippet), while `MergeDirectories`
 calls `Standardize()` and strips comments, which is why compiled output is
 comment-free strict JSON. `plan` validates the candidate server-side before

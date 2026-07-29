@@ -218,6 +218,75 @@ func TestReadRawRejectsInvalidHuJSON(t *testing.T) {
 	}
 }
 
+func TestJSONPointerEscapesSegments(t *testing.T) {
+	t.Parallel()
+	got := aclpolicy.JSONPointer("tagOwners", "tag:ops/platform~blue")
+	want := "/tagOwners/tag:ops~1platform~0blue"
+	if got != want {
+		t.Errorf("JSONPointer() = %q, want %q", got, want)
+	}
+}
+
+// encoding/json resolves duplicate members last-wins and hujson resolves them
+// first-wins. A policy carrying both would be validated through one member and
+// patched through the other, so Load must refuse it outright.
+func TestLoadRejectsDuplicateMembers(t *testing.T) {
+	t.Parallel()
+	testCases := map[string]string{
+		"top level": `{
+			"grants": [{"src": ["group:FIRST"], "dst": ["tag:b"], "ip": ["tcp:1"]}],
+			"grants": [{"src": ["group:SECOND"], "dst": ["tag:b"], "ip": ["tcp:2"]}],
+		}`,
+		"nested":   `{"tagOwners": {"tag:web": ["group:a"], "tag:web": ["group:b"]}}`,
+		"in array": `{"grants": [{"src": ["a"], "src": ["b"], "dst": ["tag:b"], "ip": ["tcp:1"]}]}`,
+		"deep in ssh": `{"ssh": [{"action": "accept", "src": ["autogroup:member"],` +
+			` "dst": ["autogroup:self"], "users": ["root"], "users": ["ubuntu"]}]}`,
+	}
+	for name, policy := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeFile(t, path, policy)
+			_, err := aclpolicy.Load(path)
+			if err == nil {
+				t.Fatal("Load accepted a policy with duplicate members")
+			}
+			if !strings.Contains(err.Error(), "duplicate object member") {
+				t.Errorf("Load error = %v, want a duplicate-member complaint", err)
+			}
+		})
+	}
+}
+
+// PatchAdd must encode a "value" member even for values that marshal to a JSON
+// zero value; RFC 6902 requires it and hujson rejects an add without one.
+func TestPatchAddAlwaysEncodesAValue(t *testing.T) {
+	t.Parallel()
+	testCases := map[string]any{
+		"nil":          nil,
+		"empty string": "",
+		"empty slice":  []string{},
+		"false":        false,
+	}
+	for name, value := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeFile(t, path, "{\n\t// keep\n\t\"hosts\": {},\n}\n")
+			if err := aclpolicy.WritePatch(path, aclpolicy.PatchAdd(value, "hosts", "probe")); err != nil {
+				t.Fatalf("WritePatch(%v): %v", value, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), `"probe"`) {
+				t.Errorf("patch did not add the member:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestRepositoryPolicyUsesSupportedTailscaleTypes(t *testing.T) {
 	t.Parallel()
 	policy, err := aclpolicy.Load(filepath.Join("testdata", "acl.hujson"))

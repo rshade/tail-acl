@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +87,15 @@ const (
 
 	formatHuman = "human"
 	formatJSON  = "json"
+
+	commandGrantAdd      = "grant add"
+	commandGrantRemove   = "grant remove"
+	commandTagOwnerAdd   = "tag-owner add"
+	commandHostSet       = "host set"
+	commandPostureSet    = "posture set"
+	commandPostureRemove = "posture remove"
+
+	policyFormatHuJSON = "hujson"
 )
 
 // httpTimeout bounds every Tailscale API request.
@@ -210,7 +220,7 @@ func run(
 		&opts.file,
 		"file",
 		"acl.json",
-		"policy file (typed edits require .json; other commands accept HuJSON)",
+		"policy file (typed edits preserve comments in JSON and HuJSON)",
 	)
 	root.StringVar(
 		&opts.tailnet,
@@ -433,16 +443,21 @@ func runGrantAdd(path string, args []string) (*result, error) {
 			return nil, keyErr
 		}
 		if existingKey == grantKey {
-			return grantResult("grant add", statusNoChanges,
+			return grantResult(commandGrantAdd, statusNoChanges,
 				fmt.Sprintf("grant %d already exists in %s", i, path), path, i), nil
 		}
 	}
+	grantsPresent := policy.Grants != nil
 	policy.Grants = append(policy.Grants, grant)
-	if err = aclpolicy.Write(path, policy); err != nil {
+	operation := aclpolicy.PatchAdd(policy.Grants, "grants")
+	if grantsPresent {
+		operation = aclpolicy.PatchAdd(grant, "grants", "-")
+	}
+	if err = aclpolicy.WritePatch(path, operation); err != nil {
 		return nil, err
 	}
 	index := len(policy.Grants) - 1
-	return grantResult("grant add", statusOK,
+	return grantResult(commandGrantAdd, statusOK,
 		fmt.Sprintf("added grant %d to %s", index, path), path, index), nil
 }
 
@@ -463,11 +478,13 @@ func runGrantRemove(path string, args []string) (*result, error) {
 	if *index < 0 || *index >= len(policy.Grants) {
 		return nil, usagef("grant index %d is out of range; policy has %d grants", *index, len(policy.Grants))
 	}
-	policy.Grants = slices.Delete(policy.Grants, *index, *index+1)
-	if err = aclpolicy.Write(path, policy); err != nil {
+	// Remove the element, never the whole "grants" key: dropping the key would
+	// carry its comments out with it, which is the data loss this command
+	// exists to avoid. An empty array reloads as an empty slice.
+	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("grants", strconv.Itoa(*index))); err != nil {
 		return nil, err
 	}
-	return grantResult("grant remove", statusOK,
+	return grantResult(commandGrantRemove, statusOK,
 		fmt.Sprintf("removed grant %d from %s", *index, path), path, *index), nil
 }
 
@@ -487,20 +504,27 @@ func runTagOwner(path string, args []string) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if policy.TagOwners == nil {
-		policy.TagOwners = make(map[string][]string)
-	}
 	status, message := statusOK, fmt.Sprintf("added owner %s to %s in %s", owner, tag, path)
 	if slices.Contains(policy.TagOwners[tag], owner) {
 		status = statusNoChanges
 		message = fmt.Sprintf("owner %s already owns %s in %s", owner, tag, path)
-	} else {
-		policy.TagOwners[tag] = append(policy.TagOwners[tag], owner)
+		res := newResult(commandTagOwnerAdd, status, message)
+		res.File = path
+		return res, nil
 	}
-	if err = aclpolicy.Write(path, policy); err != nil {
+	var operation aclpolicy.PatchOperation
+	switch owners := policy.TagOwners[tag]; {
+	case policy.TagOwners == nil:
+		operation = aclpolicy.PatchAdd(map[string][]string{tag: {owner}}, "tagOwners")
+	case owners == nil:
+		operation = aclpolicy.PatchAdd([]string{owner}, "tagOwners", tag)
+	default:
+		operation = aclpolicy.PatchAdd(owner, "tagOwners", tag, "-")
+	}
+	if err = aclpolicy.WritePatch(path, operation); err != nil {
 		return nil, err
 	}
-	res := newResult("tag-owner add", status, message)
+	res := newResult(commandTagOwnerAdd, status, message)
 	res.File = path
 	return res, nil
 }
@@ -514,14 +538,14 @@ func runHost(path string, args []string) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if policy.Hosts == nil {
-		policy.Hosts = make(map[string]string)
+	operation := aclpolicy.PatchAdd(map[string]string{name: address}, "hosts")
+	if policy.Hosts != nil {
+		operation = aclpolicy.PatchAdd(address, "hosts", name)
 	}
-	policy.Hosts[name] = address
-	if err = aclpolicy.Write(path, policy); err != nil {
+	if err = aclpolicy.WritePatch(path, operation); err != nil {
 		return nil, err
 	}
-	res := newResult("host set", statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
+	res := newResult(commandHostSet, statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
 	res.File = path
 	return res, nil
 }
@@ -553,14 +577,14 @@ func runPostureSet(path string, args []string) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if policy.Postures == nil {
-		policy.Postures = make(map[string][]string)
+	operation := aclpolicy.PatchAdd(map[string][]string{canonical: slices.Clone(exprs)}, "postures")
+	if policy.Postures != nil {
+		operation = aclpolicy.PatchAdd(slices.Clone(exprs), "postures", canonical)
 	}
-	policy.Postures[canonical] = slices.Clone(exprs)
-	if err = aclpolicy.Write(path, policy); err != nil {
+	if err = aclpolicy.WritePatch(path, operation); err != nil {
 		return nil, err
 	}
-	res := newResult("posture set", statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
+	res := newResult(commandPostureSet, statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
 	res.File = path
 	return res, nil
 }
@@ -578,37 +602,25 @@ func runPostureRemove(path string, args []string) (*result, error) {
 		return nil, err
 	}
 	if _, ok := policy.Postures[canonical]; !ok {
-		res := newResult("posture remove", statusNoChanges,
+		res := newResult(commandPostureRemove, statusNoChanges,
 			fmt.Sprintf("posture %s not present in %s", canonical, path))
 		res.File = path
 		return res, nil
 	}
-	delete(policy.Postures, canonical)
-	if err = aclpolicy.Write(path, policy); err != nil {
+	// Remove the member, never the whole "postures" key — see runGrantRemove.
+	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("postures", canonical)); err != nil {
 		return nil, err
 	}
-	res := newResult("posture remove", statusOK,
+	res := newResult(commandPostureRemove, statusOK,
 		fmt.Sprintf("removed posture %s from %s", canonical, path))
 	res.File = path
 	return res, nil
 }
 
-func requireJSONEditTarget(path string) error {
-	if !strings.EqualFold(filepath.Ext(path), ".json") {
-		return usagef(
-			"typed edits require a .json file; refusing to rewrite %q because HuJSON comments and formatting would be lost",
-			path,
-		)
-	}
-	return nil
-}
-
-// loadForEdit enforces the .json-only guard and loads the policy so every typed
-// edit shares one place that prevents rewriting HuJSON as comment-stripped JSON.
+// loadForEdit validates the complete typed policy before a raw HuJSON patch is
+// selected and written. DisallowUnknownFields makes this the data-loss guard:
+// an edit cannot silently discard policy data the pinned schema does not model.
 func loadForEdit(path string) (*aclpolicy.Policy, error) {
-	if err := requireJSONEditTarget(path); err != nil {
-		return nil, err
-	}
 	return aclpolicy.Load(path)
 }
 
@@ -1074,20 +1086,29 @@ type schemaCommand struct {
 	Usage   string `json:"usage"`
 }
 
+type schemaCapabilities struct {
+	TypedEdits schemaTypedEditCapability `json:"typed_edits"`
+}
+
+type schemaTypedEditCapability struct {
+	Formats           []string `json:"formats"`
+	PreservesComments bool     `json:"preserves_comments"`
+}
+
 // commandCatalog is the single source of truth for the command list, shared by
 // usage() and the -schema document so a human and an agent see the same set.
 func commandCatalog() []schemaCommand {
 	return []schemaCommand{
 		{
-			"grant add",
+			commandGrantAdd,
 			"Append a grant to the policy",
 			"grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME]",
 		},
-		{"grant remove", "Remove a grant by zero-based index", "grant remove --index N"},
-		{"tag-owner add", "Add an owner to a tag", "tag-owner add TAG OWNER"},
-		{"host set", "Set a host alias to an address", "host set NAME ADDRESS"},
-		{"posture set", "Add or replace a posture's expression list", "posture set NAME EXPR [EXPR ...]"},
-		{"posture remove", "Remove a posture definition", "posture remove NAME"},
+		{commandGrantRemove, "Remove a grant by zero-based index", "grant remove --index N"},
+		{commandTagOwnerAdd, "Add an owner to a tag", "tag-owner add TAG OWNER"},
+		{commandHostSet, "Set a host alias to an address", "host set NAME ADDRESS"},
+		{commandPostureSet, "Add or replace a posture's expression list", "posture set NAME EXPR [EXPR ...]"},
+		{commandPostureRemove, "Remove a posture definition", "posture remove NAME"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{
@@ -1125,6 +1146,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		Description   string                `json:"description"`
 		Flags         []schemaFlag          `json:"flags"`
 		Commands      []schemaCommand       `json:"commands"`
+		Capabilities  schemaCapabilities    `json:"capabilities"`
 		LintFindings  []aclpolicy.LintCheck `json:"lint_findings"`
 		ExitCodes     map[string]string     `json:"exit_codes"`
 	}{
@@ -1134,7 +1156,13 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, check, lint, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
-		LintFindings:  aclpolicy.LintCatalog(),
+		Capabilities: schemaCapabilities{
+			TypedEdits: schemaTypedEditCapability{
+				Formats:           []string{formatJSON, policyFormatHuJSON},
+				PreservesComments: true,
+			},
+		},
+		LintFindings: aclpolicy.LintCatalog(),
 		ExitCodes: map[string]string{
 			"0":  "success or reachable",
 			"1":  "operation or policy assertion failed, or not reachable",
@@ -1161,6 +1189,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fs.PrintDefaults()
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
+	fmt.Fprintln(w, "  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved")
 	fmt.Fprintln(w, "  tail-acl --file acl.json posture set posture:labCompliant \"custom:labCompliant == true\"")
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
