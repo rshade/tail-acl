@@ -2074,8 +2074,17 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 		t.Errorf("schema = %#v", doc)
 	}
 	if !slices.Equal(doc.Capabilities.TypedEdits.Formats, []string{"json", "hujson"}) ||
-		!doc.Capabilities.TypedEdits.PreservesComments {
+		!doc.Capabilities.TypedEdits.PreservesComments || !doc.Capabilities.TypedEdits.AuthorsComments {
 		t.Errorf("schema typed edit capabilities = %#v", doc.Capabilities.TypedEdits)
+	}
+	// Comment authoring is expressed once as a capability, but an agent reading
+	// the catalog still has to see the flag on every command that accepts it.
+	for _, name := range []string{commandGrantAdd, commandTagOwnerAdd, commandHostSet, commandPostureSet} {
+		if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool {
+			return command.Name == name && strings.Contains(command.Usage, "[--comment TEXT]")
+		}) {
+			t.Errorf("schema usage for %q is missing [--comment TEXT]: %#v", name, doc.Commands)
+		}
 	}
 	if !slices.ContainsFunc(doc.LintFindings, func(check aclpolicy.LintCheck) bool {
 		return check.ID == aclpolicy.LintUndefinedReference

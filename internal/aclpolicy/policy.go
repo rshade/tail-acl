@@ -34,18 +34,28 @@ type Policy struct {
 	SSHTests []SSHTest `json:"sshTests,omitempty"`
 }
 
-// PatchOperation is one comment-preserving RFC 6902 policy edit. Construct
-// operations with PatchAdd and PatchRemove so the encoded patch has exactly the
-// fields required by that operation.
+// PatchOperation is one comment-preserving policy edit: an RFC 6902 operation,
+// an authored comment, or both. Construct operations with PatchAdd and
+// PatchRemove so the encoded patch has exactly the fields required by that
+// operation, and with PatchComment or PatchCommentOverwrite to author a comment.
 //
 // Operations carry path segments rather than a rendered pointer because
 // WritePatch resolves the first segment against the document it is about to
 // patch. See resolveTopLevelKey for why that resolution cannot happen here.
+//
+// A comment carries its own segments because it names the node as it exists
+// *after* every operation in the call has been applied, which is not always the
+// node the operation targeted: creating an absent block patches the block, while
+// the comment belongs to the entry inside it.
 type PatchOperation struct {
 	op       string
 	segments []string
 	value    any
 	hasValue bool
+
+	comment          string
+	commentSegments  []string
+	commentOverwrite bool
 }
 
 // PatchAdd constructs an RFC 6902 add operation targeting segments. Per RFC
@@ -244,8 +254,13 @@ func Write(path string, policy *Policy) error {
 }
 
 // WritePatch atomically applies comment-preserving RFC 6902 operations to a
-// JSON or HuJSON policy. Callers must Load the policy first so unknown fields
-// are rejected before an edit can be written.
+// JSON or HuJSON policy, then authors any comments those operations carry.
+// Callers must Load the policy first so unknown fields are rejected before an
+// edit can be written.
+//
+// Operations apply in order, then every comment, then the document is
+// reformatted. Comments come last because a comment names its node as that node
+// exists after the edit — see PatchComment.
 func WritePatch(path string, operations ...PatchOperation) error {
 	value, err := parseFile(path)
 	if err != nil {
@@ -260,20 +275,28 @@ func WritePatch(path string, operations ...PatchOperation) error {
 		Path  string          `json:"path"`
 		Value json.RawMessage `json:"value,omitempty"`
 	}
-	patch := make([]encodedOperation, len(operations))
-	for i, operation := range operations {
+	// A comment-only operation has no RFC 6902 counterpart. It must be skipped
+	// rather than encoded: a zero-valued entry reaches hujson as {"op":"","path":""}
+	// and fails the whole patch. The slice stays non-nil so an all-comment call
+	// still marshals as [], which hujson accepts as an empty operation list.
+	patch := make([]encodedOperation, 0, len(operations))
+	for _, operation := range operations {
+		if operation.op == "" {
+			continue
+		}
 		segments := slices.Clone(operation.segments)
 		if len(segments) > 0 {
 			segments[0] = resolveTopLevelKey(value, segments[0])
 		}
-		patch[i] = encodedOperation{Op: operation.op, Path: JSONPointer(segments...)}
+		encoded := encodedOperation{Op: operation.op, Path: JSONPointer(segments...)}
 		if operation.hasValue {
-			encoded, valueErr := json.Marshal(operation.value)
+			raw, valueErr := json.Marshal(operation.value)
 			if valueErr != nil {
 				return fmt.Errorf("encoding patch value for %s: %w", path, valueErr)
 			}
-			patch[i].Value = encoded
+			encoded.Value = raw
 		}
+		patch = append(patch, encoded)
 	}
 	// Indent inserted composite values so a policy previously emitted by Write
 	// keeps that canonical layout. HuJSON's formatter will still retain compact
@@ -285,8 +308,45 @@ func WritePatch(path string, operations ...PatchOperation) error {
 	if err = value.Patch(rawPatch); err != nil {
 		return fmt.Errorf("patching %s: %w", path, err)
 	}
+	if err = applyComments(&value, path, operations); err != nil {
+		return err
+	}
 	value.Format()
 	return WriteRaw(path, value.Pack())
+}
+
+// applyComments authors each operation's comment onto the already-patched
+// document.
+//
+// The top-level key is resolved against the post-patch document so a legacy
+// capitalized key still resolves and a key the patch just created resolves to
+// its own spelling. A target that does not resolve is an error rather than a
+// silent skip, so the edit fails closed: hujson leaves a partially patched value
+// behind on error, but nothing is written.
+func applyComments(value *hujson.Value, path string, operations []PatchOperation) error {
+	for _, operation := range operations {
+		if operation.comment == "" {
+			continue
+		}
+		segments := slices.Clone(operation.commentSegments)
+		if len(segments) > 0 {
+			segments[0] = resolveTopLevelKey(*value, segments[0])
+		}
+		extra, found, err := leadingExtra(value, segments)
+		if err != nil {
+			return fmt.Errorf("commenting %s: %w", path, err)
+		}
+		if !found {
+			return fmt.Errorf("commenting %s: no node at %s", path, JSONPointer(segments...))
+		}
+		switch {
+		case operation.commentOverwrite:
+			replaceCommentLines(extra, operation.comment)
+		case !slices.Contains(ownCommentLines(*extra), operation.comment):
+			appendCommentLine(extra, operation.comment)
+		}
+	}
+	return nil
 }
 
 // WriteRaw atomically writes data to path. Existing file permissions are

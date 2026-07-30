@@ -401,7 +401,9 @@ func runGrant(path string, args []string) (*result, error) {
 	}
 }
 
-func runGrantAdd(path string, args []string) (*result, error) {
+// parseGrantAddArgs returns the grant "grant add" was asked to author, plus the
+// comment to attach to it and whether that comment replaces existing ones.
+func parseGrantAddArgs(args []string) (tailscale.Grant, string, bool, error) {
 	fs := flag.NewFlagSet("tail-acl grant add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var source, destination, ip, srcPosture stringListFlag
@@ -409,23 +411,26 @@ func runGrantAdd(path string, args []string) (*result, error) {
 	fs.Var(&destination, "dst", "grant destination; may be repeated")
 	fs.Var(&ip, "ip", "IP protocol and port expression; may be repeated")
 	fs.Var(&srcPosture, "src-posture", "required device posture (posture:NAME); may be repeated")
+	text, overwrite := registerCommentFlags(fs)
 	if err := fs.Parse(args); err != nil {
-		return nil, usageError{err}
+		return tailscale.Grant{}, "", false, usageError{err}
 	}
 	if len(fs.Args()) != 0 {
-		return nil, usagef("unexpected grant add arguments: %s", strings.Join(fs.Args(), " "))
+		return tailscale.Grant{}, "", false,
+			usagef("unexpected grant add arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	if err != nil {
+		return tailscale.Grant{}, "", false, err
 	}
 	for _, posture := range srcPosture {
-		if err := aclpolicy.ValidatePostureReference(posture); err != nil {
-			return nil, usageError{err}
+		if postureErr := aclpolicy.ValidatePostureReference(posture); postureErr != nil {
+			return tailscale.Grant{}, "", false, usageError{postureErr}
 		}
 	}
 	if len(source) == 0 || len(destination) == 0 || len(ip) == 0 {
-		return nil, usagef("grant add requires at least one --src, --dst, and --ip")
-	}
-	policy, err := loadForEdit(path)
-	if err != nil {
-		return nil, err
+		return tailscale.Grant{}, "", false,
+			usagef("grant add requires at least one --src, --dst, and --ip")
 	}
 	grant := tailscale.Grant{
 		Source:      []string(source),
@@ -433,19 +438,46 @@ func runGrantAdd(path string, args []string) (*result, error) {
 		IP:          []string(ip),
 		SrcPosture:  []string(srcPosture),
 	}
+	return grant, comment, overwriteComment, nil
+}
+
+func runGrantAdd(path string, args []string) (*result, error) {
+	grant, comment, overwriteComment, err := parseGrantAddArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
 	grantKey, err := aclpolicy.GrantSemanticKey(grant)
 	if err != nil {
 		return nil, err
 	}
+	var matchingGrants []int
 	for i := range policy.Grants {
 		existingKey, keyErr := aclpolicy.GrantSemanticKey(policy.Grants[i])
 		if keyErr != nil {
 			return nil, keyErr
 		}
 		if existingKey == grantKey {
-			return grantResult(commandGrantAdd, statusNoChanges,
-				fmt.Sprintf("grant %d already exists in %s", i, path), path, i), nil
+			// Without a comment there is no syntax-tree node to choose, so keep
+			// the established idempotent behavior even when lint would report
+			// duplicate grants.
+			if comment == "" {
+				return commentExistingGrant(path, comment, overwriteComment, i)
+			}
+			matchingGrants = append(matchingGrants, i)
 		}
+	}
+	if len(matchingGrants) > 1 {
+		return nil, fmt.Errorf(
+			"cannot comment grant: duplicate grants match at indexes %v; remove duplicates first",
+			matchingGrants,
+		)
+	}
+	if len(matchingGrants) == 1 {
+		return commentExistingGrant(path, comment, overwriteComment, matchingGrants[0])
 	}
 	grantsPresent := policy.Grants != nil
 	policy.Grants = append(policy.Grants, grant)
@@ -453,12 +485,38 @@ func runGrantAdd(path string, args []string) (*result, error) {
 	if grantsPresent {
 		operation = aclpolicy.PatchAdd(grant, "grants", "-")
 	}
-	if err = aclpolicy.WritePatch(path, operation); err != nil {
+	operations := []aclpolicy.PatchOperation{operation}
+	if comment != "" {
+		// "-" names the last element after the patch, which is the appended
+		// grant whether the operation created the block or added into it.
+		operations = append(operations, commentPatch(comment, overwriteComment, "grants", "-"))
+	}
+	if err = aclpolicy.WritePatch(path, operations...); err != nil {
 		return nil, err
 	}
 	index := len(policy.Grants) - 1
 	return grantResult(commandGrantAdd, statusOK,
 		fmt.Sprintf("added grant %d to %s", index, path), path, index), nil
+}
+
+// commentExistingGrant handles "grant add" for a grant the policy already
+// carries. A comment is the only thing such a call can still change: a grant's
+// identity is its selectors, and tailscale.Grant has no comment field, so
+// comment state lives in the syntax tree alone.
+func commentExistingGrant(path, comment string, overwrite bool, index int) (*result, error) {
+	operations, err := commentOperations(path, comment, overwrite, "grants", strconv.Itoa(index))
+	if err != nil {
+		return nil, err
+	}
+	if len(operations) == 0 {
+		return grantResult(commandGrantAdd, statusNoChanges,
+			fmt.Sprintf("grant %d already exists in %s", index, path), path, index), nil
+	}
+	if err = aclpolicy.WritePatch(path, operations...); err != nil {
+		return nil, err
+	}
+	return grantResult(commandGrantAdd, statusOK,
+		fmt.Sprintf("added comment to grant %d in %s", index, path), path, index), nil
 }
 
 func runGrantRemove(path string, args []string) (*result, error) {
@@ -496,21 +554,27 @@ func grantResult(command, status, message, path string, index int) *result {
 }
 
 func runTagOwner(path string, args []string) (*result, error) {
-	if len(args) != 3 || args[0] != subAdd {
+	fs := flag.NewFlagSet("tail-acl tag-owner add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	text, overwrite := registerCommentFlags(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(positional) != 3 || positional[0] != subAdd {
 		return nil, usagef("usage: tail-acl tag-owner add TAG OWNER")
 	}
-	tag, owner := args[1], args[2]
+	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	if err != nil {
+		return nil, err
+	}
+	tag, owner := positional[1], positional[2]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	status, message := statusOK, fmt.Sprintf("added owner %s to %s in %s", owner, tag, path)
-	if slices.Contains(policy.TagOwners[tag], owner) {
-		status = statusNoChanges
-		message = fmt.Sprintf("owner %s already owns %s in %s", owner, tag, path)
-		res := newResult(commandTagOwnerAdd, status, message)
-		res.File = path
-		return res, nil
+	if index := slices.Index(policy.TagOwners[tag], owner); index >= 0 {
+		return commentExistingOwner(path, comment, overwriteComment, tag, owner, index)
 	}
 	var operation aclpolicy.PatchOperation
 	switch owners := policy.TagOwners[tag]; {
@@ -521,31 +585,85 @@ func runTagOwner(path string, args []string) (*result, error) {
 	default:
 		operation = aclpolicy.PatchAdd(owner, "tagOwners", tag, "-")
 	}
-	if err = aclpolicy.WritePatch(path, operation); err != nil {
+	operations := []aclpolicy.PatchOperation{operation}
+	if comment != "" {
+		// "-" names the last element once the patch has run, which is where all
+		// three branches above leave the new owner.
+		operations = append(operations, commentPatch(comment, overwriteComment, "tagOwners", tag, "-"))
+	}
+	if err = aclpolicy.WritePatch(path, operations...); err != nil {
 		return nil, err
 	}
-	res := newResult(commandTagOwnerAdd, status, message)
+	res := newResult(commandTagOwnerAdd, statusOK, fmt.Sprintf("added owner %s to %s in %s", owner, tag, path))
+	res.File = path
+	return res, nil
+}
+
+// commentExistingOwner handles "tag-owner add" for an owner the tag already
+// has. Without a comment that stays the no-op it has always been; with one, the
+// comment alone is the edit.
+func commentExistingOwner(path, comment string, overwrite bool, tag, owner string, index int) (*result, error) {
+	operations, err := commentOperations(path, comment, overwrite, "tagOwners", tag, strconv.Itoa(index))
+	if err != nil {
+		return nil, err
+	}
+	res := newResult(commandTagOwnerAdd, statusNoChanges,
+		fmt.Sprintf("owner %s already owns %s in %s", owner, tag, path))
+	if len(operations) > 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		res = newResult(commandTagOwnerAdd, statusOK,
+			fmt.Sprintf("added comment to owner %s of %s in %s", owner, tag, path))
+	}
 	res.File = path
 	return res, nil
 }
 
 func runHost(path string, args []string) (*result, error) {
-	if len(args) != 3 || args[0] != subSet {
+	fs := flag.NewFlagSet("tail-acl host set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	text, overwrite := registerCommentFlags(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(positional) != 3 || positional[0] != subSet {
 		return nil, usagef("usage: tail-acl host set NAME ADDRESS")
 	}
-	name, address := args[1], args[2]
+	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	if err != nil {
+		return nil, err
+	}
+	name, address := positional[1], positional[2]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	operation := aclpolicy.PatchAdd(map[string]string{name: address}, "hosts")
-	if policy.Hosts != nil {
-		operation = aclpolicy.PatchAdd(address, "hosts", name)
+	// Skip the value operation when the address already matches, so a
+	// comment-only edit really is comment-only and a repeat is reported as such.
+	var operations []aclpolicy.PatchOperation
+	if existing, present := policy.Hosts[name]; !present || existing != address {
+		operation := aclpolicy.PatchAdd(map[string]string{name: address}, "hosts")
+		if policy.Hosts != nil {
+			operation = aclpolicy.PatchAdd(address, "hosts", name)
+		}
+		operations = append(operations, operation)
 	}
-	if err = aclpolicy.WritePatch(path, operation); err != nil {
+	commentOps, err := commentOperations(path, comment, overwriteComment, "hosts", name)
+	if err != nil {
 		return nil, err
 	}
-	res := newResult(commandHostSet, statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
+	operations = append(operations, commentOps...)
+
+	res := newResult(commandHostSet, statusNoChanges,
+		fmt.Sprintf("host %s already set to %s in %s", name, address, path))
+	if len(operations) > 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		res = newResult(commandHostSet, statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
+	}
 	res.File = path
 	return res, nil
 }
@@ -565,26 +683,54 @@ func runPosture(path string, args []string) (*result, error) {
 }
 
 func runPostureSet(path string, args []string) (*result, error) {
-	if len(args) < 2 { //nolint:mnd // NAME and at least one EXPR required
+	fs := flag.NewFlagSet("tail-acl posture set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	text, overwrite := registerCommentFlags(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(positional) < 2 { //nolint:mnd // NAME and at least one EXPR required
 		return nil, usagef("usage: tail-acl posture set NAME EXPR [EXPR ...]")
 	}
-	name, exprs := args[0], args[1:]
-	canonical, err := aclpolicy.NormalizePostureName(name)
+	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := aclpolicy.NormalizePostureName(positional[0])
 	if err != nil {
 		return nil, usageError{err}
 	}
+	exprs := positional[1:]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	operation := aclpolicy.PatchAdd(map[string][]string{canonical: slices.Clone(exprs)}, "postures")
-	if policy.Postures != nil {
-		operation = aclpolicy.PatchAdd(slices.Clone(exprs), "postures", canonical)
+	// Order-sensitive equality is the conservative reading: nothing else in the
+	// tool treats a posture's expression list as an unordered set, so reordering
+	// it stays a real edit.
+	var operations []aclpolicy.PatchOperation
+	if existing, present := policy.Postures[canonical]; !present || !slices.Equal(existing, exprs) {
+		operation := aclpolicy.PatchAdd(map[string][]string{canonical: slices.Clone(exprs)}, "postures")
+		if policy.Postures != nil {
+			operation = aclpolicy.PatchAdd(slices.Clone(exprs), "postures", canonical)
+		}
+		operations = append(operations, operation)
 	}
-	if err = aclpolicy.WritePatch(path, operation); err != nil {
+	commentOps, err := commentOperations(path, comment, overwriteComment, "postures", canonical)
+	if err != nil {
 		return nil, err
 	}
-	res := newResult(commandPostureSet, statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
+	operations = append(operations, commentOps...)
+
+	res := newResult(commandPostureSet, statusNoChanges,
+		fmt.Sprintf("posture %s already set in %s", canonical, path))
+	if len(operations) > 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		res = newResult(commandPostureSet, statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
+	}
 	res.File = path
 	return res, nil
 }
@@ -622,6 +768,133 @@ func runPostureRemove(path string, args []string) (*result, error) {
 // an edit cannot silently discard policy data the pinned schema does not model.
 func loadForEdit(path string) (*aclpolicy.Policy, error) {
 	return aclpolicy.Load(path)
+}
+
+// Comment flags are registered per command rather than globally. Only the typed
+// authoring commands can name the node a comment belongs to, and a global flag
+// would be quietly accepted by every command that cannot.
+const (
+	commentFlagName   = "comment"
+	overwriteFlagName = "overwrite-comment"
+)
+
+func registerCommentFlags(fs *flag.FlagSet) (*string, *bool) {
+	text := fs.String(commentFlagName, "", "attach TEXT to the authored entry as a leading // comment")
+	overwrite := fs.Bool(overwriteFlagName, false,
+		"replace the entry's existing comments instead of appending to them")
+	return text, overwrite
+}
+
+// commentText returns the validated comment body and whether it replaces the
+// entry's existing comments.
+//
+// fs.Visit is what distinguishes an unset flag from --comment "": the empty
+// string asks for a comment, and "// " is an edit nobody requested.
+// --overwrite-comment alone is rejected rather than ignored, because doing
+// nothing quietly would read as "the overwrite happened".
+func commentText(fs *flag.FlagSet, text *string, overwrite *bool) (string, bool, error) {
+	var set bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == commentFlagName {
+			set = true
+		}
+	})
+	if !set {
+		if *overwrite {
+			return "", false, usagef("--%s requires --%s", overwriteFlagName, commentFlagName)
+		}
+		return "", false, nil
+	}
+	if err := aclpolicy.ValidateCommentText(*text); err != nil {
+		return "", false, usageError{err}
+	}
+	return strings.TrimSpace(*text), *overwrite, nil
+}
+
+// commentPatch builds the operation that authors comment onto a node the same
+// call is creating. It needs no duplicate check: a node that does not exist yet
+// cannot already carry a comment.
+func commentPatch(comment string, overwrite bool, segments ...string) aclpolicy.PatchOperation {
+	if overwrite {
+		return aclpolicy.PatchCommentOverwrite(comment, segments...)
+	}
+	return aclpolicy.PatchComment(comment, segments...)
+}
+
+// commentOperations returns the operation that authors comment onto an entry
+// that already exists, or none when the entry already reads that way.
+//
+// Whether this is a change is decided from the same LeadingComments the writer
+// suppresses duplicates with, so a command cannot report a change for a write
+// that changed nothing.
+func commentOperations(path, comment string, overwrite bool, segments ...string) ([]aclpolicy.PatchOperation, error) {
+	if comment == "" {
+		return nil, nil
+	}
+	existing, err := aclpolicy.LeadingComments(path, segments...)
+	if err != nil {
+		return nil, err
+	}
+	unchanged := slices.Contains(existing, comment)
+	if overwrite {
+		unchanged = slices.Equal(existing, []string{comment})
+	}
+	if unchanged {
+		return nil, nil
+	}
+	return []aclpolicy.PatchOperation{commentPatch(comment, overwrite, segments...)}, nil
+}
+
+// parseInterspersed parses registered flags appearing anywhere among positional
+// arguments and returns the positionals in order.
+//
+// Go's flag package stops at the first non-flag argument, but the documented
+// form puts the flag last:
+//
+//	tail-acl --file acl.json host set web 100.64.0.10 --comment "..."
+//
+// so parsing has to resume after each positional. Only registered flags are
+// parsed: posture expressions are opaque strings and may legitimately begin
+// with "-", such as "-1 < custom:score". A bare "--" stops flag recognition so
+// even an expression named like a registered flag can be passed literally.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		arg := args[0]
+		if arg == "--" {
+			return append(positional, args[1:]...), nil
+		}
+
+		nameValue := strings.TrimPrefix(arg, "-")
+		nameValue = strings.TrimPrefix(nameValue, "-")
+		name, _, hasValue := strings.Cut(nameValue, "=")
+		registered := fs.Lookup(name)
+		if registered == nil || !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			args = args[1:]
+			continue
+		}
+
+		flagArgs := args[:1]
+		consumed := 1
+		boolFlag, isBoolFlag := registered.Value.(interface{ IsBoolFlag() bool })
+		if !hasValue && (!isBoolFlag || !boolFlag.IsBoolFlag()) {
+			if len(args) < 2 { //nolint:mnd // flag name plus its required value
+				err := fs.Parse(flagArgs)
+				if err == nil {
+					err = fmt.Errorf("flag needs an argument: -%s", name)
+				}
+				return nil, usageError{err}
+			}
+			flagArgs = args[:2]
+			consumed = 2
+		}
+		if err := fs.Parse(flagArgs); err != nil {
+			return nil, usageError{err}
+		}
+		args = args[consumed:]
+	}
+	return positional, nil
 }
 
 func runMerge(path string, args []string) (*result, error) {
@@ -1093,6 +1366,7 @@ type schemaCapabilities struct {
 type schemaTypedEditCapability struct {
 	Formats           []string `json:"formats"`
 	PreservesComments bool     `json:"preserves_comments"`
+	AuthorsComments   bool     `json:"authors_comments"`
 }
 
 // commandCatalog is the single source of truth for the command list, shared by
@@ -1102,12 +1376,16 @@ func commandCatalog() []schemaCommand {
 		{
 			commandGrantAdd,
 			"Append a grant to the policy",
-			"grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME]",
+			"grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME] [--comment TEXT]",
 		},
 		{commandGrantRemove, "Remove a grant by zero-based index", "grant remove --index N"},
-		{commandTagOwnerAdd, "Add an owner to a tag", "tag-owner add TAG OWNER"},
-		{commandHostSet, "Set a host alias to an address", "host set NAME ADDRESS"},
-		{commandPostureSet, "Add or replace a posture's expression list", "posture set NAME EXPR [EXPR ...]"},
+		{commandTagOwnerAdd, "Add an owner to a tag", "tag-owner add TAG OWNER [--comment TEXT]"},
+		{commandHostSet, "Set a host alias to an address", "host set NAME ADDRESS [--comment TEXT]"},
+		{
+			commandPostureSet,
+			"Add or replace a posture's expression list",
+			"posture set NAME EXPR [EXPR ...] [--comment TEXT]",
+		},
 		{commandPostureRemove, "Remove a posture definition", "posture remove NAME"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
@@ -1160,6 +1438,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 			TypedEdits: schemaTypedEditCapability{
 				Formats:           []string{formatJSON, policyFormatHuJSON},
 				PreservesComments: true,
+				AuthorsComments:   true,
 			},
 		},
 		LintFindings: aclpolicy.LintCatalog(),
@@ -1191,6 +1470,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
 	fmt.Fprintln(w, "  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved")
 	fmt.Fprintln(w, "  tail-acl --file acl.json posture set posture:labCompliant \"custom:labCompliant == true\"")
+	fmt.Fprintln(w, "  tail-acl --file acl.json host set web 100.64.0.10 --comment \"Legacy monitoring endpoint\"")
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")

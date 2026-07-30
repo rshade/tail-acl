@@ -37,6 +37,12 @@ tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments pre
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
 tail-acl --file acl.json posture remove posture:labCompliant
+
+# Author a comment on the entry the command creates:
+tail-acl --file acl.json grant add --src tag:app --dst tag:db --ip tcp:5432 \
+  --comment "Database access for application nodes"
+tail-acl --file acl.hujson host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
+tail-acl --file acl.json host set web 100.64.0.10 --comment "Now the canary" --overwrite-comment
 tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
 
 # Compile commented HuJSON sources into one strict-JSON policy:
@@ -73,11 +79,11 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 | Command | Purpose |
 | --- | --- |
-| `grant add` | Append a grant (`--src`, `--dst`, `--ip`; `--src-posture` optional; repeatable, order-insensitive, idempotent) |
+| `grant add` | Append a grant (`--src`, `--dst`, `--ip`; `--src-posture` optional; repeatable, order-insensitive, idempotent; `--comment`) |
 | `grant remove` | Remove a grant by zero-based `--index` |
-| `tag-owner add` | Add an owner to a tag |
-| `host set` | Set a host alias to an address |
-| `posture set` | Add or replace a posture's expression list |
+| `tag-owner add` | Add an owner to a tag (`--comment`) |
+| `host set` | Set a host alias to an address (`--comment`) |
+| `posture set` | Add or replace a posture's expression list (`--comment`) |
 | `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
@@ -122,14 +128,46 @@ in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
 the last entry from a block empties it rather than deleting the key, so a
 comment attached to that block is not carried out with it.
 
+The four authoring commands can also **write** a comment. `--comment TEXT`
+attaches `// TEXT` to the exact node the command authored: the new `grants`
+element for `grant add`, the added owner element for `tag-owner add`, and the
+`hosts` or `postures` member for `host set` and `posture set`. `TEXT` is one
+non-empty line — a carriage return or newline is rejected with exit `2` and the
+file is left byte-identical — and the `//` marker is supplied by the CLI.
+
+By default a comment is **appended** to whatever the entry already carries, and
+an exact duplicate is suppressed, so re-running a command never stacks the same
+line twice. Pass `--overwrite-comment` to replace the entry's own comments
+instead; a comment on the line the *preceding* entry ends on belongs to that
+entry and is left alone either way. `--overwrite-comment` without `--comment` is
+a usage error.
+
+Because a comment is part of the entry, it participates in the idempotence
+check: re-running a command with the same value and the same comment reports
+`no_changes` and leaves the file untouched, while adding a missing comment to an
+entry that already has the right value is a real change and reports `ok`. This
+is why `host set` and `posture set` now report `no_changes` on a repeat, which
+they did not before.
+
+One consequence is worth stating plainly: **authoring a comment into a `.json`
+file makes it stop being strict JSON.** JSON has no comments, so the file
+becomes HuJSON and the formatter also adds trailing commas throughout. Nothing
+in this repo is affected — `validate`, `plan`, and `upload` post the raw bytes
+and Tailscale's API accepts HuJSON — but an external consumer that runs `jq` (or
+any strict JSON parser) over the policy will break. Rename the file to
+`.hujson`, or leave the comment off that policy.
+
 Layout, however, is **not** preserved: the file is rewritten in HuJSON's
 canonical format. Indentation is normalized to tabs, column alignment is
 re-derived for the whole document, line endings become LF, and a file that is
 already non-standard JSON gains trailing commas throughout. A policy that is
-strict JSON stays strict JSON, so `jq` and API consumers are unaffected. The
+strict JSON stays strict JSON — unless `--comment` authors one into it, which is
+the single exception — so `jq` and API consumers are otherwise unaffected. The
 practical consequence is that the first typed edit against a policy not already
 in canonical form produces a diff touching every line; running one edit on its
-own first keeps that reformat out of the review for the real change.
+own first keeps that reformat out of the review for the real change. Authoring a
+comment onto a compact array or object expands it, because HuJSON always expands
+a composite whose leading extra contains a newline.
 
 `merge` has two paths:
 `MergePair` preserves comments (single base + snippet), while `MergeDirectories`
