@@ -133,7 +133,7 @@
     "trace": [
       "grant 0: source did not match",
       "grant 1: source did not match",
-      "grant 2: network capability did not match port 5432 for protocol tcp",
+      "grant 2: network capability port 5432 matched but protocol \"udp\" did not",
       "grant 3: source did not match",
       "grant 4: source did not match",
       "grant 5: destination did not match",

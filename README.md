@@ -52,6 +52,7 @@ tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-i
 tail-acl --file acl/acl.generated.json test
 tail-acl -format json --file acl/acl.generated.json test
 tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
+tail-acl --indeterminate=fail --file acl/acl.generated.json test  # fail CI if proof is incomplete
 
 # Ask one reachability question locally (no credentials or network):
 tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
@@ -87,8 +88,8 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
-| `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; an unsettleable assertion is `indeterminate`) |
-| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|any` are also accepted) |
+| `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions) |
+| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
@@ -97,18 +98,26 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 `--file` (policy path), `--tailnet` / `--api-key` (default to `TAILSCALE_TAILNET` /
 `TAILSCALE_API_KEY`), `--if-match` (ETag for `upload`), `-strict` (make local
-`test`/`check` evaluation reject any unparseable rule), `-format human|json`,
-`-verbose`, `--version`, `-schema`. `TAILSCALE_API_URL` overrides the API base URL
-(used by tests).
+`test`/`check` evaluation reject any unparseable rule),
+`--indeterminate fail|warn|ignore` (test exit policy, default `warn`),
+`-format human|json`, `-verbose`, `--version`, `-schema`.
+`TAILSCALE_API_URL` overrides the API base URL (used by tests).
 
 ### Exit codes
 
-- `0` success; all policy assertions passed; `check` reports reachable; `lint` found nothing at or above the threshold
-- `1` operation or policy assertion failed; `check` reports not reachable; `lint` found issues at or above the threshold
+- `0` success; all policy assertions passed, or `test` used
+  `--indeterminate=ignore`, which suppresses the exit code but not the finding —
+  the envelope still reports `status: "indeterminate"` and a non-zero
+  `test_summary.indeterminate`; `check` reports reachable; `lint` found nothing
+  at or above the threshold
+- `1` operation or policy assertion failed (including indeterminate under
+  `--indeterminate=fail`); `check` reports not reachable; `lint` found issues at
+  or above the threshold
 - `2` usage, input, or collection error
-- `10` `check` is indeterminate, or `test` had an assertion it could not settle —
-  a rule would have applied, but deciding it needs a fact the policy file does
-  not contain. This is deliberately not a denial: see
+- `10` `check` is indeterminate, or `test` under the default
+  `--indeterminate=warn` had an assertion it could not settle — a rule might
+  have applied, but the local evaluator could not prove whether it did. This is
+  deliberately not a denial: see
   [the safety boundary](#the-safety-boundary) below.
 
 ## Design
@@ -195,7 +204,11 @@ that a referenced posture is actually defined — that dangling-reference check 
 
 `test` is a pure evaluator over the candidate file's network-level grants and
 legacy ACLs. Each top-level `tests` `accept` or `deny` destination becomes one
-stable assertion result with pass/fail status, evidence, and a decision trace.
+stable assertion result with pass/fail/indeterminate status, evidence, and a
+decision trace. A deny passes only after every rule has been proved
+inapplicable. If a rule's source and destination overlap the assertion but its
+port or protocol cannot be understood, the denial is `indeterminate`, never a
+pass.
 Top-level `sshTests` assertions are loaded and preserved across typed edits but
 are not evaluated: SSH assertions use SSH usernames and three verdicts
 (`accept`, `check`, and `deny`), so they require a separate evaluator. A run
@@ -207,18 +220,55 @@ other exact selectors, `autogroup:member`, `autogroup:self`, `autogroup:internet
 single/list/range port expressions. Application-only capabilities do not grant
 network access. Because posture and `via` routing depend on semantics that
 cannot be reproduced safely from the policy alone, a matching rule that uses
-either returns exit `2` instead of guessing; use `validate` for the authoritative
-control-plane evaluation in that case.
+either makes the assertion indeterminate instead of guessing; use `validate`
+for the authoritative control-plane evaluation in that case.
 
 Rule *syntax* is scanned once up front, before any assertion runs, so the
 result never depends on which assertion happened to reach which rule. An
 element the evaluator cannot parse — most often an ACL destination written
-without its port, as in `"dst": ["tag:web"]` — can never match, so a verdict
-reached alongside one may be wrong. By default such a rule is logged at `warn`
-on stderr and listed in the envelope's `skipped` array while the remaining
-assertions are still reported; `-strict` refuses to report verdicts computed
-around it at all and exits `2`. Prefer `-strict` in CI, where a silently
-mis-evaluated `deny` assertion is the failure you least want to pass.
+without its port, as in `"dst": ["tag:web"]` — might have matched if it were
+understood. It is logged at `warn` on stderr and listed in the envelope's
+policy-scoped `skipped` array. Separately, only assertions whose narrowed
+evaluation path reaches that element are `indeterminate`; unrelated denials
+remain proven passes. `-strict` is the opt-in policy-rejection posture: it
+refuses to report any verdicts when `skipped` is non-empty and exits `2`.
+
+`--indeterminate=fail|warn|ignore` controls `test`'s exit code when there are
+no definite failures. `warn` is the default and exits `10`; `fail` exits `1`
+for CI gates; `ignore` exits `0` for migrations. Every mode keeps the assertion
+status, count, `skipped` entries, and stderr warnings intact. The flag is
+test-only: `check`'s three-state verdict is its product and always exits `10`
+when it cannot settle the query.
+
+Local evaluation assumes the policy's references are valid. An undefined
+`group:`, host alias, or `ipset:` reference matches nothing locally even though
+the control plane rejects that policy. `tail-acl lint` catches those dangling
+references; it does **not** catch an unreadable port or protocol, so it will not
+predict an exit `10`. Server-side `validate` is the only check that catches
+both. `-strict` checks unreadable network-rule syntax, not dangling references.
+
+Trace entries are human-readable evidence, not a stable contract — their wording
+changes as the evaluator learns to name a cause more precisely. Machine
+consumers should branch on `status` (or `access` for `check`) and read
+`evidence`, never grep the `trace` array.
+
+### Compatibility
+
+Two changes affect callers that branch on exit codes, in the same spirit as the
+`grant_index` note above:
+
+- `test` previously exited `0` when an unparseable rule lay on an assertion's
+  evaluation path, because such a rule was treated as unable to match — a
+  confident wrong pass on a `deny`. It now exits `10` by default. A CI job that
+  green-lights on `[ $? -eq 0 ]` will start failing on a policy the tool used to
+  bless. Set `--indeterminate=ignore` to restore the old exit code for one
+  release while the policy is fixed; the finding stays in the envelope either
+  way.
+- `check` in the same situation previously reported `access: "deny"` with exit
+  `1`; it now reports `access: "indeterminate"` with exit `10`, and omits the
+  legacy `allowed` field rather than serializing `false`. There is deliberately
+  no opt-out: `check`'s three-state verdict is its product, and a shell caller
+  branching on `-eq 1` should treat `10` as "could not prove", not as reachable.
 
 ### `check` design decision: local evaluation
 
@@ -245,10 +295,12 @@ misread a blocking rule as an allowing one. This is additive in shape but not in
 meaning, so switch on `access` first.
 
 By default the evaluator treats a port-only question like a native Tailscale
-policy test with no `proto`: either TCP or UDP access is sufficient. Pass
-`--proto tcp` or `--proto udp` to narrow the question when the distinction
-matters (`udp:53` versus `tcp:53`); the default stays `any` so an existing
-caller's verdicts do not move. It understands network
+policy test with no `proto`: access under any port-carrying protocol is
+sufficient. Those are TCP, UDP, and SCTP — the three Tailscale's packet filter
+matches by port; every other protocol needs the entire port range and so answers
+no port question. Pass `--proto tcp`, `--proto udp`, or `--proto sctp` to narrow
+the question when the distinction matters (`udp:53` versus `tcp:53`); the default
+stays `any` so an existing caller's verdicts do not move. It understands network
 grants and legacy ACLs, groups, hosts, IP sets, exact tag/user selectors,
 supported autogroups, IP/CIDR containment, bare or protocol-qualified ports,
 lists, and ranges. Application capabilities alone do not grant network access.
@@ -262,6 +314,12 @@ posture, `via` routing, and the role autogroups (`autogroup:admin`,
 `autogroup:owner`, the `*-admin` family, `autogroup:auditor`,
 `autogroup:shared`) all resolve against control-plane state this evaluator
 never sees — as does any autogroup Tailscale adds after this release.
+
+A rule the evaluator cannot *read* lands on the same boundary. A destination
+written without its port (`"dst": ["tag:web"]`), an unknown protocol token, or a
+malformed port expression might have matched had it been understood, so a query
+whose evaluation path reaches one is `indeterminate` rather than a denial.
+Unrelated queries — those a readable field already ruled out — stay proven.
 
 Which autogroups can be settled locally depends on the **query as well as the
 selector**. `autogroup:tagged` is decidable against `tag:batch` (yes) and

@@ -1483,36 +1483,7 @@ func TestPolicyTestUnparseableRule(t *testing.T) {
 
 	t.Run("default warns and continues", func(t *testing.T) {
 		t.Parallel()
-		path := filepath.Join(t.TempDir(), "acl.hujson")
-		writeTestPolicy(t, path, policy)
-		var stdout, stderr strings.Builder
-		err := run(
-			context.Background(),
-			[]string{"-format", "json", "--file", path, "test"},
-			func(string) string { return "" },
-			http.DefaultClient,
-			"",
-			&stdout,
-			&stderr,
-		)
-		if code := exitCode(err); code != exitOK {
-			t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
-		}
-		if !strings.Contains(stderr.String(), "skipping unparseable policy rule") ||
-			!strings.Contains(stderr.String(), "acls[0].dst[0]") {
-			t.Errorf("stderr missing skip warning: %s", stderr.String())
-		}
-		var res result
-		if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
-			t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
-		}
-		if len(res.Skipped) != 1 || res.Skipped[0].Rule != "acls[0].dst[0]" ||
-			res.Skipped[0].Value != "tag:web" {
-			t.Errorf("Skipped = %#v, want the unparseable acls[0] destination", res.Skipped)
-		}
-		if res.TestSummary == nil || res.TestSummary.Total != 2 {
-			t.Errorf("TestSummary = %#v, want both assertions still evaluated", res.TestSummary)
-		}
+		assertPolicyTestUnparseableDefault(t, policy)
 	})
 
 	t.Run("strict refuses to guess", func(t *testing.T) {
@@ -1541,6 +1512,46 @@ func TestPolicyTestUnparseableRule(t *testing.T) {
 	})
 }
 
+func assertPolicyTestUnparseableDefault(t *testing.T, policy string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, policy)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitIndeterminate {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitIndeterminate, err)
+	}
+	if !strings.Contains(stderr.String(), "skipping unparseable policy rule") ||
+		!strings.Contains(stderr.String(), "acls[0].dst[0]") {
+		t.Errorf("stderr missing skip warning: %s", stderr.String())
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Rule != "acls[0].dst[0]" ||
+		res.Skipped[0].Value != "tag:web" {
+		t.Errorf("Skipped = %#v, want the unparseable acls[0] destination", res.Skipped)
+	}
+	if res.TestSummary == nil || res.TestSummary.Total != 2 {
+		t.Errorf("TestSummary = %#v, want both assertions still evaluated", res.TestSummary)
+	}
+	if res.TestSummary.Indeterminate != 1 || res.Status != statusIndeterminate {
+		t.Errorf("result = %#v, want one indeterminate assertion", res)
+	}
+	if res.Assertions == nil || (*res.Assertions)[1].Status != aclpolicy.AssertionIndeterminate {
+		t.Errorf("Assertions = %#v, want the deny to be indeterminate", res.Assertions)
+	}
+}
+
 // TestPolicyTestTraceNamesParseFailure guards the decision trace against
 // reporting an unparseable rule as an ordinary semantic non-match.
 func TestPolicyTestTraceNamesParseFailure(t *testing.T) {
@@ -1561,8 +1572,8 @@ func TestPolicyTestTraceNamesParseFailure(t *testing.T) {
 		&stdout,
 		io.Discard,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if code := exitCode(err); code != exitIndeterminate {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitIndeterminate, err)
 	}
 	var res result
 	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
@@ -1572,11 +1583,164 @@ func TestPolicyTestTraceNamesParseFailure(t *testing.T) {
 		t.Fatalf("Assertions = %#v, want one", res.Assertions)
 	}
 	trace := strings.Join((*res.Assertions)[0].Trace, "\n")
-	if !strings.Contains(trace, "acl 0: destination could not be parsed") {
+	if !strings.Contains(trace, "acl 0: could not evaluate: destination could not be parsed") {
 		t.Errorf("trace = %q, want it to name the parse failure", trace)
 	}
 	if strings.Contains(trace, "acl 0: destination or port did not match") {
 		t.Errorf("trace = %q, must not report a parse failure as a semantic non-match", trace)
+	}
+}
+
+func TestPolicyTestIndeterminateExitPolicy(t *testing.T) {
+	t.Parallel()
+	const policy = `{
+		"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tpc:443"]}],
+		"tests": [{"src": "alice@example.com", "deny": ["tag:web:443"]}]
+	}`
+	testCases := []struct {
+		mode string
+		want int
+	}{
+		{indeterminateFail, exitFailed},
+		{indeterminateWarn, exitIndeterminate},
+		{indeterminateIgnore, exitOK},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.mode, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, policy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{
+					"--indeterminate=" + testCase.mode,
+					"-format", "json",
+					"--file", path,
+					"test",
+				},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != testCase.want {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.want, err)
+			}
+			var res result
+			if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			if res.Status != statusIndeterminate ||
+				res.TestSummary == nil ||
+				res.TestSummary.Indeterminate != 1 ||
+				res.Assertions == nil ||
+				(*res.Assertions)[0].Status != aclpolicy.AssertionIndeterminate {
+				t.Errorf("result = %#v, want the indeterminate finding preserved", res)
+			}
+			if len(res.Skipped) != 1 || res.Skipped[0].Value != "tpc:443" {
+				t.Errorf("Skipped = %#v, want the unknown protocol in every mode", res.Skipped)
+			}
+			if !strings.Contains(stderr.String(), "skipping unparseable policy rule") {
+				t.Errorf("stderr = %q, want the warning preserved in every mode", stderr.String())
+			}
+		})
+	}
+}
+
+func TestPolicyTestFailureOutranksIndeterminateMode(t *testing.T) {
+	t.Parallel()
+	const policy = `{
+		"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tpc:443"]}],
+		"tests": [{
+			"src": "alice@example.com",
+			"accept": ["tag:other:443"],
+			"deny": ["tag:web:443"]
+		}]
+	}`
+	for _, mode := range []string{indeterminateFail, indeterminateWarn, indeterminateIgnore} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, policy)
+			var stdout strings.Builder
+			err := run(
+				context.Background(),
+				[]string{
+					"--indeterminate=" + mode,
+					"-format", "json",
+					"--file", path,
+					"test",
+				},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitFailed {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+			}
+			var res result
+			if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			if res.Status != statusFailed ||
+				res.TestSummary == nil ||
+				res.TestSummary.Failed != 1 ||
+				res.TestSummary.Indeterminate != 1 {
+				t.Errorf("result = %#v, want a failure outranking one indeterminate assertion", res)
+			}
+		})
+	}
+}
+
+func TestIndeterminateFlagIsTestOnly(t *testing.T) {
+	t.Parallel()
+	err := run(
+		context.Background(),
+		[]string{"--indeterminate=ignore", "check"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "applies only to test") {
+		t.Errorf("error = %v, want the test-only scope explained", err)
+	}
+}
+
+// Calling the flag "test only" invites writing it after the subcommand, where
+// the root FlagSet never sees it. Say which position is meant rather than
+// reporting it as a stray argument.
+func TestIndeterminateFlagAfterSubcommandExplainsPosition(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"--indeterminate=fail", "-indeterminate", "--indeterminate"} {
+		t.Run(arg, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, `{"tests": []}`)
+			err := run(
+				context.Background(),
+				[]string{"--file", path, "test", arg},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				io.Discard,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+			if !strings.Contains(err.Error(), "is a global flag") {
+				t.Errorf("error = %v, want the flag position explained", err)
+			}
+		})
 	}
 }
 
@@ -1921,7 +2085,7 @@ func TestCheckUnknownProtocolIsExitTwo(t *testing.T) {
 		context.Background(),
 		[]string{
 			"--file", path, cmdCheck, "--src", "tag:app",
-			"--dst", "tag:db:5432", "--proto", "sctp",
+			"--dst", "tag:db:5432", "--proto", "icmp",
 		},
 		func(string) string { return "" },
 		nil,
@@ -1931,6 +2095,22 @@ func TestCheckUnknownProtocolIsExitTwo(t *testing.T) {
 	)
 	if code := exitCode(err); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	// sctp is queryable: Tailscale's packet filter matches it by port, so the
+	// CLI must accept it rather than rejecting it alongside icmp.
+	if err = run(
+		context.Background(),
+		[]string{
+			"--file", path, cmdCheck, "--src", "tag:app",
+			"--dst", "tag:db:5432", "--proto", "sctp",
+		},
+		func(string) string { return "" },
+		nil,
+		"",
+		io.Discard,
+		io.Discard,
+	); exitCode(err) == exitUsage {
+		t.Fatalf("--proto sctp was rejected: %v", err)
 	}
 }
 
@@ -2039,6 +2219,10 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 		"2  usage, input, or collection error",
 		"10 indeterminate",
 		"Also returned by",
+		"test only: indeterminate assertion exit policy: fail|warn|ignore",
+		"Server-side validate is the only check that catches an unreadable port or",
+		"--indeterminate does not weaken check's verdict",
+		"--proto sctp",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("help missing %q:\n%s", want, stderr.String())
@@ -2062,6 +2246,7 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	var doc struct {
 		Name         string                `json:"name"`
+		Flags        []schemaFlag          `json:"flags"`
 		Commands     []schemaCommand       `json:"commands"`
 		Capabilities schemaCapabilities    `json:"capabilities"`
 		LintFindings []aclpolicy.LintCheck `json:"lint_findings"`
@@ -2072,6 +2257,13 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	if doc.Name != "tail-acl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
 		t.Errorf("schema = %#v", doc)
+	}
+	if !slices.ContainsFunc(doc.Flags, func(schemaFlag schemaFlag) bool {
+		return schemaFlag.Name == "indeterminate" &&
+			schemaFlag.Default == indeterminateWarn &&
+			strings.Contains(schemaFlag.Usage, "test only")
+	}) {
+		t.Errorf("schema flags = %#v, want test-only --indeterminate with default warn", doc.Flags)
 	}
 	if !slices.Equal(doc.Capabilities.TypedEdits.Formats, []string{"json", "hujson"}) ||
 		!doc.Capabilities.TypedEdits.PreservesComments || !doc.Capabilities.TypedEdits.AuthorsComments {
@@ -2111,6 +2303,25 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 		func(command schemaCommand) bool { return command.Name == commandPostureRemove },
 	) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureRemove)
+	}
+}
+
+func TestIndeterminateFlagRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+	err := run(
+		context.Background(),
+		[]string{"--indeterminate=maybe", "test"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "fail, warn, or ignore") {
+		t.Errorf("error = %v, want the accepted modes", err)
 	}
 }
 

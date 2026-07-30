@@ -299,6 +299,10 @@ func TestBarePortCapabilityMatchesEveryProtocol(t *testing.T) {
 	}
 }
 
+// The queryable vocabulary is exactly the protocols Tailscale's packet filter
+// matches by port. icmp is a real protocol the evaluator still refuses to
+// narrow to, because an ICMP rule needs the whole port range and so answers no
+// port question; sctp is queryable for the opposite reason.
 func TestUnknownProtocolIsRejected(t *testing.T) {
 	t.Parallel()
 	policy := grantPolicy(tailscale.Grant{
@@ -310,10 +314,18 @@ func TestUnknownProtocolIsRejected(t *testing.T) {
 		policy,
 		"tag:batch",
 		"tag:db:5432",
-		aclpolicy.ReachabilityOptions{Protocol: "sctp"},
+		aclpolicy.ReachabilityOptions{Protocol: "icmp"},
 	)
-	if err == nil || !strings.Contains(err.Error(), "sctp") {
-		t.Fatalf("error = %v, want a rejection naming sctp", err)
+	if err == nil || !strings.Contains(err.Error(), "icmp") {
+		t.Fatalf("error = %v, want a rejection naming icmp", err)
+	}
+	if _, err = aclpolicy.EvaluateReachability(
+		policy,
+		"tag:batch",
+		"tag:db:5432",
+		aclpolicy.ReachabilityOptions{Protocol: aclpolicy.ProtocolSCTP},
+	); err != nil {
+		t.Fatalf("error = %v, want sctp to be a queryable protocol", err)
 	}
 }
 
@@ -491,6 +503,68 @@ func TestUnparseableSiblingDoesNotSwallowTheGate(t *testing.T) {
 			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
 		}
 	})
+}
+
+func TestUnparseableRuleAloneIsIndeterminate(t *testing.T) {
+	t.Parallel()
+	t.Run("acl destination", func(t *testing.T) {
+		t.Parallel()
+		got := evaluate(t, aclEntryPolicy(tailscale.ACLEntry{
+			Action:      "accept",
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+		}), "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+	})
+	t.Run("grant capability", func(t *testing.T) {
+		t.Parallel()
+		got := evaluate(t, grantPolicy(tailscale.Grant{
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+			IP:          []string{"tcp:htp"},
+		}), "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+	})
+}
+
+func TestACLProtocolVocabularySeparatesUnknownFromNonPort(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name        string
+		protocol    string
+		destination string
+		want        aclpolicy.Access
+		wantSkip    bool
+	}{
+		{"unknown overlapping", "stcp", "tag:web:443", aclpolicy.AccessIndeterminate, true},
+		{"unknown destination narrowed", "stcp", "tag:other:443", aclpolicy.AccessDeny, true},
+		// sctp rides the same port-matched filter path as tcp and udp, so it
+		// answers a port question; dccp reaches the filter's default branch,
+		// which needs the entire port range, so it genuinely cannot.
+		{"known port-carrying", "sctp", "tag:web:443", aclpolicy.AccessAllow, false},
+		{"known non-port", "dccp", "tag:web:443", aclpolicy.AccessDeny, false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := evaluate(t, aclEntryPolicy(tailscale.ACLEntry{
+				Action:      "accept",
+				Source:      []string{"alice@example.com"},
+				Destination: []string{"tag:web:443"},
+				Protocol:    testCase.protocol,
+			}), "alice@example.com", testCase.destination, aclpolicy.ReachabilityOptions{})
+			if got.Access != testCase.want {
+				t.Errorf("Access = %q, want %q", got.Access, testCase.want)
+			}
+			if (len(got.Skipped) != 0) != testCase.wantSkip {
+				t.Errorf("Skipped = %#v, wantSkip %t", got.Skipped, testCase.wantSkip)
+			}
+		})
+	}
 }
 
 // The narrowing rule still governs: a port the evaluator CAN decide rules the
