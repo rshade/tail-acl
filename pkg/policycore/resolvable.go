@@ -9,10 +9,10 @@ import (
 // Match is the outcome of resolving a selector against a query.
 //
 // A policy file does not contain every fact a membership decision depends on.
-// The role autogroups resolve against control-plane state an offline evaluator
-// never sees, so collapsing "cannot tell" into "does not match" yields a
-// confident wrong answer — the one outcome a reachability or coverage verdict
-// must never produce. Match keeps that third state addressable instead.
+// Role autogroups resolve against control-plane state that only a matcher with a
+// complete roster holds, so collapsing "cannot tell" into "does not match"
+// yields a confident wrong answer — the one outcome a reachability or coverage
+// verdict must never produce. Match keeps that third state addressable instead.
 type Match int
 
 const (
@@ -20,8 +20,8 @@ const (
 	NoMatch Match = iota
 	// Matched means the selector names the query.
 	Matched
-	// Unresolvable means membership depends on control-plane state this
-	// package cannot see, so neither Matched nor NoMatch can be claimed.
+	// Unresolvable means membership depends on control-plane state the matcher
+	// does not have, so neither Matched nor NoMatch can be claimed.
 	Unresolvable
 )
 
@@ -58,6 +58,15 @@ const (
 	queryTag
 )
 
+// queryContext is everything outside the selector that decides whether a query
+// settles it: the shape of the query, plus the live facts the matcher holds.
+// Roster availability is the only live fact today; a device-to-owner map would
+// be the next, and belongs here rather than in a caller-side special case.
+type queryContext struct {
+	target    queryTarget
+	haveRoles bool
+}
+
 func classifyQuery(query string) queryTarget {
 	switch {
 	case LooksLikeUser(query):
@@ -69,15 +78,41 @@ func classifyQuery(query string) queryTarget {
 	}
 }
 
-// AutogroupResolvable reports whether this selector's membership can be decided
-// against this query without control-plane state. Decidability is a property of
-// the pair, not of the selector alone: autogroup:tagged is settled against
-// "tag:batch" and against a user identity, but against "100.64.0.9" it needs
-// the device-to-tag map, which lives in the control plane. Answering such a
-// query "no match" would be exactly the confident wrong answer Match exists to
-// prevent — and reporting a settleable one Unresolvable trains callers to
-// ignore the state, so both directions matter.
-func AutogroupResolvable(selector, query string) bool {
+// autogroupResolvable reports whether this matcher holds enough information to
+// decide selector against query. Groups recurse because their members may be
+// autogroups whose membership needs live state. Membership is looked up through
+// groupMembers — by key, exactly as groupMatches looks it up, never by the
+// group: prefix — so a selector the matching walk expands can never be one this
+// walk reports as settled. The guard is path-scoped, like groupMatches:
+// deleting on return lets a shared group be explored through every branch of a
+// diamond while still terminating cycles.
+func (m Matcher) autogroupResolvable(selector, query string) bool {
+	return m.autogroupResolvableSeen(selector, query, make(map[string]bool))
+}
+
+func (m Matcher) autogroupResolvableSeen(
+	selector string,
+	query string,
+	seenGroups map[string]bool,
+) bool {
+	// An undefined group provably names nobody, and a group already on this path
+	// contributes no additional members, so both fall through as settled.
+	if members, ok := m.groupMembers(selector); ok && !seenGroups[selector] {
+		seenGroups[selector] = true
+		defer delete(seenGroups, selector)
+		for _, member := range members {
+			if !m.autogroupResolvableSeen(member, query, seenGroups) {
+				return false
+			}
+		}
+		// Deliberately no return. matchesSeen resolves a selector as a union of
+		// its readings — directMatches, which owns the autogroup vocabulary, then
+		// groupMatches — so settling it requires the conjunction. A groups key
+		// spelled "autogroup:admin" is named by both readings, and returning here
+		// would report the roster-dependent one settled on the strength of the
+		// member list alone.
+	}
+
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true
 	}
@@ -85,7 +120,25 @@ func AutogroupResolvable(selector, query string) bool {
 	if !ok {
 		return false
 	}
-	return spec.settles(classifyQuery(query))
+	return spec.settles(queryContext{
+		target:    classifyQuery(query),
+		haveRoles: m.HaveRoles,
+	})
+}
+
+// AutogroupResolvable is the roster-blind view of whether this selector's
+// membership can be decided against this query without control-plane state.
+// Decidability is a property of the pair, not of the selector alone:
+// autogroup:tagged is settled against "tag:batch" and against a user identity,
+// but against "100.64.0.9" it needs the device-to-tag map, which lives in the
+// control plane. Answering such a query "no match" would be exactly the
+// confident wrong answer Match exists to prevent — and reporting a settleable
+// one Unresolvable trains callers to ignore the state, so both directions
+// matter. This function has no policy argument, so it cannot inspect group
+// members; use Matcher.MatchesTri or SelectorMatchesTri when resolving a policy
+// selector that may name a group.
+func AutogroupResolvable(selector, query string) bool {
+	return Matcher{}.autogroupResolvable(selector, query)
 }
 
 // KnownAutogroup reports whether selector is an autogroup whose membership this
@@ -107,13 +160,7 @@ func KnownAutogroup(selector string) bool {
 // state. source is the requesting identity, used only to resolve
 // autogroup:self.
 func SelectorMatchesTri(selector, query string, policy *tailscale.ACL, source string) Match {
-	if SelectorMatches(selector, query, policy, source) {
-		return Matched
-	}
-	if !AutogroupResolvable(selector, query) {
-		return Unresolvable
-	}
-	return NoMatch
+	return Matcher{Policy: policy}.MatchesTri(selector, query, source)
 }
 
 // AnySelectorMatchesTri resolves a selector list against query. A match by any
@@ -126,17 +173,5 @@ func AnySelectorMatchesTri(
 	policy *tailscale.ACL,
 	source string,
 ) (Match, string) {
-	unresolved := ""
-	for _, selector := range selectors {
-		if SelectorMatches(selector, query, policy, source) {
-			return Matched, ""
-		}
-		if unresolved == "" && !AutogroupResolvable(selector, query) {
-			unresolved = selector
-		}
-	}
-	if unresolved != "" {
-		return Unresolvable, unresolved
-	}
-	return NoMatch, ""
+	return Matcher{Policy: policy}.AnyMatchesTri(selectors, query, source)
 }

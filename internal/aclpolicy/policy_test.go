@@ -314,6 +314,55 @@ func TestEvaluateTestsGolden(t *testing.T) {
 	assertGolden(t, "tests_report.golden.json", report)
 }
 
+func TestEvaluateUnprovenDenyGolden(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "unproven_deny_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGolden(t, "unproven_deny_report.golden.json", report)
+
+	if len(report.Assertions) != 6 {
+		t.Fatalf("assertions = %d, want 6", len(report.Assertions))
+	}
+	wantStatuses := []aclpolicy.AssertionStatus{
+		aclpolicy.AssertionIndeterminate,
+		aclpolicy.AssertionPass,
+		aclpolicy.AssertionIndeterminate,
+		aclpolicy.AssertionPass,
+		aclpolicy.AssertionIndeterminate,
+		aclpolicy.AssertionPass,
+	}
+	for index, want := range wantStatuses {
+		if got := report.Assertions[index].Status; got != want {
+			t.Errorf("assertions[%d].Status = %q, want %q", index, got, want)
+		}
+	}
+	if len(report.Skipped) != 3 {
+		t.Fatalf("skipped = %#v, want malformed grant port, protocol, and ACL destination", report.Skipped)
+	}
+	if report.Skipped[1].Rule != "grants[1].ip[0]" {
+		t.Errorf("skipped = %#v, want the unknown protocol reported at grants[1].ip[0]", report.Skipped)
+	}
+}
+
+func TestEvaluateUnprovenDenyStrictRejectsUnknownProtocol(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{Grants: []tailscale.Grant{{
+		Source:      []string{"alice@example.com"},
+		Destination: []string{"tag:web"},
+		IP:          []string{"tpc:443"},
+	}}}
+	_, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{Strict: true})
+	if err == nil || !strings.Contains(err.Error(), "tpc:443") {
+		t.Fatalf("error = %v, want strict mode to reject the unknown protocol", err)
+	}
+}
+
 func TestEvaluateReachabilityGolden(t *testing.T) {
 	t.Parallel()
 	policy, err := aclpolicy.Load(filepath.Join("testdata", "reachability_policy.hujson"))
@@ -529,9 +578,9 @@ func assertMalformedCapabilityHandling(t *testing.T, capability string) {
 		decision.Skipped[0].Value != capability {
 		t.Fatalf("Skipped = %#v, want malformed capability %q", decision.Skipped, capability)
 	}
-	if decision.Access != aclpolicy.AccessDeny ||
+	if decision.Access != aclpolicy.AccessIndeterminate ||
 		!strings.Contains(strings.Join(decision.Trace, "\n"), "network capability could not be parsed") {
-		t.Errorf("decision = %#v, want a denied verdict that identifies the parse failure", decision)
+		t.Errorf("decision = %#v, want an indeterminate verdict that identifies the parse failure", decision)
 	}
 	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
 	if err != nil {

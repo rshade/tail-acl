@@ -1,0 +1,52 @@
+{
+	"grants": [
+		{
+			"src": ["alice@example.com"],
+			"dst": ["tag:grant-bad"],
+			"ip": ["tcp:htp"],
+		},
+		{
+			"src": ["erin@example.com"],
+			"dst": ["tag:protocol-bad"],
+			"ip": ["tpc:443"],
+		},
+		{
+			"src": ["frank@example.com"],
+			"dst": ["tag:icmp"],
+			"ip": ["icmp:*"],
+		},
+	],
+	"acls": [
+		{
+			"action": "accept",
+			"src": ["dave@example.com"],
+			"dst": ["tag:acl-bad"],
+		},
+	],
+	"tests": [
+		{
+			"src": "alice@example.com",
+			"deny": ["tag:grant-bad:443"],
+		},
+		{
+			"src": "carol@example.com",
+			"deny": ["tag:grant-bad:443"],
+		},
+		{
+			"src": "dave@example.com",
+			"deny": ["tag:acl-bad:443"],
+		},
+		{
+			"src": "carol@example.com",
+			"deny": ["tag:acl-bad:443"],
+		},
+		{
+			"src": "erin@example.com",
+			"deny": ["tag:protocol-bad:443"],
+		},
+		{
+			"src": "frank@example.com",
+			"deny": ["tag:icmp:443"],
+		},
+	],
+}

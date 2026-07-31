@@ -88,6 +88,10 @@ const (
 	formatHuman = "human"
 	formatJSON  = "json"
 
+	indeterminateFail   = "fail"
+	indeterminateWarn   = "warn"
+	indeterminateIgnore = "ignore"
+
 	commandGrantAdd      = "grant add"
 	commandGrantRemove   = "grant remove"
 	commandTagOwnerAdd   = "tag-owner add"
@@ -102,11 +106,43 @@ const (
 const httpTimeout = 30 * time.Second
 
 type options struct {
-	file    string
-	tailnet string
-	apiKey  string
-	ifMatch string
-	strict  bool
+	file          string
+	tailnet       string
+	apiKey        string
+	ifMatch       string
+	strict        bool
+	indeterminate indeterminateOption
+}
+
+// indeterminateOption tracks whether the global flag was explicitly supplied
+// so dispatch can enforce that it belongs to test without rejecting its default
+// value from every other command.
+type indeterminateOption struct {
+	mode string
+	set  bool
+}
+
+func (o *indeterminateOption) Set(value string) error {
+	switch value {
+	case indeterminateFail, indeterminateWarn, indeterminateIgnore:
+		o.mode, o.set = value, true
+		return nil
+	default:
+		return fmt.Errorf(
+			"unknown indeterminate policy %q; want %s, %s, or %s",
+			value,
+			indeterminateFail,
+			indeterminateWarn,
+			indeterminateIgnore,
+		)
+	}
+}
+
+func (o *indeterminateOption) String() string {
+	if o.mode == "" {
+		return indeterminateWarn
+	}
+	return o.mode
 }
 
 // result is the versioned envelope every command returns. Human rendering emits
@@ -236,6 +272,12 @@ func run(
 		false,
 		"test/check: reject a policy containing an unparseable rule instead of warning",
 	)
+	opts.indeterminate.mode = indeterminateWarn
+	root.Var(
+		&opts.indeterminate,
+		"indeterminate",
+		"test only: indeterminate assertion exit policy: fail|warn|ignore (check always exits 10)",
+	)
 	format := root.String("format", formatHuman, "output format: human|json")
 	verbose := root.Bool("verbose", false, "log operational detail to stderr")
 	showVersion := root.Bool("version", false, "print version and exit")
@@ -267,6 +309,9 @@ func run(
 	if len(remaining) == 0 {
 		root.Usage()
 		return usageError{errors.New("a command is required")}
+	}
+	if opts.indeterminate.set && remaining[0] != cmdTest {
+		return usagef("--indeterminate applies only to test; check always preserves its three-state verdict")
 	}
 
 	res, dispatchErr := dispatch(ctx, remaining, opts, httpClient, apiURL, logger)
@@ -950,6 +995,15 @@ func runValidate(
 
 func runTest(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
 	if len(args) != 0 {
+		// --indeterminate is a root flag, so it has to precede the subcommand.
+		// Its own usage text calls it "test only", which invites the opposite
+		// placement; say so rather than reporting a bare stray argument.
+		if strings.HasPrefix(strings.TrimLeft(args[0], "-"), "indeterminate") {
+			return nil, usagef(
+				"--indeterminate is a global flag: write it before the test subcommand, as in %s",
+				"tail-acl --indeterminate=fail --file acl.json test",
+			)
+		}
 		return nil, usagef("test does not accept arguments")
 	}
 	path := opts.file
@@ -961,9 +1015,9 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	if err != nil {
 		return nil, usagef("could not evaluate policy tests: %v", err)
 	}
-	// A skipped rule can never match, so it may have silently decided a verdict
-	// below. Warn without -verbose: this is exactly the collection failure the
-	// AX conventions forbid swallowing.
+	// A skipped rule might have matched if understood. Warn without -verbose:
+	// this is exactly the collection defect the AX conventions forbid
+	// swallowing, even when field-scoped narrowing settles every assertion.
 	for _, skip := range report.Skipped {
 		logger.WarnContext(ctx, "skipping unparseable policy rule", "rule", skip.Rule,
 			"value", skip.Value, "reason", skip.Reason)
@@ -1022,7 +1076,14 @@ func runTest(ctx context.Context, opts options, args []string, logger *slog.Logg
 	}
 	if report.Summary.Indeterminate != 0 {
 		res.Status = statusIndeterminate
-		return res, errReachabilityIndeterminate
+		switch opts.indeterminate.String() {
+		case indeterminateFail:
+			return res, errors.New("one or more policy assertions were indeterminate")
+		case indeterminateIgnore:
+			return res, nil
+		default:
+			return res, errReachabilityIndeterminate
+		}
 	}
 	return res, nil
 }
@@ -1072,7 +1133,7 @@ func parseCheckArgs(args []string) (string, string, aclpolicy.Protocol, error) {
 	source := fs.String("src", "", "source user, group, tag, host, IP, or CIDR")
 	destination := fs.String("dst", "", "destination selector, optionally with :port")
 	port := fs.Int("port", -1, "destination port (alternative to including it in --dst)")
-	protocol := fs.String("proto", string(aclpolicy.ProtocolAny), "IP protocol to ask about: tcp|udp|any")
+	protocol := fs.String("proto", string(aclpolicy.ProtocolAny), "IP protocol to ask about: tcp|udp|sctp|any")
 	if err := fs.Parse(args); err != nil {
 		return "", "", "", usageError{err}
 	}
@@ -1086,11 +1147,15 @@ func parseCheckArgs(args []string) (string, string, aclpolicy.Protocol, error) {
 	}
 	protocolValue := aclpolicy.Protocol(strings.ToLower(strings.TrimSpace(*protocol)))
 	switch protocolValue {
-	case aclpolicy.ProtocolAny, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP:
+	case aclpolicy.ProtocolAny, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP, aclpolicy.ProtocolSCTP:
 	default:
 		return "", "", "", usagef(
-			"unknown --proto %q; want %s, %s, or %s",
-			*protocol, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP, aclpolicy.ProtocolAny,
+			"unknown --proto %q; want %s, %s, %s, or %s",
+			*protocol,
+			aclpolicy.ProtocolTCP,
+			aclpolicy.ProtocolUDP,
+			aclpolicy.ProtocolSCTP,
+			aclpolicy.ProtocolAny,
 		)
 	}
 	portSet := false
@@ -1391,13 +1456,13 @@ func commandCatalog() []schemaCommand {
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{
 			cmdTest,
-			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules)",
+			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules; --indeterminate controls only test's exit)",
 			cmdTest,
 		},
 		{
 			cmdCheck,
 			"Answer one reachability question locally",
-			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|any]",
+			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any]",
 		},
 		{
 			cmdLint,
@@ -1443,10 +1508,10 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		},
 		LintFindings: aclpolicy.LintCatalog(),
 		ExitCodes: map[string]string{
-			"0":  "success or reachable",
-			"1":  "operation or policy assertion failed, or not reachable",
+			"0":  "success or reachable; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
+			"1":  "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",
 			"2":  "usage, input, or collection error",
-			"10": "indeterminate: check could not settle the question, or test had an unsettleable assertion",
+			"10": "indeterminate: check could not settle the question, or test had an unsettleable assertion under --indeterminate=warn",
 		},
 	}
 	enc := json.NewEncoder(w)
@@ -1475,9 +1540,12 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
+	//nolint:golines // example line needs to be intact
+	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
@@ -1488,8 +1556,15 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  2  usage, input, or collection error")
 	fmt.Fprintln(w, "  10 indeterminate: a rule would have applied but depends on a fact absent from")
 	fmt.Fprintln(w, "     the policy file (device posture, via routing, or a role autogroup such as")
-	fmt.Fprintln(w, "     autogroup:admin). Not a denial - verify it another way. Also returned by")
-	fmt.Fprintln(w, "     test when an assertion could not be settled.")
+	fmt.Fprintln(w, "     autogroup:admin), or a rule overlapping the query could not be parsed.")
+	fmt.Fprintln(w, "     Not a denial - verify it another way. Also returned by test when an")
+	fmt.Fprintln(w, "     assertion could not be settled (its --indeterminate default is warn; fail")
+	fmt.Fprintln(w, "     maps it to 1, ignore maps it to 0 without hiding the finding).")
+	fmt.Fprintln(w, "\nTest precondition:")
+	fmt.Fprintln(w, "  Server-side validate is the only check that catches an unreadable port or")
+	fmt.Fprintln(w, "  protocol, which is what produces exit 10. lint catches dangling group, host,")
+	fmt.Fprintln(w, "  tag, and ipset references, which local evaluation silently treats as matching")
+	fmt.Fprintln(w, "  nothing; --indeterminate does not weaken check's verdict.")
 }
 
 type stringListFlag []string

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
+
+	"github.com/rshade/tailscale-utils/policycore"
 )
 
 // RuleKind identifies the policy section holding the rule that decided a
@@ -45,17 +47,23 @@ const (
 )
 
 // Protocol narrows a reachability question to one IP protocol. ProtocolAny is
-// the default and asks whether either TCP or UDP is allowed, which is the
-// question native policy tests ask.
+// the default and asks whether any port-carrying protocol is allowed, which is
+// the question native policy tests ask.
 type Protocol string
 
 const (
-	// ProtocolAny matches a capability for either TCP or UDP.
+	// ProtocolAny matches a capability for any port-carrying protocol.
 	ProtocolAny Protocol = "any"
 	// ProtocolTCP matches only TCP capabilities.
 	ProtocolTCP Protocol = "tcp"
 	// ProtocolUDP matches only UDP capabilities.
 	ProtocolUDP Protocol = "udp"
+	// ProtocolSCTP matches only SCTP capabilities. Tailscale's packet filter
+	// matches SCTP on the same port-carrying path as TCP and UDP
+	// (wgengine/filter/filter.go), so a port question can be satisfied by an
+	// SCTP capability; protocols that reach the filter's default branch instead
+	// need the whole port range and so carry no port access.
+	ProtocolSCTP Protocol = "sctp"
 )
 
 // normalize resolves the empty zero value to ProtocolAny and reports whether
@@ -64,7 +72,7 @@ func (p Protocol) normalize() (Protocol, bool) {
 	switch p {
 	case "", ProtocolAny:
 		return ProtocolAny, true
-	case ProtocolTCP, ProtocolUDP:
+	case ProtocolTCP, ProtocolUDP, ProtocolSCTP:
 		return p, true
 	default:
 		return p, false
@@ -125,12 +133,13 @@ func EvaluateReachability(
 	protocol, ok := opts.Protocol.normalize()
 	if !ok {
 		return ReachabilityResult{}, fmt.Errorf(
-			"unknown protocol %q; want %s, %s, or %s",
-			opts.Protocol, ProtocolTCP, ProtocolUDP, ProtocolAny,
+			"unknown protocol %q; want %s, %s, %s, or %s",
+			opts.Protocol, ProtocolTCP, ProtocolUDP, ProtocolSCTP, ProtocolAny,
 		)
 	}
 
-	skipped := scanRules(policy)
+	matcher := policycore.Matcher{Policy: policy}
+	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return ReachabilityResult{}, fmt.Errorf(
 			"%s (%d unparseable rule(s) in strict mode)",
@@ -139,7 +148,7 @@ func EvaluateReachability(
 		)
 	}
 
-	decision := policyAllows(policy, source, destination, protocol)
+	decision := policyAllows(matcher, source, destination, protocol)
 	var allowed *bool
 	if decision.access != AccessIndeterminate {
 		settled := decision.access == AccessAllow

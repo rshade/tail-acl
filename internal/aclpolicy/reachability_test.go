@@ -299,6 +299,10 @@ func TestBarePortCapabilityMatchesEveryProtocol(t *testing.T) {
 	}
 }
 
+// The queryable vocabulary is exactly the protocols Tailscale's packet filter
+// matches by port. icmp is a real protocol the evaluator still refuses to
+// narrow to, because an ICMP rule needs the whole port range and so answers no
+// port question; sctp is queryable for the opposite reason.
 func TestUnknownProtocolIsRejected(t *testing.T) {
 	t.Parallel()
 	policy := grantPolicy(tailscale.Grant{
@@ -310,10 +314,18 @@ func TestUnknownProtocolIsRejected(t *testing.T) {
 		policy,
 		"tag:batch",
 		"tag:db:5432",
-		aclpolicy.ReachabilityOptions{Protocol: "sctp"},
+		aclpolicy.ReachabilityOptions{Protocol: "icmp"},
 	)
-	if err == nil || !strings.Contains(err.Error(), "sctp") {
-		t.Fatalf("error = %v, want a rejection naming sctp", err)
+	if err == nil || !strings.Contains(err.Error(), "icmp") {
+		t.Fatalf("error = %v, want a rejection naming icmp", err)
+	}
+	if _, err = aclpolicy.EvaluateReachability(
+		policy,
+		"tag:batch",
+		"tag:db:5432",
+		aclpolicy.ReachabilityOptions{Protocol: aclpolicy.ProtocolSCTP},
+	); err != nil {
+		t.Fatalf("error = %v, want sctp to be a queryable protocol", err)
 	}
 }
 
@@ -321,13 +333,11 @@ func TestUnknownProtocolIsRejected(t *testing.T) {
 // TestEvaluateTestsTreatsUnevaluatableGateAsIndeterminate and
 // TestEvaluateTestsReportsIndeterminateWithoutAborting, which replaced this.
 
-// An autogroup nested inside a group is not legal Tailscale policy: group
-// members must be full email addresses, and groups cannot contain groups. The
-// evaluator therefore treats such a member as an ordinary literal selector that
-// simply does not match, rather than clouding the verdict. This test documents
-// that deliberate boundary so the behaviour is not mistaken for the
-// silent-deny bug that unresolvable autogroups at the rule level do cause.
-func TestAutogroupNestedInGroupDoesNotCloudTheVerdict(t *testing.T) {
+// Even if the control plane would reject this group member, policycore recurses
+// groups while matching and must recurse them while deciding whether a miss is
+// conclusive. Otherwise an unevaluable nested autogroup becomes a confident
+// deny while the same selector at rule level correctly yields indeterminate.
+func TestAutogroupNestedInGroupCloudsTheVerdict(t *testing.T) {
 	t.Parallel()
 	policy := grantPolicy(tailscale.Grant{
 		Source:      []string{"group:x"},
@@ -338,14 +348,12 @@ func TestAutogroupNestedInGroupDoesNotCloudTheVerdict(t *testing.T) {
 
 	got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
 
-	if got.Access != aclpolicy.AccessDeny {
-		t.Errorf("Access = %q, want %q; an illegal group member must not become a third verdict",
-			got.Access, aclpolicy.AccessDeny)
+	if got.Access != aclpolicy.AccessIndeterminate {
+		t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
 	}
 }
 
-// The rule level is the contrast: the same autogroup named directly as a
-// grant source is legal policy and must cloud the verdict.
+// The same autogroup named directly as a grant source must cloud the verdict.
 func TestAutogroupAtRuleLevelStillCloudsTheVerdict(t *testing.T) {
 	t.Parallel()
 	got := evaluate(t, grantPolicy(tailscale.Grant{
@@ -491,6 +499,68 @@ func TestUnparseableSiblingDoesNotSwallowTheGate(t *testing.T) {
 			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
 		}
 	})
+}
+
+func TestUnparseableRuleAloneIsIndeterminate(t *testing.T) {
+	t.Parallel()
+	t.Run("acl destination", func(t *testing.T) {
+		t.Parallel()
+		got := evaluate(t, aclEntryPolicy(tailscale.ACLEntry{
+			Action:      "accept",
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+		}), "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+	})
+	t.Run("grant capability", func(t *testing.T) {
+		t.Parallel()
+		got := evaluate(t, grantPolicy(tailscale.Grant{
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+			IP:          []string{"tcp:htp"},
+		}), "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+	})
+}
+
+func TestACLProtocolVocabularySeparatesUnknownFromNonPort(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name        string
+		protocol    string
+		destination string
+		want        aclpolicy.Access
+		wantSkip    bool
+	}{
+		{"unknown overlapping", "stcp", "tag:web:443", aclpolicy.AccessIndeterminate, true},
+		{"unknown destination narrowed", "stcp", "tag:other:443", aclpolicy.AccessDeny, true},
+		// sctp rides the same port-matched filter path as tcp and udp, so it
+		// answers a port question; dccp reaches the filter's default branch,
+		// which needs the entire port range, so it genuinely cannot.
+		{"known port-carrying", "sctp", "tag:web:443", aclpolicy.AccessAllow, false},
+		{"known non-port", "dccp", "tag:web:443", aclpolicy.AccessDeny, false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := evaluate(t, aclEntryPolicy(tailscale.ACLEntry{
+				Action:      "accept",
+				Source:      []string{"alice@example.com"},
+				Destination: []string{"tag:web:443"},
+				Protocol:    testCase.protocol,
+			}), "alice@example.com", testCase.destination, aclpolicy.ReachabilityOptions{})
+			if got.Access != testCase.want {
+				t.Errorf("Access = %q, want %q", got.Access, testCase.want)
+			}
+			if (len(got.Skipped) != 0) != testCase.wantSkip {
+				t.Errorf("Skipped = %#v, wantSkip %t", got.Skipped, testCase.wantSkip)
+			}
+		})
+	}
 }
 
 // The narrowing rule still governs: a port the evaluator CAN decide rules the

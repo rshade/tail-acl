@@ -1,0 +1,132 @@
+{
+  "assertions": [
+    {
+      "id": "tests[0].deny[0]",
+      "status": "indeterminate",
+      "test_index": 0,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "tag:grant-bad:443",
+      "expected": "deny",
+      "actual": "indeterminate",
+      "evidence": "grant 0 network capability could not be parsed",
+      "trace": [
+        "grant 0: could not evaluate: network capability could not be parsed",
+        "grant 1: source did not match",
+        "grant 2: source did not match",
+        "acl 0: source did not match"
+      ]
+    },
+    {
+      "id": "tests[1].deny[0]",
+      "status": "pass",
+      "test_index": 1,
+      "expectation": "deny",
+      "source": "carol@example.com",
+      "destination": "tag:grant-bad:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: source did not match",
+        "grant 2: source did not match",
+        "acl 0: source did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[2].deny[0]",
+      "status": "indeterminate",
+      "test_index": 2,
+      "expectation": "deny",
+      "source": "dave@example.com",
+      "destination": "tag:acl-bad:443",
+      "expected": "deny",
+      "actual": "indeterminate",
+      "evidence": "acl 0 destination could not be parsed",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: source did not match",
+        "grant 2: source did not match",
+        "acl 0: could not evaluate: destination could not be parsed"
+      ]
+    },
+    {
+      "id": "tests[3].deny[0]",
+      "status": "pass",
+      "test_index": 3,
+      "expectation": "deny",
+      "source": "carol@example.com",
+      "destination": "tag:acl-bad:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: source did not match",
+        "grant 2: source did not match",
+        "acl 0: source did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[4].deny[0]",
+      "status": "indeterminate",
+      "test_index": 4,
+      "expectation": "deny",
+      "source": "erin@example.com",
+      "destination": "tag:protocol-bad:443",
+      "expected": "deny",
+      "actual": "indeterminate",
+      "evidence": "grant 1 network capability could not be parsed",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: could not evaluate: network capability could not be parsed",
+        "grant 2: source did not match",
+        "acl 0: source did not match"
+      ]
+    },
+    {
+      "id": "tests[5].deny[0]",
+      "status": "pass",
+      "test_index": 5,
+      "expectation": "deny",
+      "source": "frank@example.com",
+      "destination": "tag:icmp:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: source did not match",
+        "grant 2: network capability port 443 matched but protocol \"icmp\" did not",
+        "acl 0: source did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "rule": "grants[0].ip[0]",
+      "value": "tcp:htp",
+      "reason": "port specification is not a number, range, or *"
+    },
+    {
+      "rule": "grants[1].ip[0]",
+      "value": "tpc:443",
+      "reason": "protocol is not a known name or number"
+    },
+    {
+      "rule": "acls[0].dst[0]",
+      "value": "tag:acl-bad",
+      "reason": "destination has no valid port (want host:443, host:80-443, or host:*)"
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "passed": 3,
+    "failed": 0,
+    "indeterminate": 3
+  }
+}

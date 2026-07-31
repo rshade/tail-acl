@@ -1,5 +1,11 @@
 // Package aclpolicy provides shared policy-file I/O using Tailscale's public
 // ACL schema types.
+//
+// Rule-syntax skips and indeterminate evaluations deliberately describe
+// different scopes. A skip says the policy contains an unreadable element and
+// is collected over the whole file. An indeterminate result says one particular
+// query reached that element after every readable field on its rule matched.
+// A policy may therefore have skips while every evaluated query remains settled.
 package aclpolicy
 
 import (

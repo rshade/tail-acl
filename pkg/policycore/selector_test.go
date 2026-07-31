@@ -171,6 +171,83 @@ func TestMatcherResolvesRoleAutogroups(t *testing.T) {
 	}
 }
 
+func TestMatcherMatchesTriRoleAutogroupMatrix(t *testing.T) {
+	t.Parallel()
+
+	roles := map[string]tailscale.UserRole{
+		"ada@example.com": tailscale.UserRoleAdmin,
+		"joe@example.com": tailscale.UserRoleMember,
+	}
+	tests := []struct {
+		name      string
+		haveRoles bool
+		query     string
+		want      policycore.Match
+	}{
+		{
+			name:  "no roster tag is a decidable non-match",
+			query: "tag:web",
+			want:  policycore.NoMatch,
+		},
+		{
+			name:  "no roster user is unresolvable",
+			query: "ada@example.com",
+			want:  policycore.Unresolvable,
+		},
+		{
+			name:  "no roster bare device is unresolvable",
+			query: "100.64.0.9",
+			want:  policycore.Unresolvable,
+		},
+		{
+			name:      "roster tag is a decidable non-match",
+			haveRoles: true,
+			query:     "tag:web",
+			want:      policycore.NoMatch,
+		},
+		{
+			name:      "roster user with matching role matches",
+			haveRoles: true,
+			query:     "ada@example.com",
+			want:      policycore.Matched,
+		},
+		{
+			name:      "roster user with another role does not match",
+			haveRoles: true,
+			query:     "joe@example.com",
+			want:      policycore.NoMatch,
+		},
+		{
+			name:      "user absent from complete roster does not match",
+			haveRoles: true,
+			query:     "eve@example.com",
+			want:      policycore.NoMatch,
+		},
+		{
+			name:      "roster never settles a bare device",
+			haveRoles: true,
+			query:     "100.64.0.9",
+			want:      policycore.Unresolvable,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			matcher := policycore.Matcher{
+				Policy:    &tailscale.ACL{},
+				Roles:     roles,
+				HaveRoles: test.haveRoles,
+			}
+			if got := matcher.MatchesTri(
+				"autogroup:admin", test.query, "",
+			); got != test.want {
+				t.Errorf("MatchesTri(autogroup:admin, %q) = %v; want %v", test.query, got, test.want)
+			}
+		})
+	}
+}
+
 func TestMatcherWithoutRolesResolvesNoRoleAutogroup(t *testing.T) {
 	t.Parallel()
 
@@ -191,11 +268,13 @@ func TestMatcherWithoutRolesResolvesNoRoleAutogroup(t *testing.T) {
 
 // TestRecognizedTracksRoleResolution is the anti-drift guard: every selector
 // IsRoleAutogroup claims must become recognized exactly when role data is
-// present, so the set the package resolves and the set it says it understands
-// cannot diverge.
+// present, and Recognized must agree with MatchesTri about whether a role
+// autogroup is decidable against a user. That keeps the set the package resolves
+// and the set it says it understands from diverging.
 func TestRecognizedTracksRoleResolution(t *testing.T) {
 	t.Parallel()
 
+	withoutRoles := policycore.Matcher{Policy: &tailscale.ACL{}}
 	withRoles := policycore.Matcher{
 		Policy:    &tailscale.ACL{},
 		Roles:     map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
@@ -210,6 +289,23 @@ func TestRecognizedTracksRoleResolution(t *testing.T) {
 			}
 			if !withRoles.Recognized(selector) {
 				t.Errorf("Recognized(%q) = false with role data; want true", selector)
+			}
+			for name, matcher := range map[string]policycore.Matcher{
+				"without role data": withoutRoles,
+				"with role data":    withRoles,
+			} {
+				decidable := matcher.MatchesTri(
+					selector, "ada@example.com", "",
+				) != policycore.Unresolvable
+				if matcher.Recognized(selector) != decidable {
+					t.Errorf(
+						"%s: Recognized(%q) = %v but MatchesTri decidable = %v",
+						name,
+						selector,
+						matcher.Recognized(selector),
+						decidable,
+					)
+				}
 			}
 		})
 	}
@@ -233,6 +329,11 @@ func TestMatcherRecognizesRoleAutogroupsWithEmptyRoster(t *testing.T) {
 			if matcher.Matches(selector, "ada@example.com", "ada@example.com") {
 				t.Errorf("Matches(%q) = true with an empty roster; want false", selector)
 			}
+			if got := matcher.MatchesTri(
+				selector, "ada@example.com", "ada@example.com",
+			); got != policycore.NoMatch {
+				t.Errorf("MatchesTri(%q) = %v with an empty roster; want NoMatch", selector, got)
+			}
 		})
 	}
 }
@@ -249,6 +350,11 @@ func TestMatcherIgnoresRolesWithoutRosterAvailability(t *testing.T) {
 	}
 	if matcher.Matches("autogroup:admin", "ada@example.com", "ada@example.com") {
 		t.Error("Matches(autogroup:admin) = true without roster availability; want false")
+	}
+	if got := matcher.MatchesTri(
+		"autogroup:admin", "ada@example.com", "ada@example.com",
+	); got != policycore.Unresolvable {
+		t.Errorf("MatchesTri(autogroup:admin) = %v without roster availability; want Unresolvable", got)
 	}
 }
 

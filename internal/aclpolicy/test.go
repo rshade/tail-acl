@@ -28,15 +28,17 @@ const (
 // The protocols a port-only query can satisfy. Everything else (for example,
 // ICMP) is a legitimate non-match rather than a parse failure.
 const (
-	protocolTCP       = "tcp"
-	protocolUDP       = "udp"
-	protocolTCPNumber = "6"
-	protocolUDPNumber = "17"
+	protocolTCP        = "tcp"
+	protocolUDP        = "udp"
+	protocolSCTP       = "sctp"
+	protocolTCPNumber  = 6
+	protocolUDPNumber  = 17
+	protocolSCTPNumber = 132
 )
 
 // The selector namespaces and the autogroups this evaluator can resolve without
 // control-plane state live in policycore, which owns selector resolution for
-// both this tool and tailnet-audit. See policycore.AutogroupResolvable.
+// both this tool and tailnet-audit. See policycore.Matcher.MatchesTri.
 
 // AssertionResult describes one accept or deny destination from a policy test.
 // IDs are derived from the policy's array indexes and are stable for unchanged
@@ -67,10 +69,10 @@ type TestSummary struct {
 	Indeterminate int `json:"indeterminate,omitempty"`
 }
 
-// RuleSkip names one policy rule element the evaluator cannot parse. Such an
-// element can never match, so any verdict reached alongside it may be wrong —
-// the traffic could well be allowed by the rule the author meant to write.
-// TestOptions.Strict turns these into an error instead of a recorded skip.
+// RuleSkip names one policy rule element the evaluator cannot parse. The
+// element might have matched if understood, so an assertion whose narrowed
+// evaluation path reaches it is indeterminate. TestOptions.Strict instead
+// rejects the whole policy before evaluating any assertion.
 type RuleSkip struct {
 	Rule   string `json:"rule"`
 	Value  string `json:"value"`
@@ -100,8 +102,11 @@ type TestReport struct {
 //
 // Rule syntax is scanned once, before any assertion runs, so an unparseable
 // rule is reported the same way no matter which assertions the policy declares.
+// Skipped is therefore policy-scoped; an indeterminate assertion is separately
+// path-scoped and is reported only when its evaluation reaches such a defect.
 func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) {
-	skipped := scanRules(policy)
+	matcher := policycore.Matcher{Policy: policy}
+	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return TestReport{}, fmt.Errorf("%s (%d unparseable rule(s) in strict mode)", skipped[0], len(skipped))
 	}
@@ -120,7 +125,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 
 		for assertionIndex, destination := range accept {
 			assertion, assertionErr := evaluateAssertion(
-				policy, testIndex, assertionIndex, "accept", source, destination, true,
+				matcher, testIndex, assertionIndex, "accept", source, destination, true,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -129,7 +134,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 		}
 		for assertionIndex, destination := range test.Deny {
 			assertion, assertionErr := evaluateAssertion(
-				policy, testIndex, assertionIndex, "deny", source, destination, false,
+				matcher, testIndex, assertionIndex, "deny", source, destination, false,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -149,10 +154,10 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 // A protocol-qualified capability that names a non-port protocol (for example
 // "icmp:*") is not a parse failure: it correctly grants no port access and is
 // skipped in silence.
-func scanRules(policy *tailscale.ACL) []RuleSkip {
+func scanRules(matcher policycore.Matcher) []RuleSkip {
 	skips := make([]RuleSkip, 0)
-	skips = append(skips, scanGrantRules(policy.Grants)...)
-	skips = append(skips, scanACLRules(policy.ACLs)...)
+	skips = append(skips, scanGrantRules(matcher.Policy.Grants)...)
+	skips = append(skips, scanACLRules(matcher.Policy.ACLs)...)
 	return skips
 }
 
@@ -165,12 +170,24 @@ func scanGrantRules(grants []tailscale.Grant) []RuleSkip {
 				continue
 			}
 			portExpression := ports
-			if !found {
+			switch {
+			case !found:
 				// A capability without a protocol is a bare port expression and
 				// applies to both TCP and UDP. Non-port protocols must use the
 				// protocol-qualified form, such as "icmp:*".
 				portExpression = capability
-			} else if !queryProtocol(protocol) {
+			case capabilityAllProtocols(protocol):
+				// The wildcard spellings are legal here even though acls[].proto
+				// rejects them; only the port half still has to parse. Keep this
+				// ahead of the knownIPProtocol arm, which does not accept them.
+			case !knownIPProtocol(protocol):
+				skips = append(skips, RuleSkip{
+					Rule:   fmt.Sprintf("grants[%d].ip[%d]", index, capabilityIndex),
+					Value:  capability,
+					Reason: "protocol is not a known name or number",
+				})
+				continue
+			case !queryProtocol(protocol):
 				continue
 			}
 			if !portSpecParses(portExpression) {
@@ -188,6 +205,13 @@ func scanGrantRules(grants []tailscale.Grant) []RuleSkip {
 func scanACLRules(entries []tailscale.ACLEntry) []RuleSkip {
 	skips := make([]RuleSkip, 0)
 	for index, entry := range entries {
+		if entry.Protocol != "" && !knownIPProtocol(entry.Protocol) {
+			skips = append(skips, RuleSkip{
+				Rule:   fmt.Sprintf("acls[%d].proto", index),
+				Value:  entry.Protocol,
+				Reason: "protocol is not a known name or number",
+			})
+		}
 		field, destinations := "dst", entry.Destination
 		if len(destinations) == 0 {
 			field, destinations = "ports", entry.Ports
@@ -257,7 +281,7 @@ func (r *TestReport) add(assertion AssertionResult) {
 }
 
 func evaluateAssertion(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	testIndex, assertionIndex int,
 	expectation, source, destination string,
 	wantAllowed bool,
@@ -267,10 +291,10 @@ func evaluateAssertion(
 		return AssertionResult{}, fmt.Errorf("tests[%d].%s[%d]: %w", testIndex, expectation, assertionIndex, err)
 	}
 	// Native policy tests carry no protocol, so they ask the protocol-agnostic
-	// question. A rule the evaluator cannot decide stays an error here rather
-	// than becoming check's third verdict: an assertion is a pass/fail claim,
-	// and answering it from an incomplete evaluation would be a guess.
-	decision := policyAllows(policy, source, target, ProtocolAny)
+	// question. A rule the evaluator cannot decide becomes the assertion's
+	// third verdict; answering accept or deny from an incomplete walk would be
+	// a guess.
+	decision := policyAllows(matcher, source, target, ProtocolAny)
 	allowed, evidence, trace := decision.access == AccessAllow, decision.evidence, decision.trace
 
 	// An assertion the evaluator cannot settle is reported as its own status
@@ -404,12 +428,16 @@ type ruleOutcome struct {
 // none was left unresolved — otherwise the answer is indeterminate, since one
 // of the rules passed over might well have allowed the traffic.
 func policyAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 	destination target,
 	protocol Protocol,
 ) reachability {
+	policy := matcher.Policy
 	if policy.Grants == nil && policy.ACLs == nil {
+		// An absent grants/acls section is Tailscale's implicit allow policy.
+		// An explicitly empty section is non-nil and therefore reaches the
+		// default deny below; preserve that JSON nil-ness distinction.
 		return reachability{
 			access:   AccessAllow,
 			evidence: "implicit default allow policy",
@@ -430,7 +458,7 @@ func policyAllows(
 	}
 
 	for index, grant := range policy.Grants {
-		outcome := grantAllows(policy, grant, source, destination, protocol)
+		outcome := grantAllows(matcher, grant, source, destination, protocol)
 		reference := record(RuleGrant, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -442,7 +470,7 @@ func policyAllows(
 		}
 	}
 	for index, entry := range policy.ACLs {
-		outcome := aclAllows(policy, entry, source, destination, protocol)
+		outcome := aclAllows(matcher, entry, source, destination, protocol)
 		reference := record(RuleACL, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -476,24 +504,42 @@ func policyAllows(
 // so it is a clean non-match even when its source names an unresolvable
 // autogroup — only a grant that clears every other hurdle clouds the verdict.
 func grantAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	grant tailscale.Grant,
 	source string,
 	destination target,
 	protocol Protocol,
 ) ruleOutcome {
-	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, policy, source)
+	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, matcher, source)
 	if !sourceMatched && sourceGate == "" {
 		return ruleOutcome{decision: "source did not match"}
 	}
-	destinationMatched, destinationGate := anySelectorMatches(grant.Destination, destination.host, policy, source)
+	destinationMatched, destinationGate := anySelectorMatches(
+		grant.Destination, destination.host, matcher, source,
+	)
 	if !destinationMatched && destinationGate == "" {
 		return ruleOutcome{decision: "destination did not match"}
 	}
-	matched, unparseable := grantIPMatches(grant.IP, destination.port, protocol)
-	if !matched && !unparseable {
-		// The port was decidable and did not match, so this grant is ruled out
-		// whatever else on it could not be resolved. This is the narrowing rule.
+	ip := grantIPMatches(grant.IP, destination.port, protocol)
+	if !ip.matched && !ip.unparseable {
+		// The capability was decidable and did not match, so this grant is ruled
+		// out whatever else on it could not be resolved. This is the narrowing
+		// rule. Name whichever field decided it: blaming the port for a protocol
+		// mismatch sends a reader to change a port range that was never wrong.
+		if ip.protocolMiss != "" {
+			return ruleOutcome{decision: fmt.Sprintf(
+				"network capability port %d matched but protocol %q did not",
+				destination.port,
+				ip.protocolMiss,
+			)}
+		}
+		if ip.defaultProtosMiss {
+			return ruleOutcome{decision: fmt.Sprintf(
+				"network capability port %d matched but its default protocol set does not cover %s",
+				destination.port,
+				protocol,
+			)}
+		}
 		return ruleOutcome{decision: fmt.Sprintf(
 			"network capability did not match port %d%s",
 			destination.port,
@@ -513,14 +559,15 @@ func grantAllows(
 		// unresolved condition into a confident denial.
 		return ruleOutcome{decision: "could not evaluate: " + gate, gate: gate}
 	}
-	if !matched {
-		return ruleOutcome{decision: "network capability could not be parsed"}
+	if !ip.matched {
+		parseGate := "network capability could not be parsed"
+		return ruleOutcome{decision: "could not evaluate: " + parseGate, gate: parseGate}
 	}
 	return ruleOutcome{matched: true, decision: "source, destination, and network capability matched"}
 }
 
 func aclAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	entry tailscale.ACLEntry,
 	source string,
 	destination target,
@@ -530,14 +577,31 @@ func aclAllows(
 	if len(sources) == 0 {
 		sources = entry.Users
 	}
-	sourceMatched, sourceGate := anySelectorMatches(sources, source, policy, source)
+	sourceMatched, sourceGate := anySelectorMatches(sources, source, matcher, source)
 	if !sourceMatched && sourceGate == "" {
 		return ruleOutcome{decision: "source did not match"}
 	}
 	if entry.Action != "" && entry.Action != "accept" {
 		return ruleOutcome{decision: fmt.Sprintf("action %q is not accept", entry.Action)}
 	}
-	if entry.Protocol != "" && !capabilityProtocolMatches(entry.Protocol, protocol) {
+	protocolGate := ""
+	switch {
+	case entry.Protocol == "":
+		// An omitted proto is compiled with no IPProto, which the packet filter
+		// expands to the same default set as a proto-0 capability. SCTP is
+		// outside it, so an entry that names no protocol cannot answer for SCTP.
+		if !defaultProtosCover(protocol) {
+			return ruleOutcome{decision: fmt.Sprintf(
+				"rule names no proto, which does not cover %s", protocol,
+			)}
+		}
+	case !knownIPProtocol(entry.Protocol):
+		protocolGate = fmt.Sprintf("protocol %q is not a known name or number", entry.Protocol)
+	case !capabilityProtocolMatches(entry.Protocol, protocol):
+		// Native tests ask whether a port-carrying protocol is allowed. A
+		// recognized protocol that carries no port access therefore remains
+		// a decidable non-match; whether the control plane instead asks
+		// about any protocol is tracked separately from this evaluator.
 		return ruleOutcome{decision: fmt.Sprintf("protocol %q did not match", entry.Protocol)}
 	}
 	destinations := entry.Destination
@@ -545,7 +609,7 @@ func aclAllows(
 		destinations = entry.Ports
 	}
 	destinationMatched, unparseable, destinationGate := aclDestinationMatches(
-		destinations, destination, policy, source,
+		destinations, destination, matcher, source,
 	)
 	if !destinationMatched && !unparseable && destinationGate == "" {
 		// Decidably not this rule's destination, so it is ruled out regardless
@@ -555,7 +619,10 @@ func aclAllows(
 	gate := firstGate(
 		selectorGate("source", sourceMatched, sourceGate),
 		selectorGate("destination", destinationMatched, destinationGate),
+		protocolGate,
 		postureGate(entry.SourcePosture),
+		// Legacy ACLEntry has no Via field, so there is no viaGate counterpart
+		// to grantAllows here.
 	)
 	if gate != "" {
 		// See grantAllows: a destination that could not be parsed leaves the
@@ -563,7 +630,8 @@ func aclAllows(
 		return ruleOutcome{decision: "could not evaluate: " + gate, gate: gate}
 	}
 	if !destinationMatched {
-		return ruleOutcome{decision: "destination could not be parsed"}
+		parseGate := "destination could not be parsed"
+		return ruleOutcome{decision: "could not evaluate: " + parseGate, gate: parseGate}
 	}
 	return ruleOutcome{matched: true, decision: "source, destination, and port matched"}
 }
@@ -618,69 +686,213 @@ func viaGate(via []string) string {
 func anySelectorMatches(
 	selectors []string,
 	query string,
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 ) (bool, string) {
-	match, unresolved := policycore.AnySelectorMatchesTri(selectors, query, policy, source)
+	match, unresolved := matcher.AnyMatchesTri(selectors, query, source)
 	return match == policycore.Matched, unresolved
 }
 
-// grantIPMatches reports whether any network capability covers port, and
-// whether one was skipped because its port expression did not parse. See
-// scanRules for why an unparseable element is worth distinguishing.
-func grantIPMatches(capabilities []string, port uint16, query Protocol) (bool, bool) {
-	unparseable := false
-	for _, capability := range capabilities {
-		if capability == "*" {
-			return true, false
+// protocolVerdict is how one capability's protocol token relates to the query.
+// The three miss kinds are distinguished because each rules the capability out
+// for a different reason, and grantIPMatches records a different fact for each.
+type protocolVerdict int
+
+const (
+	// protocolAdmits means the capability's protocol can answer the query, so
+	// only its port range remains to be checked.
+	protocolAdmits protocolVerdict = iota
+	// protocolUnknown means the token is not a protocol Tailscale can parse.
+	protocolUnknown
+	// protocolNamedMiss means a recognized protocol that cannot answer the
+	// query, so the trace can name it.
+	protocolNamedMiss
+	// protocolDefaultsMiss means a proto-0 spelling whose default protocol set
+	// excludes the query. There is no protocol to name — the token is "*" or a
+	// bare port expression — so the trace describes the set instead.
+	protocolDefaultsMiss
+)
+
+// capabilityProtocolVerdict classifies a grant capability's protocol token
+// against the query. The wildcard spellings answer a port question exactly like
+// a bare port expression, but only for the protocols proto 0 actually expands
+// to; SCTP is not among them and needs an explicit capability.
+func capabilityProtocolVerdict(protocol string, query Protocol) protocolVerdict {
+	switch {
+	case capabilityAllProtocols(protocol):
+		if !defaultProtosCover(query) {
+			return protocolDefaultsMiss
 		}
+		return protocolAdmits
+	case !knownIPProtocol(protocol):
+		return protocolUnknown
+	case !capabilityProtocolMatches(protocol, query):
+		return protocolNamedMiss
+	default:
+		return protocolAdmits
+	}
+}
+
+// ipMatch is grantIPMatches' answer. protocolMiss names the protocol of a
+// capability whose port range did cover the query but whose protocol did not,
+// so the trace can blame the field that actually decided the rule instead of
+// reporting a port mismatch that never happened.
+type ipMatch struct {
+	matched      bool
+	unparseable  bool
+	protocolMiss string
+	// defaultProtosMiss records a proto-0 capability whose port range did cover
+	// the query but whose default protocol set does not. It is separate from
+	// protocolMiss because the capability names no protocol to blame — "*" or a
+	// bare port expression — so the trace has to describe the set instead.
+	defaultProtosMiss bool
+}
+
+// grantIPMatches reports whether any network capability covers port, whether
+// one was skipped because its port expression did not parse, and which
+// protocol ruled the grant out when the port alone did not. See scanRules for
+// why an unparseable element is worth distinguishing.
+func grantIPMatches(capabilities []string, port uint16, query Protocol) ipMatch {
+	var result ipMatch
+	for _, capability := range capabilities {
 		protocol, ports, found := strings.Cut(capability, ":")
 		if !found {
-			// A capability without a protocol is a bare port expression and
-			// applies to every protocol, so narrowing the query cannot exclude it.
-			hit, parsed := portSpecMatches(capability, port)
-			switch {
-			case !parsed:
-				unparseable = true
-			case hit:
-				return true, false
-			}
-			continue
-		}
-		if !capabilityProtocolMatches(protocol, query) {
-			continue
+			// A capability without a protocol is a bare port expression, which
+			// carries the proto-0 protocol set. A bare "*" lands here too, as
+			// the wildcard protocol over the wildcard port range.
+			protocol, ports = "*", capability
 		}
 		hit, parsed := portSpecMatches(ports, port)
+		switch capabilityProtocolVerdict(protocol, query) {
+		case protocolUnknown:
+			// The protocol is a defect, but the port half can still rule this
+			// capability out: no protocol the author might have meant widens a
+			// port range that already excludes the query. Only a port that
+			// could still have matched leaves the capability unproven.
+			if hit || !parsed {
+				result.unparseable = true
+			}
+			continue
+		case protocolNamedMiss:
+			if hit && parsed && result.protocolMiss == "" {
+				result.protocolMiss = protocol
+			}
+			continue
+		case protocolDefaultsMiss:
+			if hit && parsed {
+				result.defaultProtosMiss = true
+			}
+			continue
+		case protocolAdmits:
+		}
 		switch {
 		case !parsed:
-			unparseable = true
+			result.unparseable = true
 		case hit:
-			return true, false
+			return ipMatch{matched: true}
 		}
 	}
-	return false, unparseable
+	return result
 }
 
 // queryProtocol reports whether protocol can satisfy a reachability question
 // that does not name a protocol. This mirrors native policy tests: an omitted
-// protocol asks whether either TCP or UDP is allowed.
+// protocol asks whether any port-carrying protocol is allowed.
 func queryProtocol(protocol string) bool {
-	return protocol == protocolTCP || protocol == protocolUDP ||
-		protocol == protocolTCPNumber || protocol == protocolUDPNumber
+	if capabilityAllProtocols(protocol) {
+		return true
+	}
+	_, ok := networkQueryProtocol(protocol)
+	return ok
+}
+
+// capabilityAllProtocols reports whether a grant capability's protocol token is
+// one of the proto-0 spellings. Tailscale's ProtoPortRange parses "*" and every
+// spelling of protocol 0 to the same zero value, documented as
+// "TCP+UDP+ICMP(4+6)", so "0:443", "*:443", and a bare "443" are one rule
+// written three ways. That set is not every port-carrying protocol — it omits
+// SCTP — so callers must ask defaultProtosCover before letting one of these
+// spellings answer a narrowed query. This reading belongs to grants[].ip alone:
+// acls[].proto goes through ipproto.Proto, which rejects "*" and reads 0 as a
+// named protocol rather than a wildcard.
+func capabilityAllProtocols(token string) bool {
+	if token == "*" {
+		return true
+	}
+	number, err := strconv.ParseUint(token, 10, 8)
+	return err == nil && number == 0
+}
+
+// defaultProtosCover reports whether a rule that names no protocol — a proto-0
+// grant capability, or a legacy ACL entry with no proto — can answer a query
+// for the given protocol.
+//
+// Both compile to a filter rule with no IPProto, which the packet filter
+// expands to defaultProtos: TCP, UDP, ICMPv4, ICMPv6
+// (tailscale.com/wgengine/filter/tailcfg.go). SCTP is port-carrying but absent
+// from that set, so the wildcard grants every port question except SCTP's,
+// which needs an explicit sctp: or 132: capability. The protocol-agnostic
+// default is covered because TCP and UDP are.
+func defaultProtosCover(query Protocol) bool {
+	return query != ProtocolSCTP
+}
+
+// knownIPProtocol reports whether Tailscale can parse a protocol token as an
+// ipproto.Proto. Named protocols are case-insensitive and numeric protocols
+// span the full uint8 range. "*" is deliberately absent: it is a
+// ProtoPortRange wildcard rather than an ipproto.Proto name, so acls[].proto
+// rejects it and only capabilityAllProtocols may accept it.
+func knownIPProtocol(token string) bool {
+	if _, err := strconv.ParseUint(token, 10, 8); err == nil {
+		return true
+	}
+	switch strings.ToLower(token) {
+	case "ah", "dccp", "egp", "esp", "gre", "icmp", "icmpv4", "icmpv6",
+		"igmp", "igp", "ip-in-ip", "ipv4", "ipv6-icmp", "sctp", "tcp", "tsmp", "udp":
+		return true
+	default:
+		return false
+	}
+}
+
+// networkQueryProtocol maps every Tailscale spelling of a port-carrying
+// protocol, including case-insensitive names and numeric tokens with leading
+// zeroes, onto the protocols this evaluator can ask about. TCP, UDP, and SCTP
+// are the three the packet filter matches by port; every other protocol needs
+// the entire port range and so answers no port question.
+func networkQueryProtocol(token string) (Protocol, bool) {
+	switch strings.ToLower(token) {
+	case protocolTCP:
+		return ProtocolTCP, true
+	case protocolUDP:
+		return ProtocolUDP, true
+	case protocolSCTP:
+		return ProtocolSCTP, true
+	}
+	number, err := strconv.ParseUint(token, 10, 8)
+	if err != nil {
+		return "", false
+	}
+	switch number {
+	case protocolTCPNumber:
+		return ProtocolTCP, true
+	case protocolUDPNumber:
+		return ProtocolUDP, true
+	case protocolSCTPNumber:
+		return ProtocolSCTP, true
+	default:
+		return "", false
+	}
 }
 
 // capabilityProtocolMatches reports whether a rule's protocol token can satisfy
-// a query for the given protocol. Both the named and numeric spellings of TCP
-// and UDP are recognized; any other protocol carries no port access and so can
-// never satisfy a port-based question.
+// a query for the given protocol. Both the named and numeric spellings of the
+// port-carrying protocols are recognized; any other protocol answers no port
+// question. The wildcard spellings never reach here — capabilityAllProtocols
+// settles them for grants[].ip, and acls[].proto rejects them outright.
 func capabilityProtocolMatches(token string, query Protocol) bool {
-	var named Protocol
-	switch token {
-	case protocolTCP, protocolTCPNumber:
-		named = ProtocolTCP
-	case protocolUDP, protocolUDPNumber:
-		named = ProtocolUDP
-	default:
+	named, ok := networkQueryProtocol(token)
+	if !ok {
 		return false
 	}
 	return query == ProtocolAny || query == "" || query == named
@@ -697,7 +909,7 @@ func capabilityProtocolMatches(token string, query Protocol) bool {
 func aclDestinationMatches(
 	destinations []string,
 	query target,
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 ) (bool, bool, string) {
 	unparseable, unresolved := false, ""
@@ -715,11 +927,15 @@ func aclDestinationMatches(
 		if !hit {
 			continue
 		}
-		if policycore.SelectorMatches(host, query.host, policy, source) {
+		switch matcher.MatchesTri(host, query.host, source) {
+		case policycore.Matched:
 			return true, false, ""
-		}
-		if unresolved == "" && !policycore.AutogroupResolvable(host, query.host) {
-			unresolved = host
+		case policycore.Unresolvable:
+			if unresolved == "" {
+				unresolved = host
+			}
+		case policycore.NoMatch:
+			// Keep looking: another destination may match or be undecidable.
 		}
 	}
 	return false, unparseable, unresolved
