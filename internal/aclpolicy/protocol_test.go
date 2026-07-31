@@ -177,6 +177,17 @@ func TestSCTPCarriesPortAccess(t *testing.T) {
 		{"tcp does not answer for sctp", "tcp:5432", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
 		{"numeric sctp is the same protocol", "132:5432", aclpolicy.ProtocolSCTP, aclpolicy.AccessAllow},
 		{"dccp carries no port access", "dccp:5432", "", aclpolicy.AccessDeny},
+		// Proto 0 expands to TCP+UDP+ICMP(4+6), which excludes SCTP. Every
+		// spelling of it must therefore answer the agnostic and TCP questions
+		// but refuse SCTP's, or a wildcard grant reports reachable for traffic
+		// the packet filter drops.
+		{"bare port does not answer for sctp", "5432", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
+		{"proto wildcard does not answer for sctp", "*:5432", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
+		{"numeric zero does not answer for sctp", "0:5432", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
+		{"full wildcard does not answer for sctp", "*", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
+		{"bare port still answers the agnostic question", "5432", "", aclpolicy.AccessAllow},
+		{"proto wildcard still answers for tcp", "*:5432", aclpolicy.ProtocolTCP, aclpolicy.AccessAllow},
+		{"proto wildcard still answers for udp", "*:5432", aclpolicy.ProtocolUDP, aclpolicy.AccessAllow},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -196,6 +207,79 @@ func TestSCTPCarriesPortAccess(t *testing.T) {
 			}
 			if decision.Access != testCase.want || len(decision.Skipped) != 0 {
 				t.Errorf("%s: %#v, want %q with no skip", testCase.name, decision, testCase.want)
+			}
+		})
+	}
+}
+
+// A proto-0 capability rejected for SCTP must not blame the port: its range
+// covered the query, and "*" names no protocol to blame either, so the trace
+// has to describe the default protocol set. Blaming the port sends a reader to
+// widen a range that is already "*".
+func TestDefaultProtocolSetMissDoesNotBlameThePort(t *testing.T) {
+	t.Parallel()
+	for _, capability := range []string{"*", "*:443", "0:443", "443"} {
+		t.Run(capability, func(t *testing.T) {
+			t.Parallel()
+			decision, err := aclpolicy.EvaluateReachability(
+				&tailscale.ACL{Grants: []tailscale.Grant{{
+					Source:      []string{"alice@example.com"},
+					Destination: []string{"tag:web"},
+					IP:          []string{capability},
+				}}},
+				"alice@example.com",
+				"tag:web:443",
+				aclpolicy.ReachabilityOptions{Protocol: aclpolicy.ProtocolSCTP},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Access != aclpolicy.AccessDeny {
+				t.Fatalf("Access = %q, want %q", decision.Access, aclpolicy.AccessDeny)
+			}
+			want := "grant 0: network capability port 443 matched but " +
+				"its default protocol set does not cover sctp"
+			if len(decision.Trace) == 0 || decision.Trace[0] != want {
+				t.Errorf("Trace[0] = %q, want %q", decision.Trace, want)
+			}
+		})
+	}
+}
+
+// A legacy ACL entry with no proto compiles to a filter rule with no IPProto,
+// which the packet filter expands to the same default set as a proto-0
+// capability. It therefore answers the agnostic and TCP questions but not
+// SCTP's, exactly like the grant wildcard above.
+func TestLegacyACLWithoutProtocolDoesNotCoverSCTP(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name  string
+		query aclpolicy.Protocol
+		want  aclpolicy.Access
+	}{
+		{"agnostic question", "", aclpolicy.AccessAllow},
+		{"tcp question", aclpolicy.ProtocolTCP, aclpolicy.AccessAllow},
+		{"udp question", aclpolicy.ProtocolUDP, aclpolicy.AccessAllow},
+		{"sctp question", aclpolicy.ProtocolSCTP, aclpolicy.AccessDeny},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			decision, err := aclpolicy.EvaluateReachability(
+				&tailscale.ACL{ACLs: []tailscale.ACLEntry{{
+					Action:      "accept",
+					Source:      []string{"alice@example.com"},
+					Destination: []string{"tag:web:443"},
+				}}},
+				"alice@example.com",
+				"tag:web:443",
+				aclpolicy.ReachabilityOptions{Protocol: testCase.query},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Access != testCase.want {
+				t.Errorf("Access = %q, want %q", decision.Access, testCase.want)
 			}
 		})
 	}

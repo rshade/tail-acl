@@ -11,10 +11,11 @@ import (
 // policy document and the live facts held by a Matcher.
 //
 // It exists so the autogroup vocabulary is enumerated once. IsRoleAutogroup,
-// KnownAutogroup, AutogroupResolvable, and Matcher.directMatches are all views
-// of autogroupSpecFor, so an autogroup cannot be half-added: a selector either
-// has a spec and every view agrees about it, or it has none and every view
-// treats it as unknown.
+// KnownAutogroup, Matcher.autogroupResolvable — which both AutogroupResolvable
+// and MatchesTri route through — and Matcher.directMatches are all views of
+// autogroupSpecFor, so an autogroup cannot be half-added: a selector either has
+// a spec and every view agrees about it, or it has none and every view treats
+// it as unknown.
 type autogroupSpec struct {
 	// role is the tailnet role this autogroup selects, empty for autogroups
 	// that name something other than a role.

@@ -533,6 +533,13 @@ func grantAllows(
 				ip.protocolMiss,
 			)}
 		}
+		if ip.defaultProtosMiss {
+			return ruleOutcome{decision: fmt.Sprintf(
+				"network capability port %d matched but its default protocol set does not cover %s",
+				destination.port,
+				protocol,
+			)}
+		}
 		return ruleOutcome{decision: fmt.Sprintf(
 			"network capability did not match port %d%s",
 			destination.port,
@@ -578,17 +585,24 @@ func aclAllows(
 		return ruleOutcome{decision: fmt.Sprintf("action %q is not accept", entry.Action)}
 	}
 	protocolGate := ""
-	if entry.Protocol != "" {
-		switch {
-		case !knownIPProtocol(entry.Protocol):
-			protocolGate = fmt.Sprintf("protocol %q is not a known name or number", entry.Protocol)
-		case !capabilityProtocolMatches(entry.Protocol, protocol):
-			// Native tests ask whether a port-carrying protocol is allowed. A
-			// recognized protocol that carries no port access therefore remains
-			// a decidable non-match; whether the control plane instead asks
-			// about any protocol is tracked separately from this evaluator.
-			return ruleOutcome{decision: fmt.Sprintf("protocol %q did not match", entry.Protocol)}
+	switch {
+	case entry.Protocol == "":
+		// An omitted proto is compiled with no IPProto, which the packet filter
+		// expands to the same default set as a proto-0 capability. SCTP is
+		// outside it, so an entry that names no protocol cannot answer for SCTP.
+		if !defaultProtosCover(protocol) {
+			return ruleOutcome{decision: fmt.Sprintf(
+				"rule names no proto, which does not cover %s", protocol,
+			)}
 		}
+	case !knownIPProtocol(entry.Protocol):
+		protocolGate = fmt.Sprintf("protocol %q is not a known name or number", entry.Protocol)
+	case !capabilityProtocolMatches(entry.Protocol, protocol):
+		// Native tests ask whether a port-carrying protocol is allowed. A
+		// recognized protocol that carries no port access therefore remains
+		// a decidable non-match; whether the control plane instead asks
+		// about any protocol is tracked separately from this evaluator.
+		return ruleOutcome{decision: fmt.Sprintf("protocol %q did not match", entry.Protocol)}
 	}
 	destinations := entry.Destination
 	if len(destinations) == 0 {
@@ -679,6 +693,46 @@ func anySelectorMatches(
 	return match == policycore.Matched, unresolved
 }
 
+// protocolVerdict is how one capability's protocol token relates to the query.
+// The three miss kinds are distinguished because each rules the capability out
+// for a different reason, and grantIPMatches records a different fact for each.
+type protocolVerdict int
+
+const (
+	// protocolAdmits means the capability's protocol can answer the query, so
+	// only its port range remains to be checked.
+	protocolAdmits protocolVerdict = iota
+	// protocolUnknown means the token is not a protocol Tailscale can parse.
+	protocolUnknown
+	// protocolNamedMiss means a recognized protocol that cannot answer the
+	// query, so the trace can name it.
+	protocolNamedMiss
+	// protocolDefaultsMiss means a proto-0 spelling whose default protocol set
+	// excludes the query. There is no protocol to name — the token is "*" or a
+	// bare port expression — so the trace describes the set instead.
+	protocolDefaultsMiss
+)
+
+// capabilityProtocolVerdict classifies a grant capability's protocol token
+// against the query. The wildcard spellings answer a port question exactly like
+// a bare port expression, but only for the protocols proto 0 actually expands
+// to; SCTP is not among them and needs an explicit capability.
+func capabilityProtocolVerdict(protocol string, query Protocol) protocolVerdict {
+	switch {
+	case capabilityAllProtocols(protocol):
+		if !defaultProtosCover(query) {
+			return protocolDefaultsMiss
+		}
+		return protocolAdmits
+	case !knownIPProtocol(protocol):
+		return protocolUnknown
+	case !capabilityProtocolMatches(protocol, query):
+		return protocolNamedMiss
+	default:
+		return protocolAdmits
+	}
+}
+
 // ipMatch is grantIPMatches' answer. protocolMiss names the protocol of a
 // capability whose port range did cover the query but whose protocol did not,
 // so the trace can blame the field that actually decided the rule instead of
@@ -687,6 +741,11 @@ type ipMatch struct {
 	matched      bool
 	unparseable  bool
 	protocolMiss string
+	// defaultProtosMiss records a proto-0 capability whose port range did cover
+	// the query but whose default protocol set does not. It is separate from
+	// protocolMiss because the capability names no protocol to blame — "*" or a
+	// bare port expression — so the trace has to describe the set instead.
+	defaultProtosMiss bool
 }
 
 // grantIPMatches reports whether any network capability covers port, whether
@@ -696,21 +755,16 @@ type ipMatch struct {
 func grantIPMatches(capabilities []string, port uint16, query Protocol) ipMatch {
 	var result ipMatch
 	for _, capability := range capabilities {
-		if capability == "*" {
-			return ipMatch{matched: true}
-		}
 		protocol, ports, found := strings.Cut(capability, ":")
 		if !found {
-			// A capability without a protocol is a bare port expression and
-			// applies to every protocol, so narrowing the query cannot exclude it.
+			// A capability without a protocol is a bare port expression, which
+			// carries the proto-0 protocol set. A bare "*" lands here too, as
+			// the wildcard protocol over the wildcard port range.
 			protocol, ports = "*", capability
 		}
 		hit, parsed := portSpecMatches(ports, port)
-		switch {
-		case capabilityAllProtocols(protocol):
-			// The wildcard spellings carry port access for every protocol, so
-			// they answer a port question exactly like a bare port expression.
-		case !knownIPProtocol(protocol):
+		switch capabilityProtocolVerdict(protocol, query) {
+		case protocolUnknown:
 			// The protocol is a defect, but the port half can still rule this
 			// capability out: no protocol the author might have meant widens a
 			// port range that already excludes the query. Only a port that
@@ -719,11 +773,17 @@ func grantIPMatches(capabilities []string, port uint16, query Protocol) ipMatch 
 				result.unparseable = true
 			}
 			continue
-		case !capabilityProtocolMatches(protocol, query):
+		case protocolNamedMiss:
 			if hit && parsed && result.protocolMiss == "" {
 				result.protocolMiss = protocol
 			}
 			continue
+		case protocolDefaultsMiss:
+			if hit && parsed {
+				result.defaultProtosMiss = true
+			}
+			continue
+		case protocolAdmits:
 		}
 		switch {
 		case !parsed:
@@ -746,19 +806,35 @@ func queryProtocol(protocol string) bool {
 	return ok
 }
 
-// capabilityAllProtocols reports whether a grant capability's protocol token
-// covers every port-carrying protocol. Tailscale's ProtoPortRange parses "*"
-// and every spelling of protocol 0 to the same zero value, documented as
+// capabilityAllProtocols reports whether a grant capability's protocol token is
+// one of the proto-0 spellings. Tailscale's ProtoPortRange parses "*" and every
+// spelling of protocol 0 to the same zero value, documented as
 // "TCP+UDP+ICMP(4+6)", so "0:443", "*:443", and a bare "443" are one rule
-// written three ways. This reading belongs to grants[].ip alone: acls[].proto
-// goes through ipproto.Proto, which rejects "*" and reads 0 as a named
-// protocol rather than a wildcard.
+// written three ways. That set is not every port-carrying protocol — it omits
+// SCTP — so callers must ask defaultProtosCover before letting one of these
+// spellings answer a narrowed query. This reading belongs to grants[].ip alone:
+// acls[].proto goes through ipproto.Proto, which rejects "*" and reads 0 as a
+// named protocol rather than a wildcard.
 func capabilityAllProtocols(token string) bool {
 	if token == "*" {
 		return true
 	}
 	number, err := strconv.ParseUint(token, 10, 8)
 	return err == nil && number == 0
+}
+
+// defaultProtosCover reports whether a rule that names no protocol — a proto-0
+// grant capability, or a legacy ACL entry with no proto — can answer a query
+// for the given protocol.
+//
+// Both compile to a filter rule with no IPProto, which the packet filter
+// expands to defaultProtos: TCP, UDP, ICMPv4, ICMPv6
+// (tailscale.com/wgengine/filter/tailcfg.go). SCTP is port-carrying but absent
+// from that set, so the wildcard grants every port question except SCTP's,
+// which needs an explicit sctp: or 132: capability. The protocol-agnostic
+// default is covered because TCP and UDP are.
+func defaultProtosCover(query Protocol) bool {
+	return query != ProtocolSCTP
 }
 
 // knownIPProtocol reports whether Tailscale can parse a protocol token as an

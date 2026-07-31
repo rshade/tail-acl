@@ -269,6 +269,14 @@ Two changes affect callers that branch on exit codes, in the same spirit as the
   legacy `allowed` field rather than serializing `false`. There is deliberately
   no opt-out: `check`'s three-state verdict is its product, and a shell caller
   branching on `-eq 1` should treat `10` as "could not prove", not as reachable.
+- SCTP joining TCP and UDP as port-carrying widens the protocol-agnostic
+  default, so a rule reachable only over SCTP changes verdict without any flag
+  being passed. A capability such as `sctp:5432` previously answered no port
+  question: `check` reported not reachable, an `accept` assertion over it failed,
+  and a `deny` assertion passed. All three now flip. Conversely, the proto-0
+  spellings (`*`, `*:443`, `0:443`, a bare `443`) compile to TCP, UDP, and
+  ICMP(4+6) and so do **not** grant SCTP — `--proto sctp` needs an explicit
+  `sctp:` or `132:` capability.
 
 ### `check` design decision: local evaluation
 
@@ -299,8 +307,9 @@ policy test with no `proto`: access under any port-carrying protocol is
 sufficient. Those are TCP, UDP, and SCTP — the three Tailscale's packet filter
 matches by port; every other protocol needs the entire port range and so answers
 no port question. Pass `--proto tcp`, `--proto udp`, or `--proto sctp` to narrow
-the question when the distinction matters (`udp:53` versus `tcp:53`); the default
-stays `any` so an existing caller's verdicts do not move. It understands network
+the question when the distinction matters (`udp:53` versus `tcp:53`). Adding SCTP
+to that set widens the default question, so see [Compatibility](#compatibility)
+for the verdicts it moves. It understands network
 grants and legacy ACLs, groups, hosts, IP sets, exact tag/user selectors,
 supported autogroups, IP/CIDR containment, bare or protocol-qualified ports,
 lists, and ranges. Application capabilities alone do not grant network access.

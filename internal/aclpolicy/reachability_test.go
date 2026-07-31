@@ -333,13 +333,11 @@ func TestUnknownProtocolIsRejected(t *testing.T) {
 // TestEvaluateTestsTreatsUnevaluatableGateAsIndeterminate and
 // TestEvaluateTestsReportsIndeterminateWithoutAborting, which replaced this.
 
-// An autogroup nested inside a group is not legal Tailscale policy: group
-// members must be full email addresses, and groups cannot contain groups. The
-// evaluator therefore treats such a member as an ordinary literal selector that
-// simply does not match, rather than clouding the verdict. This test documents
-// that deliberate boundary so the behaviour is not mistaken for the
-// silent-deny bug that unresolvable autogroups at the rule level do cause.
-func TestAutogroupNestedInGroupDoesNotCloudTheVerdict(t *testing.T) {
+// Even if the control plane would reject this group member, policycore recurses
+// groups while matching and must recurse them while deciding whether a miss is
+// conclusive. Otherwise an unevaluable nested autogroup becomes a confident
+// deny while the same selector at rule level correctly yields indeterminate.
+func TestAutogroupNestedInGroupCloudsTheVerdict(t *testing.T) {
 	t.Parallel()
 	policy := grantPolicy(tailscale.Grant{
 		Source:      []string{"group:x"},
@@ -350,14 +348,12 @@ func TestAutogroupNestedInGroupDoesNotCloudTheVerdict(t *testing.T) {
 
 	got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
 
-	if got.Access != aclpolicy.AccessDeny {
-		t.Errorf("Access = %q, want %q; an illegal group member must not become a third verdict",
-			got.Access, aclpolicy.AccessDeny)
+	if got.Access != aclpolicy.AccessIndeterminate {
+		t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
 	}
 }
 
-// The rule level is the contrast: the same autogroup named directly as a
-// grant source is legal policy and must cloud the verdict.
+// The same autogroup named directly as a grant source must cloud the verdict.
 func TestAutogroupAtRuleLevelStillCloudsTheVerdict(t *testing.T) {
 	t.Parallel()
 	got := evaluate(t, grantPolicy(tailscale.Grant{

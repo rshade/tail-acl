@@ -69,6 +69,17 @@ A complete roster maps logins to roles. It makes an absent user a definite
 non-match, but it cannot settle a bare device address because it does not map
 devices to owners.
 
+Three-state resolution follows nested groups. A group is decidable only when
+every member is decidable against the query; one nested undecidable autogroup
+makes a non-matching group `Unresolvable`. A definite match by any member still
+settles the group as `Matched`. Undefined groups remain definite non-matches,
+and group cycles terminate without being treated as missing live state.
+
+Membership is keyed on the selector itself, not on the `group:` prefix, so a
+`groups` entry the control plane would reject resolves the same way here as one
+it accepts. Matching and resolvability read that one lookup, which is what keeps
+a group the matcher expands from being reported as settled.
+
 A caller with no tailnet access uses the roster-blind entry point instead:
 
 ```go

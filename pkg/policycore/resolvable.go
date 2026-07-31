@@ -79,10 +79,40 @@ func classifyQuery(query string) queryTarget {
 }
 
 // autogroupResolvable reports whether this matcher holds enough information to
-// decide selector against query. It deliberately reads only HaveRoles and the
-// autogroup descriptor, never Policy, so the zero-value Matcher used by
-// AutogroupResolvable is safe.
+// decide selector against query. Groups recurse because their members may be
+// autogroups whose membership needs live state. Membership is looked up through
+// groupMembers — by key, exactly as groupMatches looks it up, never by the
+// group: prefix — so a selector the matching walk expands can never be one this
+// walk reports as settled. The guard is path-scoped, like groupMatches:
+// deleting on return lets a shared group be explored through every branch of a
+// diamond while still terminating cycles.
 func (m Matcher) autogroupResolvable(selector, query string) bool {
+	return m.autogroupResolvableSeen(selector, query, make(map[string]bool))
+}
+
+func (m Matcher) autogroupResolvableSeen(
+	selector string,
+	query string,
+	seenGroups map[string]bool,
+) bool {
+	// An undefined group provably names nobody, and a group already on this path
+	// contributes no additional members, so both fall through as settled.
+	if members, ok := m.groupMembers(selector); ok && !seenGroups[selector] {
+		seenGroups[selector] = true
+		defer delete(seenGroups, selector)
+		for _, member := range members {
+			if !m.autogroupResolvableSeen(member, query, seenGroups) {
+				return false
+			}
+		}
+		// Deliberately no return. matchesSeen resolves a selector as a union of
+		// its readings — directMatches, which owns the autogroup vocabulary, then
+		// groupMatches — so settling it requires the conjunction. A groups key
+		// spelled "autogroup:admin" is named by both readings, and returning here
+		// would report the roster-dependent one settled on the strength of the
+		// member list alone.
+	}
+
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true
 	}
@@ -104,7 +134,9 @@ func (m Matcher) autogroupResolvable(selector, query string) bool {
 // control plane. Answering such a query "no match" would be exactly the
 // confident wrong answer Match exists to prevent — and reporting a settleable
 // one Unresolvable trains callers to ignore the state, so both directions
-// matter.
+// matter. This function has no policy argument, so it cannot inspect group
+// members; use Matcher.MatchesTri or SelectorMatchesTri when resolving a policy
+// selector that may name a group.
 func AutogroupResolvable(selector, query string) bool {
 	return Matcher{}.autogroupResolvable(selector, query)
 }

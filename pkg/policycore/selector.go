@@ -169,8 +169,23 @@ func (m Matcher) roleMatches(role tailscale.UserRole, query string) bool {
 	return m.Roles[strings.ToLower(query)] == role
 }
 
-func (m Matcher) groupMatches(selector, query, source string, seenGroups map[string]bool) bool {
+// groupMembers reports the members selector names as a group. It is the single
+// lookup both the matching walk and the resolvability walk go through, so the
+// two cannot disagree about which selectors are groups — a disagreement would
+// let a group the matcher expands be reported as settled, which is a confident
+// wrong answer rather than merely a missed one. Membership is keyed on the
+// literal selector, not on the group: prefix, because that is what Matches
+// resolves against; a nil Policy simply names no groups.
+func (m Matcher) groupMembers(selector string) ([]string, bool) {
+	if m.Policy == nil {
+		return nil, false
+	}
 	members, ok := m.Policy.Groups[selector]
+	return members, ok
+}
+
+func (m Matcher) groupMatches(selector, query, source string, seenGroups map[string]bool) bool {
+	members, ok := m.groupMembers(selector)
 	if !ok || seenGroups[selector] {
 		return false
 	}
