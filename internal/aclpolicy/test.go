@@ -38,7 +38,7 @@ const (
 
 // The selector namespaces and the autogroups this evaluator can resolve without
 // control-plane state live in policycore, which owns selector resolution for
-// both this tool and tailnet-audit. See policycore.AutogroupResolvable.
+// both this tool and tailnet-audit. See policycore.Matcher.MatchesTri.
 
 // AssertionResult describes one accept or deny destination from a policy test.
 // IDs are derived from the policy's array indexes and are stable for unchanged
@@ -105,7 +105,8 @@ type TestReport struct {
 // Skipped is therefore policy-scoped; an indeterminate assertion is separately
 // path-scoped and is reported only when its evaluation reaches such a defect.
 func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) {
-	skipped := scanRules(policy)
+	matcher := policycore.Matcher{Policy: policy}
+	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return TestReport{}, fmt.Errorf("%s (%d unparseable rule(s) in strict mode)", skipped[0], len(skipped))
 	}
@@ -124,7 +125,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 
 		for assertionIndex, destination := range accept {
 			assertion, assertionErr := evaluateAssertion(
-				policy, testIndex, assertionIndex, "accept", source, destination, true,
+				matcher, testIndex, assertionIndex, "accept", source, destination, true,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -133,7 +134,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 		}
 		for assertionIndex, destination := range test.Deny {
 			assertion, assertionErr := evaluateAssertion(
-				policy, testIndex, assertionIndex, "deny", source, destination, false,
+				matcher, testIndex, assertionIndex, "deny", source, destination, false,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -153,10 +154,10 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 // A protocol-qualified capability that names a non-port protocol (for example
 // "icmp:*") is not a parse failure: it correctly grants no port access and is
 // skipped in silence.
-func scanRules(policy *tailscale.ACL) []RuleSkip {
+func scanRules(matcher policycore.Matcher) []RuleSkip {
 	skips := make([]RuleSkip, 0)
-	skips = append(skips, scanGrantRules(policy.Grants)...)
-	skips = append(skips, scanACLRules(policy.ACLs)...)
+	skips = append(skips, scanGrantRules(matcher.Policy.Grants)...)
+	skips = append(skips, scanACLRules(matcher.Policy.ACLs)...)
 	return skips
 }
 
@@ -280,7 +281,7 @@ func (r *TestReport) add(assertion AssertionResult) {
 }
 
 func evaluateAssertion(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	testIndex, assertionIndex int,
 	expectation, source, destination string,
 	wantAllowed bool,
@@ -293,7 +294,7 @@ func evaluateAssertion(
 	// question. A rule the evaluator cannot decide becomes the assertion's
 	// third verdict; answering accept or deny from an incomplete walk would be
 	// a guess.
-	decision := policyAllows(policy, source, target, ProtocolAny)
+	decision := policyAllows(matcher, source, target, ProtocolAny)
 	allowed, evidence, trace := decision.access == AccessAllow, decision.evidence, decision.trace
 
 	// An assertion the evaluator cannot settle is reported as its own status
@@ -427,11 +428,12 @@ type ruleOutcome struct {
 // none was left unresolved — otherwise the answer is indeterminate, since one
 // of the rules passed over might well have allowed the traffic.
 func policyAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 	destination target,
 	protocol Protocol,
 ) reachability {
+	policy := matcher.Policy
 	if policy.Grants == nil && policy.ACLs == nil {
 		// An absent grants/acls section is Tailscale's implicit allow policy.
 		// An explicitly empty section is non-nil and therefore reaches the
@@ -456,7 +458,7 @@ func policyAllows(
 	}
 
 	for index, grant := range policy.Grants {
-		outcome := grantAllows(policy, grant, source, destination, protocol)
+		outcome := grantAllows(matcher, grant, source, destination, protocol)
 		reference := record(RuleGrant, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -468,7 +470,7 @@ func policyAllows(
 		}
 	}
 	for index, entry := range policy.ACLs {
-		outcome := aclAllows(policy, entry, source, destination, protocol)
+		outcome := aclAllows(matcher, entry, source, destination, protocol)
 		reference := record(RuleACL, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -502,17 +504,19 @@ func policyAllows(
 // so it is a clean non-match even when its source names an unresolvable
 // autogroup — only a grant that clears every other hurdle clouds the verdict.
 func grantAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	grant tailscale.Grant,
 	source string,
 	destination target,
 	protocol Protocol,
 ) ruleOutcome {
-	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, policy, source)
+	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, matcher, source)
 	if !sourceMatched && sourceGate == "" {
 		return ruleOutcome{decision: "source did not match"}
 	}
-	destinationMatched, destinationGate := anySelectorMatches(grant.Destination, destination.host, policy, source)
+	destinationMatched, destinationGate := anySelectorMatches(
+		grant.Destination, destination.host, matcher, source,
+	)
 	if !destinationMatched && destinationGate == "" {
 		return ruleOutcome{decision: "destination did not match"}
 	}
@@ -556,7 +560,7 @@ func grantAllows(
 }
 
 func aclAllows(
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	entry tailscale.ACLEntry,
 	source string,
 	destination target,
@@ -566,7 +570,7 @@ func aclAllows(
 	if len(sources) == 0 {
 		sources = entry.Users
 	}
-	sourceMatched, sourceGate := anySelectorMatches(sources, source, policy, source)
+	sourceMatched, sourceGate := anySelectorMatches(sources, source, matcher, source)
 	if !sourceMatched && sourceGate == "" {
 		return ruleOutcome{decision: "source did not match"}
 	}
@@ -591,7 +595,7 @@ func aclAllows(
 		destinations = entry.Ports
 	}
 	destinationMatched, unparseable, destinationGate := aclDestinationMatches(
-		destinations, destination, policy, source,
+		destinations, destination, matcher, source,
 	)
 	if !destinationMatched && !unparseable && destinationGate == "" {
 		// Decidably not this rule's destination, so it is ruled out regardless
@@ -668,10 +672,10 @@ func viaGate(via []string) string {
 func anySelectorMatches(
 	selectors []string,
 	query string,
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 ) (bool, string) {
-	match, unresolved := policycore.AnySelectorMatchesTri(selectors, query, policy, source)
+	match, unresolved := matcher.AnyMatchesTri(selectors, query, source)
 	return match == policycore.Matched, unresolved
 }
 
@@ -829,7 +833,7 @@ func capabilityProtocolMatches(token string, query Protocol) bool {
 func aclDestinationMatches(
 	destinations []string,
 	query target,
-	policy *tailscale.ACL,
+	matcher policycore.Matcher,
 	source string,
 ) (bool, bool, string) {
 	unparseable, unresolved := false, ""
@@ -847,11 +851,15 @@ func aclDestinationMatches(
 		if !hit {
 			continue
 		}
-		if policycore.SelectorMatches(host, query.host, policy, source) {
+		switch matcher.MatchesTri(host, query.host, source) {
+		case policycore.Matched:
 			return true, false, ""
-		}
-		if unresolved == "" && !policycore.AutogroupResolvable(host, query.host) {
-			unresolved = host
+		case policycore.Unresolvable:
+			if unresolved == "" {
+				unresolved = host
+			}
+		case policycore.NoMatch:
+			// Keep looking: another destination may match or be undecidable.
 		}
 	}
 	return false, unparseable, unresolved

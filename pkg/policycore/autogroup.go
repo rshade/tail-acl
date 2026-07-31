@@ -7,8 +7,8 @@ import (
 )
 
 // autogroupSpec is everything this package knows about one autogroup: the role
-// it selects, which query shapes settle it without control-plane state, and how
-// it is matched from the policy document alone.
+// it selects, which query context settles it, and how it is matched from the
+// policy document and the live facts held by a Matcher.
 //
 // It exists so the autogroup vocabulary is enumerated once. IsRoleAutogroup,
 // KnownAutogroup, AutogroupResolvable, and Matcher.directMatches are all views
@@ -19,9 +19,9 @@ type autogroupSpec struct {
 	// role is the tailnet role this autogroup selects, empty for autogroups
 	// that name something other than a role.
 	role tailscale.UserRole
-	// settles reports whether a query of this shape decides membership without
-	// control-plane state.
-	settles func(queryTarget) bool
+	// settles reports whether the query can be decided from its shape and the
+	// live facts held by the matcher.
+	settles func(queryContext) bool
 	// matches reports whether the autogroup names query using only the policy
 	// document. Nil when no offline fact can confirm it: the role autogroups,
 	// which resolve through Matcher's user roster instead.
@@ -67,30 +67,35 @@ func autogroupSpecFor(selector string) (autogroupSpec, bool) {
 	}
 }
 
-// roleSpec describes a role autogroup. matches stays nil: a tagged device has
-// no user owner, so a tag refutes a role autogroup with certainty, but nothing
-// in the policy document ever confirms one — that needs the user roster, which
-// Matcher supplies.
+// roleSpec describes a role autogroup. matches stays nil because role matching
+// is handled uniformly by Matcher.roleMatches using the roster.
 //
 // The mapping is flat, not hierarchical. Tailscale documents autogroup:admin as
 // "all members in the tailnet with the Admin role", and gives every other role
 // its own autogroup, so an Owner is not an Admin here and must not be treated
 // as one.
 func roleSpec(role tailscale.UserRole) autogroupSpec {
-	return autogroupSpec{role: role, settles: settlesAgainstTag}
+	return autogroupSpec{role: role, settles: settlesRole}
 }
 
-func settlesAlways(queryTarget) bool { return true }
+func settlesAlways(queryContext) bool { return true }
 
-func settlesAgainstUser(target queryTarget) bool { return target == queryUser }
+func settlesAgainstUser(query queryContext) bool { return query.target == queryUser }
 
-func settlesAgainstTag(target queryTarget) bool { return target == queryTag }
+// settlesRole reports when a role-autogroup query can be decided. A tagged
+// device has no user owner, so a tag refutes a role autogroup with certainty
+// even offline. A roster upgrades the user case and only the user case: it maps
+// logins to roles, so it settles "does this login hold this role" but says
+// nothing about whose device an address is.
+func settlesRole(query queryContext) bool {
+	return query.target == queryTag || (query.haveRoles && query.target == queryUser)
+}
 
 // settlesUnlessBareDevice covers the autogroups a user or a tag settles by
 // definition: a user is a member and is never tagged, and a tag is the
 // converse. A bare device address is neither until the control plane says whose
 // it is.
-func settlesUnlessBareDevice(target queryTarget) bool { return target != queryDevice }
+func settlesUnlessBareDevice(query queryContext) bool { return query.target != queryDevice }
 
 func matchesAlways(Matcher, string, string) bool { return true }
 

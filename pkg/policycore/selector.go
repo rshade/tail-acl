@@ -8,20 +8,21 @@ import (
 
 // Matcher resolves policy selectors against a query identity. Policy is the
 // tailnet policy document; Roles and HaveRoles carry the live tailnet fact that
-// document cannot supply — who holds which role, and whether that roster was
-// read at all.
+// document cannot supply — who holds which role, and whether a complete,
+// authoritative roster was read.
 //
 // When HaveRoles is false, role autogroups resolve to nothing and Recognized
 // reports them as unresolved rather than unmatched, so a caller degrades to
 // "coverage may be understated" instead of claiming a device is ungoverned.
-// HaveRoles true with an empty Roles map is different: the roster was read and
-// no user holds any role, so role autogroups are recognized and match nobody. A
-// static policy tool that has no tailnet access leaves HaveRoles false.
+// HaveRoles true with an empty Roles map is different: the complete roster was
+// read and no user holds any role, so role autogroups are recognized and match
+// nobody. Callers must leave HaveRoles false after a partial, truncated, or
+// failed read. A static policy tool that has no tailnet access leaves it false.
 type Matcher struct {
 	Policy *tailscale.ACL
 	// Roles maps a user's login name, lowercased, to their tailnet role.
 	Roles map[string]tailscale.UserRole
-	// HaveRoles reports that Roles came from a successfully read user roster.
+	// HaveRoles reports that Roles is a complete and authoritative user roster.
 	HaveRoles bool
 }
 
@@ -40,6 +41,41 @@ func (m Matcher) AnyMatches(selectors []string, query, source string) bool {
 		}
 	}
 	return false
+}
+
+// MatchesTri resolves one selector against query with everything this matcher
+// holds, reporting Unresolvable rather than NoMatch when the answer depends on
+// state the matcher does not have. source is the requesting identity, used only
+// to resolve autogroup:self.
+func (m Matcher) MatchesTri(selector, query, source string) Match {
+	if m.Matches(selector, query, source) {
+		return Matched
+	}
+	if !m.autogroupResolvable(selector, query) {
+		return Unresolvable
+	}
+	return NoMatch
+}
+
+// AnyMatchesTri resolves a selector list against query. A match by any selector
+// settles the list, so it outranks an earlier undecidable one. When nothing
+// matches it returns Unresolvable along with the first selector that could not
+// be decided, which callers surface as the reason.
+func (m Matcher) AnyMatchesTri(selectors []string, query, source string) (Match, string) {
+	unresolved := ""
+	for _, selector := range selectors {
+		match := m.MatchesTri(selector, query, source)
+		if match == Matched {
+			return Matched, ""
+		}
+		if match == Unresolvable && unresolved == "" {
+			unresolved = selector
+		}
+	}
+	if unresolved != "" {
+		return Unresolvable, unresolved
+	}
+	return NoMatch, ""
 }
 
 // SelectorMatches reports whether one selector names query using only what the

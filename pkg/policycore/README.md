@@ -37,11 +37,37 @@ matched := matcher.AnyMatches(rule.Source, "tag:web", "")
 ```
 
 A caller that has read the tailnet's user roster supplies it, which is what lets
-the role autogroups resolve:
+the role autogroups resolve. `HaveRoles` is an assertion that the roster is
+complete and authoritative; leave it false after a failed, partial, or
+truncated read:
 
 ```go
 matcher := policycore.Matcher{Policy: policy, Roles: roles, HaveRoles: true}
 ```
+
+A matcher can preserve the difference between a definite non-match and missing
+live state:
+
+```go
+match := matcher.MatchesTri("autogroup:admin", "ada@example.com", "")
+```
+
+For a role autogroup such as `autogroup:admin`, roster availability and query
+shape determine the three-state result:
+
+| `HaveRoles` | Query shape | Roster result | Verdict |
+| --- | --- | --- | --- |
+| `false` | tag | — | `NoMatch` |
+| `false` | user or bare device/CIDR | — | `Unresolvable` |
+| `true` | tag | — | `NoMatch` |
+| `true` | user | matching role | `Matched` |
+| `true` | user | another role | `NoMatch` |
+| `true` | user | absent | `NoMatch` |
+| `true` | bare device/CIDR | — | `Unresolvable` |
+
+A complete roster maps logins to roles. It makes an absent user a definite
+non-match, but it cannot settle a bare device address because it does not map
+devices to owners.
 
 A caller with no tailnet access uses the roster-blind entry point instead:
 

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
+
+	"github.com/rshade/tailscale-utils/policycore"
 )
 
 // RuleKind identifies the policy section holding the rule that decided a
@@ -136,7 +138,8 @@ func EvaluateReachability(
 		)
 	}
 
-	skipped := scanRules(policy)
+	matcher := policycore.Matcher{Policy: policy}
+	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return ReachabilityResult{}, fmt.Errorf(
 			"%s (%d unparseable rule(s) in strict mode)",
@@ -145,7 +148,7 @@ func EvaluateReachability(
 		)
 	}
 
-	decision := policyAllows(policy, source, destination, protocol)
+	decision := policyAllows(matcher, source, destination, protocol)
 	var allowed *bool
 	if decision.access != AccessIndeterminate {
 		settled := decision.access == AccessAllow

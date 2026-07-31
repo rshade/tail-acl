@@ -160,6 +160,10 @@ func TestKnownAutogroupExcludesRolesAndTracksTheMatchableSet(t *testing.T) {
 // resolver never matches is failure mode (b) — the unresolved-selector safety
 // valve silently drops it. A selector the resolver matches but KnownAutogroup
 // omits is failure mode (a) — a resolved selector reported as unresolved.
+//
+// This guard deliberately stays roster-blind. KnownAutogroup means confirmable
+// without a roster, so comparing it with a roster-bearing Matcher would break
+// the biconditional by construction and stop guarding the exported contract.
 func TestKnownAutogroupMatchesResolverParity(t *testing.T) {
 	t.Parallel()
 
@@ -272,6 +276,11 @@ func TestKnownAutogroupAndRoleAutogroupAreExclusive(t *testing.T) {
 func TestRoleAutogroupsAgreeAcrossEveryView(t *testing.T) {
 	t.Parallel()
 
+	withRoster := policycore.Matcher{
+		Policy:    &tailscale.ACL{},
+		Roles:     map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
+		HaveRoles: true,
+	}
 	for _, selector := range roleAutogroupSelectors() {
 		t.Run(selector, func(t *testing.T) {
 			t.Parallel()
@@ -296,6 +305,95 @@ func TestRoleAutogroupsAgreeAcrossEveryView(t *testing.T) {
 					selector,
 				)
 			}
+			if got := withRoster.MatchesTri(
+				selector, "ada@example.com", "",
+			); got == policycore.Unresolvable {
+				t.Errorf(
+					"MatchesTri(%q, \"ada@example.com\") = Unresolvable with a roster; "+
+						"a complete roster settles every role against a login",
+					selector,
+				)
+			}
+			if got := withRoster.MatchesTri(
+				selector, "100.64.0.9", "",
+			); got != policycore.Unresolvable {
+				t.Errorf(
+					"MatchesTri(%q, \"100.64.0.9\") = %v with a roster; want Unresolvable "+
+						"because a login-to-role roster cannot identify a device's owner",
+					selector,
+					got,
+				)
+			}
 		})
+	}
+}
+
+func TestSelectorMatchesTriIsTheZeroRosterMatcher(t *testing.T) {
+	t.Parallel()
+
+	const source = "alice@example.com"
+	policy := &tailscale.ACL{
+		Groups: map[string][]string{
+			"group:eng": {"alice@example.com", "autogroup:shared"},
+		},
+		Hosts: map[string]string{"web": "10.1.0.0/16"},
+	}
+	matcher := policycore.Matcher{Policy: policy}
+
+	singles := []struct {
+		selector string
+		query    string
+	}{
+		{"*", "100.64.0.9"},
+		{"tag:web", "tag:web"},
+		{"group:eng", "alice@example.com"},
+		{"web", "10.1.2.3"},
+		{"autogroup:self", source},
+		{"autogroup:admin", "ada@example.com"},
+		{"autogroup:admin", "tag:web"},
+		{"autogroup:tagged", "100.64.0.9"},
+		{"autogroup:shared", "tag:web"},
+	}
+	for _, test := range singles {
+		got := policycore.SelectorMatchesTri(test.selector, test.query, policy, source)
+		want := matcher.MatchesTri(test.selector, test.query, source)
+		if got != want {
+			t.Errorf(
+				"SelectorMatchesTri(%q, %q) = %v; zero-roster Matcher.MatchesTri = %v",
+				test.selector,
+				test.query,
+				got,
+				want,
+			)
+		}
+	}
+
+	lists := []struct {
+		selectors []string
+		query     string
+	}{
+		{nil, "tag:web"},
+		{[]string{"tag:db", "tag:web"}, "tag:web"},
+		{[]string{"autogroup:admin", "alice@example.com"}, "alice@example.com"},
+		{[]string{"autogroup:admin", "autogroup:shared"}, "ada@example.com"},
+		{[]string{"tag:db", "alice@example.com"}, "tag:web"},
+	}
+	for _, test := range lists {
+		gotMatch, gotUnresolved := policycore.AnySelectorMatchesTri(
+			test.selectors, test.query, policy, source,
+		)
+		wantMatch, wantUnresolved := matcher.AnyMatchesTri(test.selectors, test.query, source)
+		if gotMatch != wantMatch || gotUnresolved != wantUnresolved {
+			t.Errorf(
+				"AnySelectorMatchesTri(%q, %q) = (%v, %q); "+
+					"zero-roster Matcher.AnyMatchesTri = (%v, %q)",
+				test.selectors,
+				test.query,
+				gotMatch,
+				gotUnresolved,
+				wantMatch,
+				wantUnresolved,
+			)
+		}
 	}
 }
