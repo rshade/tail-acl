@@ -6,10 +6,10 @@ require (
 	github.com/hexops/gotextdiff v1.0.3
 	github.com/rshade/tailscale-utils/policycore v0.0.0
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
-	tailscale.com v1.78.3
+	tailscale.com v1.102.1
 	tailscale.com/client/tailscale/v2 v2.10.1
 )
 
-require golang.org/x/oauth2 v0.34.0 // indirect
+require golang.org/x/oauth2 v0.36.0 // indirect
 
 replace github.com/rshade/tailscale-utils/policycore => ../policycore
