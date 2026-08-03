@@ -1,0 +1,20 @@
+{
+  "schema_version": "1",
+  "tool": "tail-acl",
+  "command": "validate",
+  "status": "ok",
+  "message": "testdata/validation_warning.hujson is valid",
+  "file": "testdata/validation_warning.hujson",
+  "tailnet": "example.com",
+  "validation": {
+    "failures": [],
+    "warnings": [
+      {
+        "user": "group:unknown@example.com",
+        "warnings": [
+          "group is not syncing from SCIM and will be ignored by rules in the policy file"
+        ]
+      }
+    ]
+  }
+}

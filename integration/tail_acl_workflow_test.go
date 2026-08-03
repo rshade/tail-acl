@@ -1,9 +1,8 @@
 package integration_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,6 +106,181 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	api.assertRequestCounts(t, 5, 1, 1, 2)
 }
 
+func TestTailACLValidationWarningClassification(t *testing.T) {
+	t.Parallel()
+	runner, api := newValidationRunner(t)
+
+	// Warnings with no errors and no message are a success: the policy is
+	// valid, every warning is reported, and the exit code stays 0.
+	warningStdout, warningStderr, err := runner.runSplit(t,
+		"-format", "json", "--file", "testdata/validation_warning.hujson", "validate")
+	if err != nil {
+		t.Fatalf("warnings-only validation failed: %v\nstdout:\n%s\nstderr:\n%s", err, warningStdout, warningStderr)
+	}
+	wantGolden, err := os.ReadFile("testdata/validation_warning.golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warningStdout != string(wantGolden) {
+		t.Errorf("warnings JSON differs from golden:\ngot:\n%s\nwant:\n%s", warningStdout, wantGolden)
+	}
+	assertContains(t, warningStderr, "ACL validation warning", "group is not syncing from SCIM")
+
+	planWarningStdout, planWarningStderr, err := runner.runSplit(t,
+		"-format", "json", "--file", "testdata/validation_warning.hujson", "plan")
+	if err != nil {
+		t.Fatalf("warnings-only plan failed: %v\nstdout:\n%s\nstderr:\n%s",
+			err, planWarningStdout, planWarningStderr)
+	}
+	warningPlanResult := decodeEnvelope(t, planWarningStdout, "warnings-only plan")
+	if len(warningPlanResult.Validation.Warnings) != 1 {
+		t.Errorf("warnings-only plan envelope = %#v", warningPlanResult)
+	}
+	assertContains(t, planWarningStderr, "ACL validation warning", "group is not syncing from SCIM")
+
+	// A message alongside warnings is not proof the policy is clean. The
+	// warnings channel was never captured from the live control plane, so the
+	// CLI reports indeterminate rather than guessing in either direction.
+	messagePath := writePolicy(t, t.TempDir(), "warning-message.hujson", `{
+		"validation-scenario": "warnings-with-message",
+		"grants": [],
+	}`)
+	messageStdout, messageStderr, err := runner.runSplit(t, "-format", "json", "--file", messagePath, "validate")
+	if code := exitCodeOf(t, err); code != 10 {
+		t.Errorf("warnings-with-message exit = %d, want 10\nstdout:\n%s\nstderr:\n%s",
+			code, messageStdout, messageStderr)
+	}
+	messageResult := decodeEnvelope(t, messageStdout, "warnings-with-message")
+	if messageResult.Status != "indeterminate" || messageResult.Validation.Message != "warning(s) found" ||
+		len(messageResult.Validation.Warnings) != 1 || len(messageResult.Validation.Failures) != 0 {
+		t.Errorf("warnings-with-message envelope = %#v", messageResult)
+	}
+
+	// plan advertises exit 10 in --help and -schema too, so its half of that
+	// contract is asserted rather than inferred from validate's.
+	planMessageStdout, planMessageStderr, err := runner.runSplit(t,
+		"-format", "json", "--file", messagePath, "plan")
+	if code := exitCodeOf(t, err); code != 10 {
+		t.Errorf("warnings-with-message plan exit = %d, want 10\nstdout:\n%s\nstderr:\n%s",
+			code, planMessageStdout, planMessageStderr)
+	}
+	planMessageResult := decodeEnvelope(t, planMessageStdout, "warnings-with-message plan")
+	// changed must stay absent: a candidate that was never diffed has no answer,
+	// and reporting one would read as a confident "no changes".
+	if planMessageResult.Status != "indeterminate" || planMessageResult.Diff != "" ||
+		planMessageResult.Changed != nil || planMessageResult.Validation.Message != "warning(s) found" ||
+		len(planMessageResult.Validation.Warnings) != 1 {
+		t.Errorf("warnings-with-message plan envelope = %#v", planMessageResult)
+	}
+	api.assertRequestCounts(t, 4, 0, 0, 0)
+}
+
+func TestTailACLValidationFailureClassification(t *testing.T) {
+	t.Parallel()
+	runner, api := newValidationRunner(t)
+
+	dataOnlyPath := writePolicy(t, t.TempDir(), "data-only.hujson", `{
+		"validation-scenario": "data-only",
+		"grants": [],
+	}`)
+	dataStdout, dataStderr, err := runner.runSplit(t, "-format", "json", "--file", dataOnlyPath, "validate")
+	if code := exitCodeOf(t, err); code != 1 {
+		t.Errorf("data-only validate exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, dataStdout, dataStderr)
+	}
+	dataResult := decodeEnvelope(t, dataStdout, "data-only")
+	if dataResult.Status != "failed" || len(dataResult.Validation.Failures) != 1 ||
+		dataResult.Validation.Failures[0].User != "data-only-user" ||
+		len(dataResult.Validation.Failures[0].Errors) != 1 {
+		t.Errorf("data-only envelope = %#v", dataResult)
+	}
+	assertContains(t, dataStderr, "ACL validation failed", "data-only failure")
+
+	planStdout, planStderr, err := runner.runSplit(t, "-format", "json", "--file", dataOnlyPath, "plan")
+	if code := exitCodeOf(t, err); code != 1 {
+		t.Errorf("data-only plan exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, planStdout, planStderr)
+	}
+	planResult := decodeEnvelope(t, planStdout, "data-only plan")
+	if planResult.Status != "failed" || planResult.Diff != "" || len(planResult.Validation.Failures) != 1 {
+		t.Errorf("data-only plan envelope = %#v", planResult)
+	}
+
+	// A control plane that never judged the policy is a collection failure, not
+	// a verdict: exit 2, and stdout stays empty rather than calling a policy the
+	// server never read invalid.
+	unavailablePath := writePolicy(t, t.TempDir(), "unavailable.hujson", `{
+		"validation-scenario": "unavailable",
+		"grants": [],
+	}`)
+	unavailableStdout, unavailableStderr, err := runner.runSplit(t,
+		"-format", "json", "--file", unavailablePath, "validate")
+	if code := exitCodeOf(t, err); code != 2 {
+		t.Errorf("unavailable validate exit = %d, want 2\nstdout:\n%s\nstderr:\n%s",
+			code, unavailableStdout, unavailableStderr)
+	}
+	if unavailableStdout != "" {
+		t.Errorf("unavailable validate printed a verdict on stdout:\n%s", unavailableStdout)
+	}
+	assertContains(t, unavailableStderr, "ACL validation unavailable", "backend unavailable")
+	api.assertRequestCounts(t, 3, 0, 0, 0)
+}
+
+// validationEnvelope is the subset of the result envelope these tests assert
+// on. One shared type rather than an anonymous struct per decode: a renamed
+// JSON key then fails every test at once instead of silently decoding to a zero
+// value in the copies that were missed.
+type validationEnvelope struct {
+	Status     string `json:"status"`
+	Diff       string `json:"diff"`
+	Changed    *bool  `json:"changed"`
+	Validation struct {
+		Message  string `json:"message"`
+		Failures []struct {
+			User   string   `json:"user"`
+			Errors []string `json:"errors"`
+		} `json:"failures"`
+		Warnings []json.RawMessage `json:"warnings"`
+	} `json:"validation"`
+}
+
+func decodeEnvelope(t *testing.T, stdout, label string) validationEnvelope {
+	t.Helper()
+	var envelope validationEnvelope
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("%s stdout is not JSON: %v\n%s", label, err, stdout)
+	}
+	return envelope
+}
+
+func newValidationRunner(t *testing.T) (cliRunner, *policyAPIServer) {
+	t.Helper()
+	api := newPolicyAPIServer(t, `{"grants": []}`)
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	return cliRunner{
+		binary: buildTailACL(t, t.TempDir()),
+		env: []string{
+			"TAILSCALE_API_KEY=" + testAPIKey,
+			"TAILSCALE_TAILNET=" + testTailnet,
+			"TAILSCALE_API_URL=" + server.URL,
+		},
+	}, api
+}
+
+// exitCodeOf reports the CLI's exit status. The exit-code scheme is the
+// contract shell callers branch on, so a test asserts the number rather than
+// only that the command failed.
+func exitCodeOf(t *testing.T, err error) int {
+	t.Helper()
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("command failed without an exit status: %v", err)
+	}
+	return exitErr.ExitCode()
+}
+
 func TestTailACLTypedEditPreservesSSHExtensions(t *testing.T) {
 	t.Parallel()
 	const originalPolicy = `{
@@ -187,6 +361,17 @@ func (r cliRunner) run(t *testing.T, args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), r.env...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func (r cliRunner) runSplit(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), r.binary, args...)
+	cmd.Env = append(os.Environ(), r.env...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func buildTailACL(t *testing.T, tempDir string) string {
@@ -272,9 +457,38 @@ func (s *policyAPIServer) handleValidate(w http.ResponseWriter, r *http.Request)
 	s.mu.Lock()
 	s.validationRuns++
 	s.mu.Unlock()
-	if message := validationError(string(body)); message != "" {
-		writeAPIError(w, http.StatusOK, message)
+	policy := string(body)
+	switch validationScenario(policy) {
+	case "data-only":
+		writeValidationResponse(w, "", []map[string]any{{
+			"user": "data-only-user", "errors": []string{"data-only failure"},
+		}})
+	case "warnings-only":
+		writeValidationResponse(w, "", scimWarningDetail())
+	case "warnings-with-message":
+		writeValidationResponse(w, "warning(s) found", scimWarningDetail())
+	case "unavailable":
+		writeAPIError(w, http.StatusServiceUnavailable, "backend unavailable")
+	default:
+		if message := validationError(policy); message != "" {
+			writeAPIError(w, http.StatusOK, message)
+		}
 	}
+}
+
+// validationScenario reads the marker a test policy carries so the fake control
+// plane can answer with a named response shape. A policy without one falls
+// through to the ordinary validation path.
+func validationScenario(policy string) string {
+	_, after, found := strings.Cut(policy, `"validation-scenario": "`)
+	if !found {
+		return ""
+	}
+	scenario, _, found := strings.Cut(after, `"`)
+	if !found {
+		return ""
+	}
+	return scenario
 }
 
 func (s *policyAPIServer) handleSet(w http.ResponseWriter, r *http.Request) {
@@ -344,9 +558,23 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
+func scimWarningDetail() []map[string]any {
+	return []map[string]any{{
+		"user": "group:unknown@example.com",
+		"warnings": []string{
+			"group is not syncing from SCIM and will be ignored by rules in the policy file",
+		},
+	}}
+}
+
+func writeValidationResponse(w http.ResponseWriter, message string, data []map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"message": message, "data": data})
+}
+
 func policyETag(policy string) string {
-	sum := sha256.Sum256([]byte(policy))
-	return fmt.Sprintf("%q", hex.EncodeToString(sum[:]))
+	return fmt.Sprintf("%q", sha256Hex([]byte(policy)))
 }
 
 func trimETag(etag string) string {

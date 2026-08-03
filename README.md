@@ -105,7 +105,8 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 
 ### Exit codes
 
-- `0` success; all policy assertions passed, or `test` used
+- `0` success, including server validation that returned warnings with no errors
+  and no message; all policy assertions passed, or `test` used
   `--indeterminate=ignore`, which suppresses the exit code but not the finding —
   the envelope still reports `status: "indeterminate"` and a non-zero
   `test_summary.indeterminate`; `check` reports reachable; `lint` found nothing
@@ -113,10 +114,16 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 - `1` operation or policy assertion failed (including indeterminate under
   `--indeterminate=fail`); `check` reports not reachable; `lint` found issues at
   or above the threshold
-- `2` usage, input, or collection error
-- `10` `check` is indeterminate, or `test` under the default
-  `--indeterminate=warn` had an assertion it could not settle — a rule might
-  have applied, but the local evaluator could not prove whether it did. This is
+- `2` usage, input, or collection error. For `validate` and `plan` this also
+  covers a control plane that never judged the policy — expired credentials,
+  rate limiting, a server fault, an unreadable response body, a redirect that
+  dropped the request, or an unreachable API. No verdict is printed on stdout
+  for a request that reached no answer
+- `10` `check` is indeterminate, `test` under the default `--indeterminate=warn`
+  had an assertion it could not settle, or `validate` and `plan` got a response
+  they cannot read as a verdict — warnings with no errors alongside a message,
+  or a detail entry carrying neither errors nor warnings. A rule or a response
+  might have been clean, but nothing available could prove it was. This is
   deliberately not a denial: see
   [the safety boundary](#the-safety-boundary) below.
 
@@ -183,6 +190,50 @@ a composite whose leading extra contains a newline.
 calls `Standardize()` and strips comments, which is why compiled output is
 comment-free strict JSON. `plan` validates the candidate server-side before
 diffing, so a broken policy fails the plan rather than the upload.
+
+Server validation warnings are non-fatal. A response in which every detail has
+one or more `warnings`, no `errors`, and no `message` exits `0`; each warning is
+logged on stderr, and `-format json` preserves it under `validation.warnings`.
+Validation failures exit `1` and retain per-user detail under
+`validation.failures`. `validate` and `plan` both emit the additive `validation`
+object, whose two arrays are present even when empty. Classification is
+structural: the CLI reads which fields are present, never the prose inside the
+server's `message`, so no verdict depends on wording the control plane is free
+to change.
+
+Three responses deliberately do not produce a pass or a fail:
+
+- **Warnings alongside a message exit `10`, indeterminate.** The captured
+  evidence shows `message` is a failure channel in its own right — the parse
+  error in `internal/tailapi/testdata/validate_d_parse_error.json` carries a
+  message and no `data` at all — but the warnings channel itself was never
+  observed, because the SCIM probe was unavailable when those fixtures were
+  taken. Calling that combination valid would risk a green run on a rejection
+  whose reason lived only in the message; calling it invalid would fail every
+  warning-bearing policy if the server simply narrates warnings there. Until a
+  capture settles it, `tail-acl` reports that it cannot tell.
+- **A detail carrying neither `errors` nor `warnings` exits `10`.** The pinned
+  client already dropped one documented per-detail field, which is the whole
+  reason this command owns its request — so an entry this client cannot read is
+  evidence the response shape moved, not evidence the policy is bad. Filing it
+  under `validation.failures` would name an identity in the envelope with no
+  error text behind the accusation, so those entries appear in neither array and
+  the stderr diagnostic names what could not be read.
+- **A control plane that never judged the policy exits `2`.** Expired
+  credentials, rate limiting, the `5xx` family, a body that does not decode, a
+  redirect that rewrote the `POST` into a `GET` (which discards the policy), and
+  an unreachable API all mean the policy was never read, so stdout carries no
+  envelope at all rather than a verdict on a file the server never saw. A
+  judgement requires HTTP `200`, or a `400` that carries per-user `data` to back
+  it — a bare `400` is the generic "your request was wrong" and is treated as a
+  request this endpoint never answered.
+
+This command calls `/acl/validate` directly using the initialized v2 client's
+URL, HTTP transport, User-Agent, and authentication configuration. The pinned
+client's `PolicyFile().Validate` cannot express valid-with-warnings and discards
+the documented warning field and typed detail on HTTP 200. The owned request is
+therefore deliberately limited to this endpoint; upload and every other API
+operation continue to use the official client resource methods.
 
 ### Posture authoring: deliberate prefix asymmetry
 

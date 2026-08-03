@@ -29,9 +29,10 @@ type Config struct {
 // Plan describes the validated difference between the deployed policy and a
 // local candidate. ETag identifies the deployed version used for the diff.
 type Plan struct {
-	Diff    string
-	ETag    string
-	Changed bool
+	Diff       string
+	ETag       string
+	Changed    bool
+	Validation ValidationResult
 }
 
 // NewClient constructs the official Tailscale API client.
@@ -65,19 +66,29 @@ func UploadFile(ctx context.Context, client *tailscale.Client, path, ifMatch str
 }
 
 // ValidateFile asks Tailscale to validate the policy and run its policy tests.
-func ValidateFile(ctx context.Context, client *tailscale.Client, path string) error {
+func ValidateFile(ctx context.Context, client *tailscale.Client, path string) (ValidationResult, error) {
 	raw, err := aclpolicy.ReadRaw(path)
 	if err != nil {
-		return err
+		return newValidationResult(), err
 	}
-	if err = client.PolicyFile().Validate(ctx, string(raw)); err != nil {
-		return fmt.Errorf("validating %s: %w", path, err)
+	result, err := ValidatePolicy(ctx, client, raw)
+	if err != nil {
+		return result, fmt.Errorf("validating %s: %w", path, err)
 	}
-	return nil
+	return result, nil
 }
 
 // PlanFile fetches the deployed policy, validates path without applying it,
 // and returns a formatted unified diff from deployed to candidate policy.
+//
+// Once validation has run, every failure returns a non-nil *Plan carrying only
+// Validation — Diff, ETag, and Changed stay zero — so a caller can still report
+// the per-user detail and any warnings the control plane did supply rather than
+// discarding diagnostics it already collected. A caller must therefore check
+// the error before reading Changed, which otherwise reads as a confident "no
+// changes" for a candidate that was never diffed. Validation verdicts wrap
+// [ValidationError] or [ValidationIndeterminateError]; every failure before
+// validation returns a nil *Plan.
 func PlanFile(ctx context.Context, client *tailscale.Client, path string) (*Plan, error) {
 	candidate, err := aclpolicy.ReadRaw(path)
 	if err != nil {
@@ -88,25 +99,30 @@ func PlanFile(ctx context.Context, client *tailscale.Client, path string) (*Plan
 	if err != nil {
 		return nil, fmt.Errorf("fetching deployed policy: %w", err)
 	}
-	if err = client.PolicyFile().Validate(ctx, string(candidate)); err != nil {
+	validation, err := ValidatePolicy(ctx, client, candidate)
+	if err != nil {
+		if ClassifyValidation(err).Judged() {
+			return &Plan{Validation: validation}, fmt.Errorf("validating %s: %w", path, err)
+		}
 		return nil, fmt.Errorf("validating %s: %w", path, err)
 	}
 
 	deployedFormatted, err := hujson.Format([]byte(deployed.HuJSON))
 	if err != nil {
-		return nil, fmt.Errorf("formatting deployed policy: %w", err)
+		return &Plan{Validation: validation}, fmt.Errorf("formatting deployed policy: %w", err)
 	}
 	candidateFormatted, err := hujson.Format(candidate)
 	if err != nil {
-		return nil, fmt.Errorf("formatting %s: %w", path, err)
+		return &Plan{Validation: validation}, fmt.Errorf("formatting %s: %w", path, err)
 	}
 
 	before := string(deployedFormatted)
 	edits := myers.ComputeEdits(span.URIFromPath(path), before, string(candidateFormatted))
 	unified := diff.ToUnified("deployed", path, before, edits)
 	return &Plan{
-		Diff:    fmt.Sprint(unified),
-		ETag:    deployed.ETag,
-		Changed: len(edits) != 0,
+		Diff:       fmt.Sprint(unified),
+		ETag:       deployed.ETag,
+		Changed:    len(edits) != 0,
+		Validation: validation,
 	}, nil
 }

@@ -2,3 +2,8 @@ tailscale-utils
 Copyright 2026
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The independently implemented /acl/validate protocol handling references the
+Tailscale API documentation and Tailscale's cmd/gitops-pusher testNewACLs
+implementation as corroborating behavior. No Tailscale source code is
+incorporated.

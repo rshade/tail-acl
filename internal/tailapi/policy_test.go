@@ -1,4 +1,3 @@
-//nolint:cyclop // handler-driven API tests carry inherent branching; the package average is acceptable.
 package tailapi_test
 
 import (
@@ -43,7 +42,7 @@ func TestUploadAndValidateFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = tailapi.ValidateFile(context.Background(), client, path); err != nil {
+	if _, err = tailapi.ValidateFile(context.Background(), client, path); err != nil {
 		t.Fatal(err)
 	}
 	if err = tailapi.UploadFile(context.Background(), client, path, `"etag"`); err != nil {
@@ -185,8 +184,8 @@ func TestPlanFileStopsOnValidationFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "test(s) failed") {
 		t.Fatalf("error = %v, want policy-test failure", err)
 	}
-	if plan != nil {
-		t.Errorf("plan = %#v, want nil after validation failure", plan)
+	if plan == nil || plan.Validation.Message != "test(s) failed" {
+		t.Errorf("plan = %#v, want partial validation result after failure", plan)
 	}
 	for _, request := range requests {
 		if request == "POST /api/v2/tailnet/example.com/acl" {

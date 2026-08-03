@@ -189,8 +189,9 @@ type result struct {
 	// Findings is a pointer for the same reason as Assertions: a lint run with a
 	// clean policy still emits "findings": [] rather than dropping the key, while
 	// every other command omits it.
-	Findings    *[]aclpolicy.LintFinding `json:"findings,omitempty"`
-	LintSummary *aclpolicy.LintSummary   `json:"lint_summary,omitempty"`
+	Findings    *[]aclpolicy.LintFinding  `json:"findings,omitempty"`
+	LintSummary *aclpolicy.LintSummary    `json:"lint_summary,omitempty"`
+	Validation  *tailapi.ValidationResult `json:"validation,omitempty"`
 }
 
 var (
@@ -229,12 +230,15 @@ func main() {
 // exitCode maps a run error onto the documented exit-code scheme.
 func exitCode(err error) int {
 	var ue usageError
+	outcome := tailapi.ClassifyValidation(err)
 	switch {
 	case err == nil, errors.Is(err, flag.ErrHelp):
 		return exitOK
-	case errors.Is(err, errReachabilityIndeterminate):
+	case errors.Is(err, errReachabilityIndeterminate), outcome == tailapi.ValidationIndeterminate:
 		return exitIndeterminate
-	case errors.As(err, &ue):
+	// A control plane that never judged the policy is a collection failure, not
+	// a verdict: an expired token or a 503 must not exit as "policy invalid".
+	case errors.As(err, &ue), outcome == tailapi.ValidationUnavailable:
 		return exitUsage
 	default:
 		return exitFailed
@@ -353,7 +357,7 @@ func dispatch(
 	case cmdMerge:
 		return runMerge(opts.file, args[1:])
 	case cmdValidate:
-		return runValidate(ctx, opts, httpClient, apiURL, args[1:])
+		return runValidate(ctx, opts, httpClient, apiURL, args[1:], logger)
 	case cmdTest:
 		return runTest(ctx, opts, args[1:], logger)
 	case cmdCheck:
@@ -361,7 +365,7 @@ func dispatch(
 	case cmdLint:
 		return runLint(ctx, opts, args[1:], logger)
 	case cmdPlan:
-		return runPlan(ctx, opts, httpClient, apiURL, args[1:])
+		return runPlan(ctx, opts, httpClient, apiURL, args[1:], logger)
 	case cmdUpload:
 		return runUpload(ctx, opts, httpClient, apiURL, args[1:])
 	default:
@@ -976,6 +980,7 @@ func runValidate(
 	httpClient *http.Client,
 	apiURL string,
 	args []string,
+	logger *slog.Logger,
 ) (*result, error) {
 	if len(args) != 0 {
 		return nil, usagef("validate does not accept arguments")
@@ -984,13 +989,51 @@ func runValidate(
 	if err != nil {
 		return nil, err
 	}
-	if err = tailapi.ValidateFile(ctx, client, opts.file); err != nil {
+	validation, err := tailapi.ValidateFile(ctx, client, opts.file)
+	status := validationEnvelopeStatus(err)
+	if status == "" {
 		return nil, err
 	}
-	res := newResult(cmdValidate, statusOK, fmt.Sprintf("%s is valid", opts.file))
+	logValidationWarnings(ctx, logger, validation)
+	message := fmt.Sprintf("%s is valid", opts.file)
+	switch status {
+	case statusIndeterminate:
+		message = fmt.Sprintf("%s could not be proven valid", opts.file)
+	case statusFailed:
+		message = fmt.Sprintf("%s is invalid", opts.file)
+	}
+	res := newResult(cmdValidate, status, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
-	return res, nil
+	res.Validation = &validation
+	return res, err
+}
+
+// validationEnvelopeStatus maps a validation outcome onto an envelope status.
+// The empty string means the control plane never reached a verdict, so stdout
+// carries no result at all rather than reporting a policy the server never read
+// as invalid.
+func validationEnvelopeStatus(err error) string {
+	switch tailapi.ClassifyValidation(err) {
+	case tailapi.ValidationClean:
+		return statusOK
+	case tailapi.ValidationIndeterminate:
+		return statusIndeterminate
+	case tailapi.ValidationRejected:
+		return statusFailed
+	case tailapi.ValidationUnavailable, tailapi.ValidationNotAttempted:
+		return ""
+	default:
+		return ""
+	}
+}
+
+func logValidationWarnings(ctx context.Context, logger *slog.Logger, validation tailapi.ValidationResult) {
+	for _, detail := range validation.Warnings {
+		for _, warning := range detail.Warnings {
+			logger.WarnContext(ctx, "ACL validation warning", "user", detail.User, "warning", warning)
+		}
+	}
 }
 
 func runTest(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
@@ -1342,6 +1385,7 @@ func runPlan(
 	httpClient *http.Client,
 	apiURL string,
 	args []string,
+	logger *slog.Logger,
 ) (*result, error) {
 	if len(args) != 0 {
 		return nil, usagef("plan does not accept arguments")
@@ -1351,8 +1395,25 @@ func runPlan(
 		return nil, err
 	}
 	plan, err := tailapi.PlanFile(ctx, client, opts.file)
+	// Warnings the control plane did supply are reported even when a later step
+	// fails, so a diagnostic already collected is never silently discarded.
+	if plan != nil {
+		logValidationWarnings(ctx, logger, plan.Validation)
+	}
 	if err != nil {
-		return nil, err
+		status := validationEnvelopeStatus(err)
+		if status == "" || plan == nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("plan validation failed for tailnet %s", opts.tailnet)
+		if status == statusIndeterminate {
+			message = fmt.Sprintf("plan validation is indeterminate for tailnet %s", opts.tailnet)
+		}
+		res := newResult(cmdPlan, status, message)
+		res.File = opts.file
+		res.Tailnet = opts.tailnet
+		res.Validation = &plan.Validation
+		return res, err
 	}
 	status, changeText := statusNoChanges, "no changes"
 	if plan.Changed {
@@ -1368,6 +1429,7 @@ func runPlan(
 	res.ETag = plan.ETag
 	changed := plan.Changed
 	res.Changed = &changed
+	res.Validation = &plan.Validation
 	if plan.Changed {
 		res.Diff = plan.Diff
 	}
@@ -1508,10 +1570,16 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 		},
 		LintFindings: aclpolicy.LintCatalog(),
 		ExitCodes: map[string]string{
-			"0":  "success or reachable; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
-			"1":  "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",
-			"2":  "usage, input, or collection error",
-			"10": "indeterminate: check could not settle the question, or test had an unsettleable assertion under --indeterminate=warn",
+			"0": "success or reachable; server validation warnings with no errors and no message are " +
+				"non-fatal; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
+			"1": "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",
+			"2": "usage, input, or collection error; for validate and plan this also covers a control plane " +
+				"that never judged the policy (expired credentials, rate limiting, a server fault, an " +
+				"unreadable body, a redirect that dropped the request, or an unreachable API), and no " +
+				"verdict is printed in that case",
+			"10": "indeterminate: check could not settle the question, test had an unsettleable assertion under " +
+				"--indeterminate=warn, or validate and plan got a response they cannot read as a verdict " +
+				"(warnings with no errors alongside a message, or a detail with neither errors nor warnings)",
 		},
 	}
 	enc := json.NewEncoder(w)
@@ -1550,22 +1618,39 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
-	fmt.Fprintln(w, "\nExit codes:")
-	fmt.Fprintln(w, "  0  success; check reports reachable")
-	fmt.Fprintln(w, "  1  operation or policy assertion failed; check reports not reachable")
-	fmt.Fprintln(w, "  2  usage, input, or collection error")
-	fmt.Fprintln(w, "  10 indeterminate: a rule would have applied but depends on a fact absent from")
-	fmt.Fprintln(w, "     the policy file (device posture, via routing, or a role autogroup such as")
-	fmt.Fprintln(w, "     autogroup:admin), or a rule overlapping the query could not be parsed.")
-	fmt.Fprintln(w, "     Not a denial - verify it another way. Also returned by test when an")
-	fmt.Fprintln(w, "     assertion could not be settled (its --indeterminate default is warn; fail")
-	fmt.Fprintln(w, "     maps it to 1, ignore maps it to 0 without hiding the finding).")
-	fmt.Fprintln(w, "\nTest precondition:")
-	fmt.Fprintln(w, "  Server-side validate is the only check that catches an unreadable port or")
-	fmt.Fprintln(w, "  protocol, which is what produces exit 10. lint catches dangling group, host,")
-	fmt.Fprintln(w, "  tag, and ipset references, which local evaluation silently treats as matching")
-	fmt.Fprintln(w, "  nothing; --indeterminate does not weaken check's verdict.")
+	fmt.Fprint(w, usageExitCodes)
 }
+
+// usageExitCodes is one block rather than a run of Fprintln calls so the help
+// text reads as the paragraph it is. Keep it ASCII: stdout stays parse-clean
+// across a Windows pipe boundary.
+const usageExitCodes = `
+Exit codes:
+  0  success; check reports reachable. Server validation that returns warnings
+     with no errors and no message is a success - the warnings are logged and
+     reported, not fatal.
+  1  operation or policy assertion failed; check reports not reachable
+  2  usage, input, or collection error. For validate and plan this also covers a
+     control plane that never judged the policy (expired credentials, rate
+     limiting, a server fault, an unreadable response body, a redirect that
+     dropped the request, or an unreachable API). No verdict is printed for a
+     request that reached no answer.
+  10 indeterminate: a rule would have applied but depends on a fact absent from
+     the policy file (device posture, via routing, or a role autogroup such as
+     autogroup:admin), or a rule overlapping the query could not be parsed.
+     Not a denial - verify it another way. Also returned by test when an
+     assertion could not be settled (its --indeterminate default is warn; fail
+     maps it to 1, ignore maps it to 0 without hiding the finding), and by
+     validate and plan for a response that cannot be read as a verdict:
+     warnings with no errors but also a message, or a detail entry carrying
+     neither errors nor warnings.
+
+Test precondition:
+  Server-side validate is the only check that catches an unreadable port or
+  protocol, which is what produces exit 10. lint catches dangling group, host,
+  tag, and ipset references, which local evaluation silently treats as matching
+  nothing; --indeterminate does not weaken check's verdict.
+`
 
 type stringListFlag []string
 

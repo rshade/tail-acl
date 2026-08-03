@@ -1,0 +1,72 @@
+{
+  "captured_at": "2026-07-31T17:12:41Z",
+  "source": "live api.tailscale.com /acl/validate evidence gate via integration/TestLiveValidateEvidenceGate",
+  "redaction": "exact byte substitution only: configured live user, SCIM group, and tailnet replaced with placeholders; all other response bytes preserved",
+  "probes": [
+    {
+      "scenario": "a_tests_array_failure",
+      "available": true,
+      "request_content_type": "application/json",
+      "request_body": "[{\"src\":\"\u003cuser-1\u003e\",\"accept\":[\"100.64.0.1:22\"],\"deny\":[\"100.64.0.1:22\"]}]",
+      "status": 200,
+      "response_content_type": "application/json",
+      "response_file": "validate_a_tests_array_failure.json",
+      "response_bytes": 158,
+      "response_sha256": "4acc42129467deae025f4390b963fee4644465fefc2105de2967d6e1a58ac7dd",
+      "response_shape": "object,message=non-empty-string,data=non-empty-array"
+    },
+    {
+      "scenario": "b_policy_test_failure",
+      "available": true,
+      "request_content_type": "application/hujson",
+      "request_body": "{\n  \"acls\": [{\"action\": \"accept\", \"src\": [\"*\"], \"dst\": [\"*:*\"]}],\n  \"tests\": [{\"src\": \"\u003cuser-1\u003e\", \"deny\": [\"100.64.0.1:22\"]}],\n}",
+      "status": 200,
+      "response_content_type": "application/json",
+      "response_file": "validate_b_policy_test_failure.json",
+      "response_bytes": 158,
+      "response_sha256": "4c92610942da1ec504250b42bffc0d90e450274d99a8f08dcce70ecf98d2c62c",
+      "response_shape": "object,message=non-empty-string,data=non-empty-array"
+    },
+    {
+      "scenario": "b_prime_unknown_source",
+      "available": true,
+      "request_content_type": "application/hujson",
+      "request_body": "{\n  \"acls\": [{\"action\": \"accept\", \"src\": [\"*\"], \"dst\": [\"*:*\"]}],\n  \"tests\": [{\"src\": \"not-a-user-or-host\", \"deny\": [\"100.64.0.1:22\"]}],\n}",
+      "status": 200,
+      "response_content_type": "application/json",
+      "response_file": "validate_b_prime_unknown_source.json",
+      "response_bytes": 168,
+      "response_sha256": "565caf2e5d82b4353c82f4776eacba8cb0282a28b0619e405ac3f6455a8ce1e4",
+      "response_shape": "object,message=non-empty-string,data=non-empty-array"
+    },
+    {
+      "scenario": "c_scim_warning",
+      "available": false,
+      "unavailable_reason": "TAIL_ACL_LIVE_SCIM_GROUP is unset; no SCIM warning channel was inferred"
+    },
+    {
+      "scenario": "d_parse_error",
+      "available": true,
+      "request_content_type": "application/hujson",
+      "request_body": "{\"grants\": [",
+      "status": 200,
+      "response_content_type": "application/json",
+      "response_file": "validate_d_parse_error.json",
+      "response_bytes": 62,
+      "response_sha256": "a1ac1e7850f21dc7a9ce5d591b2f031f5fced8dc283dea4c999865f6efbe53d5",
+      "response_shape": "object,message=non-empty-string,data=absent"
+    },
+    {
+      "scenario": "e_healthy",
+      "available": true,
+      "request_content_type": "application/hujson",
+      "request_body": "{\n  \"grants\": [],\n}\n",
+      "status": 200,
+      "response_content_type": "application/json",
+      "response_file": "validate_e_healthy.json",
+      "response_bytes": 2,
+      "response_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "response_shape": "object,message=absent,data=absent"
+    }
+  ]
+}
