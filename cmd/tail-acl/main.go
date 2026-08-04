@@ -84,6 +84,7 @@ const (
 	cmdTest     = "test"
 	cmdCheck    = "check"
 	cmdLint     = "lint"
+	cmdPull     = "pull"
 	cmdPlan     = "plan"
 	cmdUpload   = "upload"
 
@@ -1536,6 +1537,48 @@ func runPlan(
 	return res, nil
 }
 
+func runPull(
+	ctx context.Context,
+	opts options,
+	force bool,
+	httpClient *http.Client,
+	apiURL string,
+) (*result, error) {
+	if !force {
+		if _, err := os.Stat(opts.file); err == nil {
+			return nil, usagef("refusing to overwrite existing policy file %s; use --force to replace it", opts.file)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, usagef("checking policy file %s: %v", opts.file, err)
+		}
+	}
+	client, err := apiClient(opts, httpClient, apiURL)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := tailapi.FetchPolicy(ctx, client)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	// An empty body is a server fault, never a deployed policy. Writing it would
+	// report success while destroying the local file --force was aimed at.
+	if strings.TrimSpace(string(policy.HuJSON)) == "" {
+		return nil, usagef("control plane returned an empty policy for tailnet %s; %s left unchanged",
+			opts.tailnet, opts.file)
+	}
+	if err = aclpolicy.WriteRaw(opts.file, policy.HuJSON); err != nil {
+		return nil, usagef("writing pulled policy to %s: %v", opts.file, err)
+	}
+	message := fmt.Sprintf("pulled deployed policy for tailnet %s to %s", opts.tailnet, opts.file)
+	if policy.ETag != "" {
+		message += fmt.Sprintf(" (ETag %s)", policy.ETag)
+	}
+	res := newResult(cmdPull, statusOK, message)
+	res.File = opts.file
+	res.Tailnet = opts.tailnet
+	res.ETag = policy.ETag
+	return res, nil
+}
+
 func runUpload(
 	ctx context.Context,
 	opts options,
@@ -1627,6 +1670,7 @@ func commandCatalog() []schemaCommand {
 			lintSummary,
 			"lint [-severity info|warn|error] [-wildcard any-to-any|any|off]",
 		},
+		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
 		{cmdUpload, "Upload the policy to the tailnet", cmdUpload},
 	}
@@ -1654,7 +1698,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and merge, validate, test, check, lint, plan, or upload it.",
+		Description:   "Make typed edits to a Tailscale policy file and pull, merge, validate, test, check, lint, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
 		Capabilities: schemaCapabilities{
@@ -1669,7 +1713,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 			"0": "success or reachable; server validation warnings with no errors and no message are " +
 				"non-fatal; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
 			"1": "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",
-			"2": "usage, input, or collection error; for validate and plan this also covers a control plane " +
+			"2": "usage, input, or collection error; for pull, validate, and plan this also covers a control plane " +
 				"that never judged the policy (expired credentials, rate limiting, a server fault, an " +
 				"unreadable body, a redirect that dropped the request, or an unreachable API), and no " +
 				"verdict is printed in that case. For test --watch, also signals an unreadable --file, " +
@@ -1688,7 +1732,8 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, check, lint, plan, and upload a Tailscale ACL policy.")
+	fmt.Fprintln(w, "tail-acl — pull, edit, merge, validate, test, check, lint, plan, and upload"+
+		" a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
 	fmt.Fprintln(w, "with -format json); logs and errors go to stderr.")
@@ -1710,6 +1755,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
@@ -1735,8 +1781,8 @@ Exit codes:
      with no errors and no message is a success - the warnings are logged and
      reported, not fatal.
   1  operation or policy assertion failed; check reports not reachable
-  2  usage, input, or collection error. For validate and plan this also covers a
-     control plane that never judged the policy (expired credentials, rate
+  2  usage, input, or collection error. For pull, validate, and plan this also
+     covers a control plane that never judged the policy (expired credentials, rate
      limiting, a server fault, an unreadable response body, a redirect that
      dropped the request, or an unreachable API). No verdict is printed for a
      request that reached no answer.

@@ -281,9 +281,9 @@ func lintGrants(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 			})
 		}
 		findings = append(findings, wildcardFindings(
-			locator, grant.Source, destinationHosts(grant.Destination), wildcard)...)
+			locator, grant.Source, grant.Destination, wildcard)...)
 		findings = append(findings, sourceReferenceFindings(policy, locator+fieldSrc, grant.Source)...)
-		findings = append(findings, destinationReferenceFindings(policy, locator+fieldDst, grant.Destination)...)
+		findings = append(findings, nodeDestinationReferenceFindings(policy, locator+fieldDst, grant.Destination)...)
 	}
 	return findings
 }
@@ -352,9 +352,9 @@ func emptyGrantReason(grant tailscale.Grant) string {
 	}
 }
 
-func wildcardFindings(locator string, sources, destinationHosts []string, wildcard WildcardPolicy) []LintFinding {
+func wildcardFindings(locator string, sources, destinations []string, wildcard WildcardPolicy) []LintFinding {
 	sourceStar := containsWildcard(sources)
-	destinationStar := containsWildcard(destinationHosts)
+	destinationStar := containsWildcard(destinations)
 	switch wildcard {
 	case WildcardOff:
 		return nil
@@ -436,8 +436,9 @@ func destinationReferenceFindings(policy *tailscale.ACL, locator string, destina
 	return findings
 }
 
-// nodeDestinationReferenceFindings validates SSH dst and recorder selectors.
-// Unlike network destinations, these selectors have no trailing port to strip.
+// nodeDestinationReferenceFindings validates portless grant dst, SSH dst, and
+// recorder selectors. Unlike ACL network destinations, these selectors have no
+// trailing port to strip.
 func nodeDestinationReferenceFindings(
 	policy *tailscale.ACL,
 	locator string,
@@ -620,7 +621,7 @@ func collectReferences(
 	referenced := make(map[string]bool)
 	for _, grant := range policy.Grants {
 		addReferences(referenced, grant.Source)
-		addDestinationReferences(referenced, grant.Destination)
+		addReferences(referenced, grant.Destination)
 	}
 	for _, entry := range policy.ACLs {
 		addReferences(referenced, aclSources(entry))
@@ -719,8 +720,8 @@ func destinationHosts(destinations []string) []string {
 	return hosts
 }
 
-// destinationHost strips a trailing :port from a destination selector. A source
-// selector has no port and must not be passed here.
+// destinationHost strips a trailing :port from an ACL destination selector.
+// Portless grant, SSH, and source selectors must not be passed here.
 func destinationHost(destination string) string {
 	if host, _, ok := splitSelectorPort(destination); ok {
 		return host

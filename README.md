@@ -72,6 +72,7 @@ tail-acl --file acl/acl.generated.json lint -severity error   # only fail on err
 tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
 
 # Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
+tail-acl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
 tail-acl --file acl/acl.generated.json upload      # apply the policy
@@ -81,6 +82,23 @@ tail-acl -schema                                   # machine-readable command/fl
 tail-acl --version                                 # version + VCS revision
 tail-acl -format json --file acl.json grant add …  # JSON result envelope on stdout
 ```
+
+### Bootstrap an existing tailnet
+
+When adopting `tail-acl` for a tailnet whose policy was authored in the admin
+console, pull the deployed policy before making local edits:
+
+```bash
+tail-acl --file acl/acl.hujson pull
+```
+
+`pull` writes the deployed bytes verbatim, including comments and key order, and
+reports the matching ETag. It is an adoption step, not a routine synchronization
+workflow: it refuses to replace an existing `--file` unless `--force` is supplied.
+After editing, run `plan`, then pass the reported ETag to `upload --if-match`.
+
+**Warning:** `upload` replaces the entire deployed policy with `--file`; it does
+not merge a fragment into the live policy. Always plan a complete policy first.
 
 ### Commands
 
@@ -97,8 +115,9 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
+| `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
-| `upload` | Upload the policy to the tailnet (`--if-match` for optimistic concurrency) |
+| `upload` | Replace the entire deployed policy with `--file` (`--if-match` for optimistic concurrency) |
 
 ### Global flags
 
@@ -120,7 +139,7 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 - `1` operation or policy assertion failed (including indeterminate under
   `--indeterminate=fail`); `check` reports not reachable; `lint` found issues at
   or above the threshold
-- `2` usage, input, or collection error. For `validate` and `plan` this also
+- `2` usage, input, or collection error. For `pull`, `validate`, and `plan` this also
   covers a control plane that never judged the policy — expired credentials,
   rate limiting, a server fault, an unreadable response body, a redirect that
   dropped the request, or an unreachable API. No verdict is printed on stdout

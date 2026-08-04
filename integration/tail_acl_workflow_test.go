@@ -47,7 +47,7 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 `
 
 	tempDir := t.TempDir()
-	originalPath := writePolicy(t, tempDir, "original.hujson", originalPolicy)
+	originalPath := filepath.Join(tempDir, "original.hujson")
 	goodPath := writePolicy(t, tempDir, "good.hujson", goodPolicy)
 	badPath := writePolicy(t, tempDir, "bad.hujson", badPolicy)
 	binary := buildTailACL(t, tempDir)
@@ -65,7 +65,31 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	}
 
 	originalETag := policyETag(originalPolicy)
-	output := runner.mustSucceed(t, "--file", originalPath, "plan")
+	pullJSON := runner.mustSucceed(t, "-format", "json", "--file", originalPath, "pull")
+	var pulled struct {
+		File    string `json:"file"`
+		Tailnet string `json:"tailnet"`
+		ETag    string `json:"etag"`
+	}
+	if err := json.Unmarshal([]byte(pullJSON), &pulled); err != nil {
+		t.Fatalf("decode pull result: %v\n%s", err, pullJSON)
+	}
+	if pulled.File != originalPath || pulled.Tailnet != testTailnet || pulled.ETag != originalETag {
+		t.Errorf("pull envelope = %#v", pulled)
+	}
+	pulledPolicy, err := os.ReadFile(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pulledPolicy) != originalPolicy {
+		t.Errorf("pulled policy changed bytes:\ngot:\n%s\nwant:\n%s", pulledPolicy, originalPolicy)
+	}
+	output := runner.mustFail(t, "--file", originalPath, "pull")
+	assertContains(t, output, "refusing to overwrite", "--force")
+	output = runner.mustSucceed(t, "--file", originalPath, "pull", "--force")
+	assertContains(t, output, "pulled deployed policy", "ETag "+originalETag)
+
+	output = runner.mustSucceed(t, "--file", originalPath, "plan")
 	assertContains(t, output, "plan valid; no changes", "ETag "+originalETag)
 
 	output = runner.mustFail(t, "--file", badPath, "plan")

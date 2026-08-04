@@ -35,6 +35,12 @@ type Plan struct {
 	Validation ValidationResult
 }
 
+// FetchedPolicy is the deployed policy body and the version that supplied it.
+type FetchedPolicy struct {
+	HuJSON []byte
+	ETag   string
+}
+
 // NewClient constructs the official Tailscale API client.
 func NewClient(config Config) (*tailscale.Client, error) {
 	baseURL := config.BaseURL
@@ -63,6 +69,16 @@ func UploadFile(ctx context.Context, client *tailscale.Client, path, ifMatch str
 		return fmt.Errorf("uploading %s: %w", path, err)
 	}
 	return nil
+}
+
+// FetchPolicy reads the deployed policy without normalizing its HuJSON. The
+// caller can therefore persist comments, whitespace, and key order verbatim.
+func FetchPolicy(ctx context.Context, client *tailscale.Client) (FetchedPolicy, error) {
+	raw, err := client.PolicyFile().Raw(ctx)
+	if err != nil {
+		return FetchedPolicy{}, fmt.Errorf("fetching deployed policy: %w", err)
+	}
+	return FetchedPolicy{HuJSON: []byte(raw.HuJSON), ETag: raw.ETag}, nil
 }
 
 // ValidateFile asks Tailscale to validate the policy and run its policy tests.
@@ -95,9 +111,9 @@ func PlanFile(ctx context.Context, client *tailscale.Client, path string) (*Plan
 		return nil, err
 	}
 
-	deployed, err := client.PolicyFile().Raw(ctx)
+	deployed, err := FetchPolicy(ctx, client)
 	if err != nil {
-		return nil, fmt.Errorf("fetching deployed policy: %w", err)
+		return nil, err
 	}
 	validation, err := ValidatePolicy(ctx, client, candidate)
 	if err != nil {
@@ -107,7 +123,7 @@ func PlanFile(ctx context.Context, client *tailscale.Client, path string) (*Plan
 		return nil, fmt.Errorf("validating %s: %w", path, err)
 	}
 
-	deployedFormatted, err := hujson.Format([]byte(deployed.HuJSON))
+	deployedFormatted, err := hujson.Format(deployed.HuJSON)
 	if err != nil {
 		return &Plan{Validation: validation}, fmt.Errorf("formatting deployed policy: %w", err)
 	}

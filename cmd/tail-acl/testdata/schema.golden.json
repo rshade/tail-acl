@@ -66,6 +66,11 @@
       "usage": "lint [-severity info|warn|error] [-wildcard any-to-any|any|off]"
     },
     {
+      "name": "pull",
+      "summary": "Bootstrap a local policy from the live tailnet",
+      "usage": "pull [--force]"
+    },
+    {
       "name": "plan",
       "summary": "Diff the policy against the live tailnet (read-only)",
       "usage": "plan"
@@ -76,12 +81,12 @@
       "usage": "upload"
     }
   ],
-  "description": "Make typed edits to a Tailscale policy file and merge, validate, test, check, lint, plan, or upload it.",
+  "description": "Make typed edits to a Tailscale policy file and pull, merge, validate, test, check, lint, plan, or upload it.",
   "exit_codes": {
     "0": "success or reachable; server validation warnings with no errors and no message are non-fatal; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
     "1": "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",
     "10": "indeterminate: check could not settle the question, test had an unsettleable assertion under --indeterminate=warn, or validate and plan got a response they cannot read as a verdict (warnings with no errors alongside a message, or a detail with neither errors nor warnings)",
-    "2": "usage, input, or collection error; for validate and plan this also covers a control plane that never judged the policy (expired credentials, rate limiting, a server fault, an unreadable body, a redirect that dropped the request, or an unreachable API), and no verdict is printed in that case. For test --watch, also signals an unreadable --file, a non-positive --interval, incompatible flag combinations (--indeterminate with --watch, --interval without --watch), or a failed write to stdout. An interrupt during a command that is mid-request exits here too rather than as a verdict; for upload that means the change may already have been applied"
+    "2": "usage, input, or collection error; for pull, validate, and plan this also covers a control plane that never judged the policy (expired credentials, rate limiting, a server fault, an unreadable body, a redirect that dropped the request, or an unreachable API), and no verdict is printed in that case. For test --watch, also signals an unreadable --file, a non-positive --interval, incompatible flag combinations (--indeterminate with --watch, --interval without --watch), or a failed write to stdout. An interrupt during a command that is mid-request exits here too rather than as a verdict; for upload that means the change may already have been applied"
   },
   "flags": [
     {

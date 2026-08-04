@@ -62,6 +62,47 @@ func TestUploadAndValidateFile(t *testing.T) {
 	}
 }
 
+func TestFetchPolicyReturnsVerbatimBodyAndETag(t *testing.T) {
+	t.Parallel()
+	const policy = "// keep this comment\n{\n\t\"grants\": [],\n}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "\"etag-fetch\"")
+		_, _ = io.WriteString(w, policy)
+	}))
+	defer server.Close()
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey: "token", Tailnet: "example.com", BaseURL: server.URL, HTTP: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := tailapi.FetchPolicy(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(fetched.HuJSON) != policy || fetched.ETag != "\"etag-fetch\"" {
+		t.Errorf("FetchPolicy() = %#v", fetched)
+	}
+}
+
+func TestFetchPolicyReportsNonSuccess(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey: "token", Tailnet: "example.com", BaseURL: server.URL, HTTP: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tailapi.FetchPolicy(context.Background(), client)
+	if err == nil || !strings.Contains(err.Error(), "fetching deployed policy") {
+		t.Fatalf("FetchPolicy error = %v", err)
+	}
+}
+
 func TestPlanFileReturnsValidatedUnifiedDiffAndETag(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "candidate.hujson")

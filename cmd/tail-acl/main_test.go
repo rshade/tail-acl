@@ -2587,6 +2587,63 @@ func TestValidateAndUploadUseTailscaleClient(t *testing.T) {
 	}
 }
 
+func TestRunPullUnreachableLeavesNoFile(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	apiURL := server.URL
+	server.Close()
+	path := filepath.Join(t.TempDir(), "pulled.hujson")
+	_, err := runPull(context.Background(), options{
+		file: path, tailnet: "example.com", apiKey: "token",
+	}, false, server.Client(), apiURL)
+	if exitCode(err) != exitUsage {
+		t.Fatalf("runPull error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pulled file exists after failed request: %v", statErr)
+	}
+}
+
+func TestRunPullMissingCredentialsWritesNoFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	_, err := runPull(context.Background(), options{
+		file: path, tailnet: "example.com",
+	}, false, http.DefaultClient, "https://api.example.invalid")
+	if exitCode(err) != exitUsage {
+		t.Fatalf("runPull error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("policy file exists without credentials: %v", statErr)
+	}
+}
+
+func TestRunPullEmptyBodyLeavesExistingPolicyIntact(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "\"empty-etag\"")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	const existing = "// keep this policy\n{\n\t\"grants\": [],\n}\n"
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, existing)
+
+	_, err := runPull(context.Background(), options{
+		file: path, tailnet: "example.com", apiKey: "token",
+	}, true, server.Client(), server.URL)
+	if exitCode(err) != exitUsage {
+		t.Fatalf("runPull error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != existing {
+		t.Errorf("policy file = %q, want it unchanged as %q", got, existing)
+	}
+}
+
 func TestPlanPrintsLiveDiffWithoutUploading(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -2683,14 +2740,14 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 			policy: `{
 				"groups": {"group:dev": ["alice@example.com"]},
 				"tagOwners": {"tag:web": ["group:dev"]},
-				"grants": [{"src": ["group:dev"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]
+				"grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}]
 			}`,
 			wantCode:   exitOK,
 			wantOutput: []string{"tail-acl: no policy hygiene findings"},
 		},
 		{
 			name:     "errors present",
-			policy:   `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`,
+			policy:   `{"grants": [{"src": ["group:missing"], "dst": ["tag:web"], "ip": ["tcp:443"]}]}`,
 			wantCode: exitFailed,
 			wantOutput: []string{
 				"ERROR dst-tag-no-owner grants[0].dst[0] tag:web",
@@ -2745,7 +2802,7 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 func TestLintJSONEnvelope(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
-	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`)
+	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web"], "ip": ["tcp:443"]}]}`)
 
 	var stdout, stderr strings.Builder
 	err := run(
@@ -2786,7 +2843,7 @@ func TestLintJSONEnvelope(t *testing.T) {
 func TestLintVerboseTraceGoesToStderr(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
-	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web:443"], "ip": ["tcp:443"]}]}`)
+	writeTestPolicy(t, path, `{"grants": [{"src": ["group:missing"], "dst": ["tag:web"], "ip": ["tcp:443"]}]}`)
 
 	var stdout, stderr strings.Builder
 	err := run(
@@ -2835,13 +2892,13 @@ func TestLintFlags(t *testing.T) {
 		},
 		{
 			name:     "any-to-any wildcard warns by default",
-			policy:   `{"grants": [{"src": ["*"], "dst": ["*:443"], "ip": ["tcp:443"]}]}`,
+			policy:   `{"grants": [{"src": ["*"], "dst": ["*"], "ip": ["tcp:443"]}]}`,
 			args:     nil,
 			wantCode: exitFailed,
 		},
 		{
 			name:     "wildcard off suppresses the wildcard finding",
-			policy:   `{"grants": [{"src": ["*"], "dst": ["*:443"], "ip": ["tcp:443"]}]}`,
+			policy:   `{"grants": [{"src": ["*"], "dst": ["*"], "ip": ["tcp:443"]}]}`,
 			args:     []string{"-wildcard", "off"},
 			wantCode: exitOK,
 		},

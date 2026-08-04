@@ -28,7 +28,7 @@ func TestEvaluateLintCleanPolicyHasNoFindings(t *testing.T) {
 		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
 		TagOwners: map[string][]string{"tag:web": {"group:dev"}},
 		Grants: []tailscale.Grant{
-			{Source: []string{"group:dev"}, Destination: []string{"tag:web:443"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:dev"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
 		},
 	}
 	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
@@ -47,9 +47,9 @@ func TestEvaluateLintWildcardModes(t *testing.T) {
 		TagOwners: map[string][]string{"tag:web": {"group:dev"}},
 		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
 		Grants: []tailscale.Grant{
-			{Source: []string{"*"}, Destination: []string{"tag:web:443"}, IP: []string{"tcp:443"}},
-			{Source: []string{"group:dev"}, Destination: []string{"*:443"}, IP: []string{"tcp:443"}},
-			{Source: []string{"*"}, Destination: []string{"*:443"}, IP: []string{"tcp:443"}},
+			{Source: []string{"*"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:dev"}, Destination: []string{"*"}, IP: []string{"tcp:443"}},
+			{Source: []string{"*"}, Destination: []string{"*"}, IP: []string{"tcp:443"}},
 		},
 	}
 	for _, tc := range []struct {
@@ -106,7 +106,7 @@ func TestEvaluateLintReferenceClassification(t *testing.T) {
 			t.Parallel()
 			p := *policy
 			p.Grants = []tailscale.Grant{
-				{Source: []string{tc.source}, Destination: []string{"tag:known:443"}, IP: []string{"tcp:443"}},
+				{Source: []string{tc.source}, Destination: []string{"tag:known"}, IP: []string{"tcp:443"}},
 			}
 			report, err := aclpolicy.EvaluateLint(&p, aclpolicy.LintOptions{})
 			if err != nil {
@@ -119,6 +119,91 @@ func TestEvaluateLintReferenceClassification(t *testing.T) {
 	}
 }
 
+func TestEvaluateLintPortlessGrantDestinationsResolve(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Groups:    map[string][]string{"group:known": {"alice@example.com"}},
+		Hosts:     map[string]string{"known-host": "100.64.0.9"},
+		IPSets:    map[string][]string{"ipset:known": {"10.0.0.0/8"}},
+		TagOwners: map[string][]string{"tag:known": {"group:known"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"tag:known"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"group:known"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"ipset:known"}, IP: []string{"tcp:443"}},
+			{
+				Source:      []string{"autogroup:member"},
+				Destination: []string{"autogroup:internet"},
+				IP:          []string{"tcp:443"},
+			},
+			{Source: []string{"autogroup:member"}, Destination: []string{"known-host"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"100.64.0.10"}, IP: []string{"tcp:443"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Total != 0 {
+		t.Errorf("findings = %#v, want none", report.Findings)
+	}
+}
+
+// TestLintAndCheckAgreeOnPortlessGrantDestination guards the contradiction that
+// motivated the portless-dst fix: on issue #92's reproduction policy, check
+// reported the grant reachable while lint called the same destination undefined.
+func TestLintAndCheckAgreeOnPortlessGrantDestination(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+		},
+	}
+
+	reach, err := aclpolicy.EvaluateReachability(policy, "autogroup:member", "tag:web:443",
+		aclpolicy.ReachabilityOptions{Protocol: aclpolicy.ProtocolTCP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reach.Allowed == nil || !*reach.Allowed {
+		t.Fatalf("check access = %q, allowed = %v, want reachable", reach.Access, reach.Allowed)
+	}
+
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+		t.Errorf("lint calls a destination check reached undefined: %#v",
+			findingsByID(report, aclpolicy.LintUndefinedReference))
+	}
+	if got := countByID(report, aclpolicy.LintUnusedTag); got != 0 {
+		t.Errorf("lint calls an in-use tag unused: %#v", findingsByID(report, aclpolicy.LintUnusedTag))
+	}
+}
+
+func TestEvaluateLintACLDestinationStillStripsPort(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
+		TagOwners: map[string][]string{"tag:db": {"group:dev"}},
+		ACLs: []tailscale.ACLEntry{
+			{
+				Action:      "accept",
+				Source:      []string{"group:dev"},
+				Destination: []string{"tag:db:5432"},
+			},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Total != 0 {
+		t.Errorf("findings = %#v, want none", report.Findings)
+	}
+}
+
 func TestEvaluateLintDstTagNoOwner(t *testing.T) {
 	t.Parallel()
 	// A destination tag with an owner is clean; without one it is dst-tag-no-owner
@@ -127,8 +212,8 @@ func TestEvaluateLintDstTagNoOwner(t *testing.T) {
 		TagOwners: map[string][]string{"tag:owned": {"group:dev"}},
 		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
 		Grants: []tailscale.Grant{
-			{Source: []string{"group:dev"}, Destination: []string{"tag:owned:443"}, IP: []string{"tcp:443"}},
-			{Source: []string{"group:dev"}, Destination: []string{"tag:ownerless:443"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:dev"}, Destination: []string{"tag:owned"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:dev"}, Destination: []string{"tag:ownerless"}, IP: []string{"tcp:443"}},
 		},
 	}
 	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
@@ -154,8 +239,8 @@ func TestEvaluateLintGrantEmpty(t *testing.T) {
 		TagOwners: map[string][]string{"tag:web": {"group:dev"}},
 		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
 		Grants: []tailscale.Grant{
-			{Source: nil, Destination: []string{"tag:web:443"}, IP: []string{"tcp:443"}}, // empty src
-			{Source: []string{"group:dev"}, Destination: []string{"tag:web:443"}},        // empty ip, no app
+			{Source: nil, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}}, // empty src
+			{Source: []string{"group:dev"}, Destination: []string{"tag:web"}},        // empty ip, no app
 			appOnly, // empty ip but has an app capability -> not dead
 		},
 	}
@@ -176,12 +261,12 @@ func TestEvaluateLintDuplicateGrantIsOrderInsensitive(t *testing.T) {
 		Grants: []tailscale.Grant{
 			{
 				Source:      []string{"group:dev"},
-				Destination: []string{"tag:web:443", "tag:db:5432"},
+				Destination: []string{"tag:web", "tag:db"},
 				IP:          []string{"tcp:443", "tcp:5432"},
 			},
 			{ // same grant, selector lists in a different order
 				Source:      []string{"group:dev"},
-				Destination: []string{"tag:db:5432", "tag:web:443"},
+				Destination: []string{"tag:db", "tag:web"},
 				IP:          []string{"tcp:5432", "tcp:443"},
 			},
 		},
@@ -212,7 +297,7 @@ func TestEvaluateLintUnusedCountsIndirectReferences(t *testing.T) {
 			{Action: "accept", Source: []string{"group:acl"}, Destination: []string{"tag:web:443"}},
 		},
 		Grants: []tailscale.Grant{
-			{Source: []string{"group:parent"}, Destination: []string{"tag:web:443"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:parent"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
 		},
 	}
 	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
@@ -393,7 +478,7 @@ func TestEvaluateLintDoesNotFlagSrcPostureOrPostures(t *testing.T) {
 		Grants: []tailscale.Grant{
 			{
 				Source:      []string{"group:dev"},
-				Destination: []string{"tag:web:443"},
+				Destination: []string{"tag:web"},
 				IP:          []string{"tcp:443"},
 				SrcPosture:  []string{"posture:undeclared"},
 			},

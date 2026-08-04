@@ -24,17 +24,17 @@
 	],
 	"grants": [
 		// 0: clean, no findings
-		{"src": ["group:dev"], "dst": ["tag:web:443"], "ip": ["tcp:443"]},
+		{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]},
 		// 1: undefined source group + destination tag with no owner
-		{"src": ["group:missing"], "dst": ["tag:noowner:443"], "ip": ["tcp:443"]},
+		{"src": ["group:missing"], "dst": ["tag:noowner"], "ip": ["tcp:443"]},
 		// 2: any-to-any wildcard
-		{"src": ["*"], "dst": ["*:443"], "ip": ["tcp:443"]},
+		{"src": ["*"], "dst": ["*"], "ip": ["tcp:443"]},
 		// 3: exact duplicate of grant 0
-		{"src": ["group:dev"], "dst": ["tag:web:443"], "ip": ["tcp:443"]},
+		{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]},
 		// 4: references ipset:corp and host web, keeping both "used"
-		{"src": ["ipset:corp"], "dst": ["web:22"], "ip": ["tcp:22"]},
+		{"src": ["ipset:corp"], "dst": ["web"], "ip": ["tcp:22"]},
 		// 5: undefined host alias in the destination
-		{"src": ["group:dev"], "dst": ["typo-host:80"], "ip": ["tcp:80"]},
+		{"src": ["group:dev"], "dst": ["typo-host"], "ip": ["tcp:80"]},
 		// 6: empty destination -> dead grant
 		{"src": ["group:dev"], "dst": [], "ip": ["tcp:443"]},
 	],

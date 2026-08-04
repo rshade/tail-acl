@@ -29,7 +29,7 @@ type commandDeps struct {
 
 func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
 
-// addSubcommands registers the 13 leaf commands, grouping the four that share
+// addSubcommands registers the leaf commands, grouping the four that share
 // a noun (grant, tag-owner, host, posture) under a parent command.
 func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps) {
 	grant := &cobra.Command{Use: cmdGrant, Short: "Manage grants", RunE: runParentCommand}
@@ -51,6 +51,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newTestCommand(ctx, deps),
 		newCheckCommand(ctx, deps),
 		newLintCommand(ctx, deps),
+		newPullCommand(ctx, deps),
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),
 	)
@@ -336,6 +337,24 @@ func newPlanCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			return err
 		},
 	}
+}
+
+func newPullCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   cmdPull,
+		Short: "Bootstrap a local policy from the live tailnet",
+		Long: "Bootstrap a local policy from the live tailnet. This is an adoption step, not a routine sync; " +
+			"an existing --file is preserved unless --force is supplied.",
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runPull(ctx, *deps.opts, force, deps.httpClient, deps.apiURL)
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "replace an existing --file (use only for an intentional refresh)")
+	return cmd
 }
 
 func newUploadCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
