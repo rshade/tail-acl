@@ -605,6 +605,55 @@ func assertMalformedCapabilityHandling(t *testing.T, capability string) {
 	}
 }
 
+func TestLoadBytesMatchesLoad(t *testing.T) {
+	t.Parallel()
+	const document = `{
+        // A comment, to prove the byte-first path still runs the HuJSON reader.
+        "grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+        "groups": {"group:dev": ["alice@example.com"]},
+        "tests": [{"src": "alice@example.com", "accept": ["tag:web:443"]}]
+    }`
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fromPath, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	fromBytes, err := aclpolicy.LoadBytes(path, []byte(document))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if !reflect.DeepEqual(fromPath, fromBytes) {
+		t.Errorf("LoadBytes = %#v, want %#v", fromBytes, fromPath)
+	}
+}
+
+// The watch loop reports load failures against the file the operator is editing,
+// so the name the caller passes has to survive into the message.
+func TestLoadBytesNamesTheSourceInErrors(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		document string
+	}{
+		{"unknown field", `{"nope": 1}`},
+		{"unparseable", `{"grants": [`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := aclpolicy.LoadBytes("watched.hujson", []byte(testCase.document))
+			if err == nil {
+				t.Fatal("LoadBytes accepted an invalid policy")
+			}
+			if !strings.Contains(err.Error(), "watched.hujson") {
+				t.Errorf("error = %v, want it to name watched.hujson", err)
+			}
+		})
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

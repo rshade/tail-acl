@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tailscale/hujson"
 	tailscale "tailscale.com/client/tailscale/v2"
@@ -2731,6 +2734,663 @@ func writeTestPolicy(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// NDJSON is render's JSON branch minus SetIndent. Assert the shape a consumer
+// depends on: one complete envelope per line, each independently parseable.
+func TestStreamEmitterJSONIsNDJSON(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	emitter := newStreamEmitter(&out, formatJSON)
+	for _, message := range []string{"first", "second"} {
+		if err := emitter.emit(newResult(cmdTest, statusOK, message)); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2: %q", len(lines), out.String())
+	}
+	for i, line := range lines {
+		var envelope result
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			t.Errorf("line %d does not parse on its own: %v (%q)", i, err, line)
+		}
+	}
+	if strings.Contains(out.String(), "\n  ") {
+		t.Errorf("NDJSON is indented, so lines are not independently parseable:\n%s", out.String())
+	}
+}
+
+func TestStreamEmitterHumanSeparatesRunsWithOneBlankLine(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	emitter := newStreamEmitter(&out, formatHuman)
+	for _, message := range []string{"first", "second"} {
+		if err := emitter.emit(newResult(cmdTest, statusOK, message)); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
+	const want = "tail-acl: first\n\ntail-acl: second\n"
+	if out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
+// The compatibility guard for AC "non-watch -format json is byte-identical to
+// today": a new omitempty field must not appear, and indentation must remain.
+func TestSingleShotJSONStaysIndentedWithoutPolicyDigest(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"tests": []}`)
+	var stdout, stderr strings.Builder
+	if err := run(
+		context.Background(),
+		[]string{"--file", path, "-format", formatJSON, cmdTest},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "\n  \"tool\": \"tail-acl\"") {
+		t.Errorf("single-shot JSON lost its indentation:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "policy_digest") {
+		t.Errorf("single-shot JSON gained a policy_digest key:\n%s", stdout.String())
+	}
+}
+
+const watchPassingPolicy = `{
+	"grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+	"groups": {"group:dev": ["alice@example.com"]},
+	"tests": [{"src": "alice@example.com", "accept": ["tag:web:443"]}]
+}`
+
+const watchFailingPolicy = `{
+	"grants": [{"src": ["alice@example.com"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+	"tests": [{"src": "alice@example.com", "deny": ["tag:web:443"]}]
+}`
+
+// watchDriver is an [io.Writer] that drives the loop instead of a sleep. The watch
+// loop has no synchronous "iteration finished" signal, so the test reacts to
+// each completed record as it is written: edit the file after run 1, cancel
+// after run 2. Writes happen on the same goroutine as run, so the loop is
+// blocked inside emit while step executes and nothing races.
+type watchDriver struct {
+	marker string
+	buf    strings.Builder
+	seen   int
+	step   func(run int)
+}
+
+func (d *watchDriver) Write(p []byte) (int, error) {
+	n, err := d.buf.Write(p)
+	if runs := strings.Count(d.buf.String(), d.marker); runs > d.seen {
+		d.seen = runs
+		if d.step != nil {
+			d.step(runs)
+		}
+	}
+	return n, err
+}
+
+func (d *watchDriver) String() string { return d.buf.String() }
+
+func (d *watchDriver) records() []string {
+	trimmed := strings.TrimSuffix(d.buf.String(), "\n")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+// runWatch invokes run in watch mode with a hard ceiling, so a loop that never
+// emits fails with a readable assertion instead of hanging until the go test
+// timeout.
+func runWatch(t *testing.T, path, format string, stdout io.Writer, stderr io.Writer) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return run(
+		ctx,
+		[]string{"--file", path, "-format", format, cmdTest, "--watch", "--interval", "1ms"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		stdout,
+		stderr,
+	)
+}
+
+// runWatchCancellable covers the cases that cancel themselves through a
+// [context.CancelFunc] the test closes over.
+func runWatchCancellable(
+	t *testing.T,
+	path, format string,
+	stdout, stderr io.Writer,
+	arm func(cancel context.CancelFunc),
+) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	arm(cancel)
+	return run(
+		ctx,
+		[]string{"--file", path, "-format", format, cmdTest, "--watch", "--interval", "1ms"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		stdout,
+		stderr,
+	)
+}
+
+func TestWatchRerunsOnChange(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatJSON, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(run int) {
+			switch run {
+			case 1:
+				writeTestPolicy(t, path, watchFailingPolicy)
+			case 2:
+				cancel()
+			}
+		}
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	records := driver.records()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2:\n%s", len(records), driver)
+	}
+	var first, second result
+	if unmarshalErr := json.Unmarshal([]byte(records[0]), &first); unmarshalErr != nil {
+		t.Fatalf("record 0: %v", unmarshalErr)
+	}
+	if unmarshalErr := json.Unmarshal([]byte(records[1]), &second); unmarshalErr != nil {
+		t.Fatalf("record 1: %v", unmarshalErr)
+	}
+	if first.Status != statusOK || second.Status != statusFailed {
+		t.Errorf("statuses = %q then %q, want %q then %q",
+			first.Status, second.Status, statusOK, statusFailed)
+	}
+	if first.PolicyDigest == second.PolicyDigest {
+		t.Errorf("both runs reported digest %q; the edit was not correlated", first.PolicyDigest)
+	}
+}
+
+func TestWatchJSONIsNDJSON(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatJSON, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(int) { cancel() }
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	if strings.Contains(driver.String(), "\n  ") {
+		t.Errorf("watch JSON is indented, so lines are not independently parseable:\n%s", driver)
+	}
+	records := driver.records()
+	if len(records) == 0 {
+		t.Fatal("no records emitted")
+	}
+	want := watchDigest(t, watchPassingPolicy)
+	for i, record := range records {
+		var envelope result
+		if unmarshalErr := json.Unmarshal([]byte(record), &envelope); unmarshalErr != nil {
+			t.Fatalf("record %d does not parse on its own: %v (%q)", i, unmarshalErr, record)
+		}
+		if envelope.PolicyDigest != want {
+			t.Errorf("record %d digest = %q, want %q", i, envelope.PolicyDigest, want)
+		}
+	}
+}
+
+// watchDigest recomputes the digest independently of the implementation, so the
+// test pins the value rather than echoing whatever the tool produced.
+func watchDigest(t *testing.T, document string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(document))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func TestWatchIgnoresIdenticalRewrite(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatJSON, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(run int) {
+			if run == 1 {
+				writeTestPolicy(t, path, watchPassingPolicy)
+				// Absence of a second run is the assertion, so let the loop tick
+				// many times over these bytes before stopping it.
+				time.AfterFunc(100*time.Millisecond, cancel)
+			}
+		}
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	if records := driver.records(); len(records) != 1 {
+		t.Errorf("records = %d, want 1 — identical bytes re-ran the suite:\n%s", len(records), driver)
+	}
+}
+
+func TestWatchSurvivesAtomicRename(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatJSON, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(run int) {
+			switch run {
+			case 1:
+				// The replacement every editor and aclpolicy.WriteRaw performs.
+				staged := filepath.Join(dir, "acl.hujson.tmp")
+				writeTestPolicy(t, staged, watchFailingPolicy)
+				if err := os.Rename(staged, path); err != nil {
+					t.Errorf("rename: %v", err)
+					cancel()
+				}
+			case 2:
+				cancel()
+			}
+		}
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	if records := driver.records(); len(records) != 2 {
+		t.Errorf("records = %d, want 2 — the rename was not detected:\n%s", len(records), driver)
+	}
+}
+
+func TestWatchSurvivesUnparseableFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	// slog's TextHandler writes one record per Write, so the stderr driver turns
+	// "the warning was logged" into a signal — no sleep needed to repair the file.
+	logs := &watchDriver{marker: "\n"}
+
+	err := runWatchCancellable(t, path, formatJSON, driver, logs, func(cancel context.CancelFunc) {
+		driver.step = func(run int) {
+			switch run {
+			case 1:
+				writeTestPolicy(t, path, `{"grants": [`)
+			case 2:
+				cancel()
+			}
+		}
+		logs.step = func(logged int) {
+			if logged == 1 {
+				writeTestPolicy(t, path, watchFailingPolicy)
+			}
+		}
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	records := driver.records()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2 (broken save emits nothing, repair resumes):\n%s",
+			len(records), driver)
+	}
+	for i, record := range records {
+		var envelope result
+		if unmarshalErr := json.Unmarshal([]byte(record), &envelope); unmarshalErr != nil {
+			t.Errorf("record %d does not parse: %v (%q)", i, unmarshalErr, record)
+		}
+	}
+	if !strings.Contains(logs.String(), "did not produce a verdict") {
+		t.Errorf("stderr never explained the broken save:\n%s", logs)
+	}
+}
+
+func TestWatchLogsBrokenFileOnce(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	// Readable but unparseable: startup succeeds, every evaluation fails.
+	writeTestPolicy(t, path, `{"grants": [`)
+	var stdout strings.Builder
+	logs := &watchDriver{marker: "\n"}
+
+	err := runWatchCancellable(t, path, formatJSON, &stdout, logs, func(cancel context.CancelFunc) {
+		logs.step = func(int) { time.AfterFunc(100*time.Millisecond, cancel) }
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing for a file that produced no verdict", stdout.String())
+	}
+	if got := strings.Count(logs.String(), "did not produce a verdict"); got != 1 {
+		t.Errorf("logged the same broken file %d times, want 1:\n%s", got, logs)
+	}
+}
+
+func TestWatchAlwaysExitsZero(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchFailingPolicy)
+	driver := &watchDriver{marker: "}\n"}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatJSON, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(int) { cancel() }
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d — interrupting a red suite is not a verdict (error %v)",
+			code, exitOK, err)
+	}
+	var envelope result
+	if unmarshalErr := json.Unmarshal([]byte(driver.records()[0]), &envelope); unmarshalErr != nil {
+		t.Fatalf("record 0: %v", unmarshalErr)
+	}
+	if envelope.Status != statusFailed {
+		t.Errorf("status = %q, want %q — exit 0 must not hide the red verdict",
+			envelope.Status, statusFailed)
+	}
+}
+
+func TestWatchHumanSeparatesRunsAndEmitsNoANSI(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	driver := &watchDriver{marker: "tail-acl: "}
+	var stderr strings.Builder
+
+	err := runWatchCancellable(t, path, formatHuman, driver, &stderr, func(cancel context.CancelFunc) {
+		driver.step = func(run int) {
+			switch run {
+			case 1:
+				writeTestPolicy(t, path, watchFailingPolicy)
+			case 2:
+				cancel()
+			}
+		}
+	})
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	if strings.Contains(driver.String(), "\x1b") {
+		t.Errorf("stdout contains an ANSI escape:\n%q", driver.String())
+	}
+	if !strings.Contains(driver.String(), "\n\ntail-acl: ") &&
+		!strings.Contains(driver.String(), "\n\nFAIL ") &&
+		!strings.Contains(driver.String(), "\n\nPASS ") {
+		t.Errorf("runs are not separated by a blank line:\n%s", driver)
+	}
+}
+
+func TestWatchUnreadableFileAtStartupIsExitTwo(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr strings.Builder
+	err := runWatch(t, filepath.Join(t.TempDir(), "missing.hujson"), formatJSON, &stdout, &stderr)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+}
+
+func TestWatchRejectsNonPositiveInterval(t *testing.T) {
+	t.Parallel()
+	for _, interval := range []string{"0", "-1ms"} {
+		t.Run(interval, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, watchPassingPolicy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{"--file", path, cmdTest, "--watch", "--interval", interval},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+		})
+	}
+}
+
+func TestWatchRejectsIndeterminate(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--indeterminate=fail", "--file", path, cmdTest, "--watch"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "never exits non-zero") {
+		t.Errorf("error = %v, want it to explain why the flag is inert", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+}
+
+func TestIntervalWithoutWatchIsRejected(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdTest, "--interval", "1s"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "--interval applies only to --watch") {
+		t.Errorf("error = %v, want it to name the missing --watch", err)
+	}
+}
+
+func TestPlainTestStillRunsWithTheDefaultInterval(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	var stdout, stderr strings.Builder
+	if err := run(
+		context.Background(),
+		[]string{"--file", path, cmdTest},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "1 assertions: 1 passed, 0 failed") {
+		t.Errorf("stdout = %q, want the ordinary single-shot verdict", stdout.String())
+	}
+}
+
+func TestSchemaAndUsageDocumentWatch(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name      string
+		args      []string
+		fragments []string
+	}{
+		{
+			name:      "schema",
+			args:      []string{"-schema"},
+			fragments: []string{"--watch", "--interval"},
+		},
+		{
+			name:      "help",
+			args:      []string{"--help"},
+			fragments: []string{"--watch", "never exits non-zero"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				testCase.args,
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if err != nil && !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("run: %v", err)
+			}
+			// -schema writes to stdout; --help writes usage to stderr.
+			combined := stdout.String() + stderr.String()
+			for _, fragment := range testCase.fragments {
+				if !strings.Contains(combined, fragment) {
+					t.Errorf("output missing %q:\n%s", fragment, combined)
+				}
+			}
+		})
+	}
+}
+
+func TestSchemaExitCode2MentionsWatch(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-schema"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var doc map[string]any
+	if unmarshalErr := json.Unmarshal([]byte(stdout.String()), &doc); unmarshalErr != nil {
+		t.Fatalf("parse schema JSON: %v", unmarshalErr)
+	}
+	exitCodes, ok := doc["exit_codes"].(map[string]any)
+	if !ok {
+		t.Fatalf("exit_codes field is not a map")
+	}
+	exitCode2, ok := exitCodes["2"].(string)
+	if !ok {
+		t.Fatalf("exit_codes[\"2\"] is not a string")
+	}
+	for _, fragment := range []string{"test --watch", "unreadable --file", "failed write"} {
+		if !strings.Contains(exitCode2, fragment) {
+			t.Errorf("exit_codes[\"2\"] missing %q:\n%s", fragment, exitCode2)
+		}
+	}
+}
+
+// failingWriter stands in for a write that returns an error, such as a full
+// disk. It is not a closed pipe: on Unix, writing to a closed reader on real
+// stdout (`tail-acl test --watch | head -1`) dies by SIGPIPE (exit 141) instead
+// of returning an error, so that path never reaches watchTests at all — and it
+// only reaches SIGPIPE on the next save, since nothing is written in between.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// A failed write is the watcher's own failure, not a verdict, so it exits 2.
+// Exit 1 would collide with "a policy assertion failed".
+func TestWatchWriteFailureIsExitTwo(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, watchPassingPolicy)
+	var stderr strings.Builder
+	err := runWatch(t, path, formatJSON, failingWriter{}, &stderr)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+}
+
+// [signal.NotifyContext] cancels on the first interrupt and then stops relaying
+// without unregistering, so without this the signal stays trapped and every
+// later Ctrl-C is swallowed — leaving a command wedged in a syscall (a blocked
+// write to a full pipe, merge over a slow mount) killable only by SIGKILL.
+func TestRestoreDefaultAfterCancelReleasesTheSignalOnCancel(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	restoreDefaultAfterCancel(ctx, func() { close(stopped) })
+
+	select {
+	case <-stopped:
+		t.Fatal("released the signal before the first interrupt; Ctrl-C would not cancel at all")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("never released the signal, so a second Ctrl-C cannot kill a wedged command")
+	}
+}
+
+// An interrupt is a collection failure, not a verdict. Exit 1 would report a
+// definite failure for an upload whose request may already have been applied.
+func TestInterruptedRequestIsExitTwo(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name string
+		err  error
+	}{
+		{"upload", fmt.Errorf("uploading %s: %w", "acl.json", context.Canceled)},
+		{"plan", fmt.Errorf("fetching deployed policy: %w", context.Canceled)},
+		{"bare", context.Canceled},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if code := exitCode(testCase.err); code != exitUsage {
+				t.Errorf("exitCode(%v) = %d, want %d", testCase.err, code, exitUsage)
+			}
+		})
 	}
 }
 

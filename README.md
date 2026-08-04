@@ -53,6 +53,8 @@ tail-acl --file acl/acl.generated.json test
 tail-acl -format json --file acl/acl.generated.json test
 tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
 tail-acl --indeterminate=fail --file acl/acl.generated.json test  # fail CI if proof is incomplete
+tail-acl --file acl/acl.generated.json test --watch  # re-run on every save, Ctrl-C to stop
+tail-acl -format json --file acl/acl.generated.json test --watch  # NDJSON, one verdict per line
 
 # Ask one reachability question locally (no credentials or network):
 tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
@@ -88,7 +90,7 @@ tail-acl -format json --file acl.json grant add …  # JSON result envelope on s
 | `posture remove` | Remove a posture definition |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
-| `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions) |
+| `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
@@ -437,6 +439,43 @@ Lint is deliberately **node-blind**: whether a tag is carried by a real device
 is a control-plane coverage question that belongs to `tailnet-audit`, not here.
 The discriminator is "does the finding need the live device inventory?" — if
 yes, it is not a `lint` finding.
+
+### `test --watch`: the save-and-look loop
+
+`--watch` re-runs the assertion suite whenever the policy file's contents change, so authoring is a glance at
+a second terminal rather than a command you keep retyping.
+
+```bash
+tail-acl --file acl.hujson test --watch              # human output, blank line between runs
+tail-acl -format json --file acl.hujson test --watch # NDJSON, one envelope per line
+```
+
+Four decisions are worth knowing:
+
+- **It polls, and that is deliberate.** Typed edits and every competent editor replace the file with a
+  temp-file-plus-rename, and a filesystem watch registered on a *file* does not survive a rename. Polling
+  re-resolves the path every tick and adds no dependency. `--interval` defaults to `500ms`.
+- **A change is a content hash, not an mtime.** Rewriting the file with identical bytes re-runs nothing, and a
+  run happens only once the digest is identical on two consecutive polls — a quiet period and a guard against
+  grading a half-written file, from one mechanism.
+- **Under `-format json` the stream is NDJSON**, and every record carries `policy_digest`, the SHA-256 of the
+  exact bytes that were graded. Correlate by digest, not by time: it is reproducible, and line order already
+  supplies sequence. Single-shot `-format json` is unchanged — still one indented object, still no
+  `policy_digest`.
+- **It never exits non-zero for a verdict.** An exit code is a point-in-time verdict and a watch loop has no
+  single point in time; exit 1 would mean both "your suite is red" and "you interrupted while it happened to
+  be red". Interrupt always exits 0, whatever the last run said — use plain `test` in CI. Exit 2 still
+  signals the watcher's *own* failures: an unreadable `--file`, a non-positive `--interval`, a flag
+  combination that cannot apply, or a write that fails and returns an error, such as a full disk. A save
+  that cannot be parsed is none of those — it prints nothing on stdout, logs once to stderr, and leaves the
+  loop running. Piping into a reader that exits early, e.g. `tail-acl test --watch | head -1`, does **not**
+  return you to a prompt: a broken pipe is only detected by writing, and a watcher that has already graded
+  the current file writes nothing until that file changes, so it keeps polling. The *next* save is what
+  fails to write, and the outcome there is platform-specific — on Unix the Go runtime raises `SIGPIPE` on
+  the failed write to fd 1, and the default disposition kills the process with exit 141 before `--watch`'s
+  own error handling ever runs; on Windows, where there is no SIGPIPE, the same failed write is reported as
+  an ordinary error, so `--watch` exits 2 through the same path as a full disk. Both are ordinary behavior
+  for a streaming tool, not a bug — but stop a watcher by interrupting it, not by closing its reader.
 
 ## License
 

@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -105,6 +108,11 @@ const (
 // httpTimeout bounds every Tailscale API request.
 const httpTimeout = 30 * time.Second
 
+// defaultWatchInterval is the poll period for test --watch. Two consecutive
+// identical polls are required before a run, so a save reaches a verdict within
+// roughly twice this — fast enough for save-and-look, slow enough to be free.
+const defaultWatchInterval = 500 * time.Millisecond
+
 type options struct {
 	file          string
 	tailnet       string
@@ -154,13 +162,19 @@ type result struct {
 	Status        string `json:"status"`
 	Message       string `json:"message"`
 	File          string `json:"file,omitempty"`
-	Tailnet       string `json:"tailnet,omitempty"`
-	ETag          string `json:"etag,omitempty"`
-	Diff          string `json:"diff,omitempty"`
-	Changed       *bool  `json:"changed,omitempty"`
-	GrantIndex    *int   `json:"grant_index,omitempty"`
-	ACLIndex      *int   `json:"acl_index,omitempty"`
-	MergedFiles   *int   `json:"merged_files,omitempty"`
+	// PolicyDigest content-addresses the exact bytes that produced this result.
+	// Only watch mode sets it: a stream needs a correlator, and a digest is
+	// reproducible where a timestamp is not — it also identifies what was
+	// evaluated rather than when. omitempty is what keeps single-shot JSON
+	// byte-identical to the pre-watch envelope.
+	PolicyDigest string `json:"policy_digest,omitempty"`
+	Tailnet      string `json:"tailnet,omitempty"`
+	ETag         string `json:"etag,omitempty"`
+	Diff         string `json:"diff,omitempty"`
+	Changed      *bool  `json:"changed,omitempty"`
+	GrantIndex   *int   `json:"grant_index,omitempty"`
+	ACLIndex     *int   `json:"acl_index,omitempty"`
+	MergedFiles  *int   `json:"merged_files,omitempty"`
 	// Access is the three-state reachability verdict. Allowed is the older
 	// two-state field and is emitted only for a definite answer: an
 	// indeterminate result omits it rather than serializing false, which a
@@ -214,17 +228,43 @@ func (e usageError) Unwrap() error { return e.err }
 
 func usagef(format string, a ...any) error { return usageError{fmt.Errorf(format, a...)} }
 
-func main() {
+func main() { os.Exit(realMain()) }
+
+// realMain exists so the signal handler's stop can be deferred; [os.Exit] in
+// main would skip it, which gocritic's exitAfterDefer flags.
+func realMain() int {
+	// os.Interrupt only, not SIGTERM: make cross builds Windows, where SIGTERM is
+	// declared but never delivered.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	restoreDefaultAfterCancel(ctx, stop)
 	client := &http.Client{Timeout: httpTimeout}
 	apiURL := os.Getenv("TAILSCALE_API_URL")
 	if apiURL == "" {
 		apiURL = tailapi.DefaultBaseURL
 	}
-	err := run(context.Background(), os.Args[1:], os.Getenv, client, apiURL, os.Stdout, os.Stderr)
+	err := run(ctx, os.Args[1:], os.Getenv, client, apiURL, os.Stdout, os.Stderr)
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(os.Stderr, "tail-acl:", err)
 	}
-	os.Exit(exitCode(err))
+	return exitCode(err)
+}
+
+// restoreDefaultAfterCancel hands the interrupt back to the Go runtime as soon
+// as ctx is cancelled, so a second Ctrl-C still hard-kills the process.
+//
+// [signal.NotifyContext]'s own goroutine cancels on the first signal and then
+// returns without calling [signal.Stop], which leaves the signal trapped with a
+// one-deep channel nothing drains. Every later interrupt is silently swallowed,
+// so any command that never observes ctx — a typed edit, merge, or a watch loop
+// parked in a blocked write to a full pipe — becomes killable only by SIGKILL.
+// Before signal handling existed here, the default disposition ended all of
+// them on the first Ctrl-C; this keeps that escape hatch.
+func restoreDefaultAfterCancel(ctx context.Context, stop context.CancelFunc) {
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 }
 
 // exitCode maps a run error onto the documented exit-code scheme.
@@ -238,7 +278,13 @@ func exitCode(err error) int {
 		return exitIndeterminate
 	// A control plane that never judged the policy is a collection failure, not
 	// a verdict: an expired token or a 503 must not exit as "policy invalid".
-	case errors.As(err, &ue), outcome == tailapi.ValidationUnavailable:
+	//
+	// An interrupt is the same category, and saying so matters most for upload:
+	// the request may already have been applied when cancellation unwound the
+	// client, so exit 1 would report a definite failure for a change that can
+	// have landed. Watch never reaches here — it returns nil on interrupt.
+	case errors.As(err, &ue), outcome == tailapi.ValidationUnavailable,
+		errors.Is(err, context.Canceled):
 		return exitUsage
 	default:
 		return exitFailed
@@ -318,7 +364,8 @@ func run(
 		return usagef("--indeterminate applies only to test; check always preserves its three-state verdict")
 	}
 
-	res, dispatchErr := dispatch(ctx, remaining, opts, httpClient, apiURL, logger)
+	emitter := newStreamEmitter(stdout, *format)
+	res, dispatchErr := dispatch(ctx, remaining, opts, httpClient, apiURL, logger, emitter)
 	if res != nil {
 		if err := render(stdout, *format, res); err != nil {
 			return err
@@ -342,6 +389,7 @@ func dispatch(
 	httpClient *http.Client,
 	apiURL string,
 	logger *slog.Logger,
+	emitter *streamEmitter,
 ) (*result, error) {
 	command := args[0]
 	logger.DebugContext(ctx, "dispatching command", "command", command, "file", opts.file)
@@ -359,7 +407,7 @@ func dispatch(
 	case cmdValidate:
 		return runValidate(ctx, opts, httpClient, apiURL, args[1:], logger)
 	case cmdTest:
-		return runTest(ctx, opts, args[1:], logger)
+		return runTest(ctx, opts, args[1:], logger, emitter)
 	case cmdCheck:
 		return runCheck(ctx, opts, args[1:], logger)
 	case cmdLint:
@@ -434,6 +482,38 @@ func render(w io.Writer, format string, res *result) error {
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
 	return err
+}
+
+// streamEmitter renders an unbounded series of results to one stream. Watch mode
+// turns a single verdict into a sequence, and the two formats need opposite
+// things from that: JSON drops its indentation so each envelope is one
+// independently parseable NDJSON line, while human output gains a blank line
+// between runs so the scroll-back reads as a red-green history. Nothing here
+// writes ANSI — stdout stays parse-clean whether or not it is a terminal.
+type streamEmitter struct {
+	w      io.Writer
+	format string
+	wrote  bool
+}
+
+func newStreamEmitter(w io.Writer, format string) *streamEmitter {
+	return &streamEmitter{w: w, format: format}
+}
+
+func (e *streamEmitter) emit(res *result) error {
+	if e.format == formatJSON {
+		e.wrote = true
+		// No SetIndent: compact plus the encoder's trailing newline is exactly
+		// one record per line, matching tailnet-flow's export stream.
+		return json.NewEncoder(e.w).Encode(res)
+	}
+	if e.wrote {
+		if _, err := io.WriteString(e.w, "\n"); err != nil {
+			return err
+		}
+	}
+	e.wrote = true
+	return render(e.w, e.format, res)
 }
 
 func runGrant(path string, args []string) (*result, error) {
@@ -1036,21 +1116,200 @@ func logValidationWarnings(ctx context.Context, logger *slog.Logger, validation 
 	}
 }
 
-func runTest(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
-	if len(args) != 0 {
-		// --indeterminate is a root flag, so it has to precede the subcommand.
-		// Its own usage text calls it "test only", which invites the opposite
-		// placement; say so rather than reporting a bare stray argument.
-		if strings.HasPrefix(strings.TrimLeft(args[0], "-"), "indeterminate") {
-			return nil, usagef(
-				"--indeterminate is a global flag: write it before the test subcommand, as in %s",
-				"tail-acl --indeterminate=fail --file acl.json test",
-			)
-		}
-		return nil, usagef("test does not accept arguments")
+func runTest(
+	ctx context.Context,
+	opts options,
+	args []string,
+	logger *slog.Logger,
+	emitter *streamEmitter,
+) (*result, error) {
+	testOpts, err := parseTestArgs(args)
+	if err != nil {
+		return nil, err
 	}
+	// The same rule run already applies to --indeterminate outside test: a flag
+	// that cannot mean anything here is a caller mistake, not a no-op. Its only
+	// effect is on the exit code, and watch pins the verdict's exit code to 0.
+	if testOpts.watch && opts.indeterminate.set {
+		return nil, usagef(
+			"--indeterminate has no effect under --watch, which never exits non-zero for a verdict; drop one of them",
+		)
+	}
+	if testOpts.watch {
+		// Returning a nil result is what makes run skip its single final render:
+		// watch has already written every verdict it is going to write.
+		return nil, watchTests(ctx, opts, testOpts, logger, emitter)
+	}
+	return evaluatePolicyTests(ctx, opts, logger)
+}
+
+// testOptions carries the test subcommand's own flags. --indeterminate is not
+// among them: it is a global flag, parsed by run before the subcommand is known.
+type testOptions struct {
+	watch    bool
+	interval time.Duration
+}
+
+func parseTestArgs(args []string) (testOptions, error) {
+	// This check must precede fs.Parse. --indeterminate is a root flag, so it has
+	// to come before the subcommand, but its usage text calls it "test only",
+	// which invites the opposite placement. Parsing first would report it as an
+	// undefined flag and bury the one thing the caller needs to know.
+	if len(args) != 0 && strings.HasPrefix(strings.TrimLeft(args[0], "-"), "indeterminate") {
+		return testOptions{}, usagef(
+			"--indeterminate is a global flag: write it before the test subcommand, as in %s",
+			"tail-acl --indeterminate=fail --file acl.json test",
+		)
+	}
+	fs := flag.NewFlagSet("tail-acl test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	watch := fs.Bool("watch", false,
+		"re-run the assertions whenever the policy file changes; never exits non-zero for a verdict")
+	interval := fs.Duration("interval", defaultWatchInterval, "polling interval for --watch")
+	if err := fs.Parse(args); err != nil {
+		return testOptions{}, usageError{err}
+	}
+	if fs.NArg() != 0 {
+		return testOptions{}, usagef("test does not accept arguments")
+	}
+	// fs.Visit reports only flags actually supplied, so the default value in the
+	// FlagSet never trips this — plain "test" keeps working.
+	intervalSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "interval" {
+			intervalSet = true
+		}
+	})
+	if intervalSet && !*watch {
+		return testOptions{}, usagef("--interval applies only to --watch; nothing polls without it")
+	}
+	// time.NewTicker panics on a non-positive duration, so this guard is a crash
+	// guard, not a style preference.
+	if *interval <= 0 {
+		return testOptions{}, usagef("--interval must be positive, got %s", *interval)
+	}
+	return testOptions{watch: *watch, interval: *interval}, nil
+}
+
+// watchTests re-runs the assertions whenever the policy file's contents change.
+// It polls rather than subscribing to filesystem events: aclpolicy.WriteRaw
+// replaces the file with CreateTemp + Rename, as does every editor worth using,
+// and a watch registered on a file does not survive a rename. Polling
+// re-resolves the path every tick and adds no dependency.
+func watchTests(
+	ctx context.Context,
+	opts options,
+	testOpts testOptions,
+	logger *slog.Logger,
+	emitter *streamEmitter,
+) error {
+	// A file unreadable at startup is a caller mistake — a typo in --file — not a
+	// transient mid-save state. Fail loudly rather than polling a path forever.
+	raw, err := os.ReadFile(opts.file)
+	if err != nil {
+		return usagef("could not read policy for watch: %v", err)
+	}
+	logger.InfoContext(ctx, "watching policy file",
+		"file", opts.file, "interval", testOpts.interval)
+	// Seeding pending from the startup read lets an already-stable file reach its
+	// first verdict after one tick instead of two.
+	pending, last := policyDigest(raw), ""
+	readFailed := false
+
+	ticker := time.NewTicker(testOpts.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// An interrupt is not a verdict, and a watch loop has no single point
+			// in time to report. Returning nil is what pins --watch to exit 0.
+			return nil
+		case <-ticker.C:
+		}
+
+		raw, err = os.ReadFile(opts.file)
+		if err != nil {
+			if !readFailed {
+				logger.WarnContext(ctx, "cannot read policy file", "file", opts.file, "error", err)
+				readFailed = true
+			}
+			pending = ""
+			continue
+		}
+		readFailed = false
+
+		digest := policyDigest(raw)
+		switch {
+		case digest == last:
+			// Already graded. An editor that rewrote identical bytes changed
+			// nothing worth re-running.
+			pending = digest
+			continue
+		case digest != pending:
+			// Seen once, not yet confirmed. Requiring two identical polls is both
+			// the quiet period and the guard against grading a half-written file.
+			pending = digest
+			continue
+		}
+
+		// Stable and new. Recording it before evaluating is what makes an
+		// unparseable save log once instead of every tick until it is repaired.
+		last = digest
+		res, evalErr := evaluatePolicyTestBytes(ctx, opts, raw, logger)
+		if res == nil {
+			// No envelope exists for this case outside watch mode either, so
+			// inventing one here would make the stream a superset of the
+			// single-shot contract. Only events with no verdict reach stderr.
+			logger.WarnContext(ctx, "policy file did not produce a verdict",
+				"file", opts.file, "digest", digest, "error", evalErr)
+			continue
+		}
+		res.PolicyDigest = digest
+		// evalErr is discarded on purpose when a verdict exists: the envelope
+		// already carries it as status, and the exit code it selects is 0 here.
+		if emitErr := emitter.emit(res); emitErr != nil {
+			// A failed write is the watcher's own failure, not a verdict. Exit 2
+			// keeps exit 1 meaning exactly one thing across the tool: a check
+			// failed. On Unix a closed reader on stdout (e.g. `| head -1`) does
+			// not reach here: the Go runtime raises SIGPIPE on the failed write
+			// and the process dies with 141 before emit returns. That only
+			// happens on the *next* emit, though — a broken pipe is detected by
+			// writing, and nothing is written between saves, so the loop polls
+			// on until the policy changes. Windows has no SIGPIPE, so the same
+			// closed reader reaches here as an ordinary error, same as a full
+			// disk on either platform.
+			return usagef("could not write watch output: %v", emitErr)
+		}
+	}
+}
+
+// policyDigest content-addresses policy bytes. One value does three jobs: change
+// detection, the two-poll debounce, and the correlator on each streamed record.
+func policyDigest(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// evaluatePolicyTests reads opts.file and grades its assertions.
+func evaluatePolicyTests(ctx context.Context, opts options, logger *slog.Logger) (*result, error) {
+	raw, err := aclpolicy.ReadRaw(opts.file)
+	if err != nil {
+		return nil, usagef("could not load policy tests: %v", err)
+	}
+	return evaluatePolicyTestBytes(ctx, opts, raw, logger)
+}
+
+// evaluatePolicyTestBytes is the half watch reuses: it grades bytes the caller
+// already read, so a watch run's reported digest names exactly what it graded.
+// A nil result means no verdict exists — the contract watchTests keys on.
+func evaluatePolicyTestBytes(
+	ctx context.Context,
+	opts options,
+	raw []byte,
+	logger *slog.Logger,
+) (*result, error) {
 	path := opts.file
-	policy, err := aclpolicy.Load(path)
+	policy, err := aclpolicy.LoadBytes(path, raw)
 	if err != nil {
 		return nil, usagef("could not load policy tests: %v", err)
 	}
@@ -1518,8 +1777,8 @@ func commandCatalog() []schemaCommand {
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{
 			cmdTest,
-			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules; --indeterminate controls only test's exit)",
-			cmdTest,
+			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules; --indeterminate controls only test's exit; --watch re-runs on change and never exits non-zero for a verdict)",
+			"test [--watch [--interval DURATION]]",
 		},
 		{
 			cmdCheck,
@@ -1576,7 +1835,11 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 			"2": "usage, input, or collection error; for validate and plan this also covers a control plane " +
 				"that never judged the policy (expired credentials, rate limiting, a server fault, an " +
 				"unreadable body, a redirect that dropped the request, or an unreachable API), and no " +
-				"verdict is printed in that case",
+				"verdict is printed in that case. For test --watch, also signals an unreadable --file, " +
+				"a non-positive --interval, incompatible flag combinations (--indeterminate with --watch, " +
+				"--interval without --watch), or a failed write to stdout. An interrupt during a command " +
+				"that is mid-request exits here too rather than as a verdict; for upload that means the " +
+				"change may already have been applied",
 			"10": "indeterminate: check could not settle the question, test had an unsettleable assertion under " +
 				"--indeterminate=warn, or validate and plan got a response they cannot read as a verdict " +
 				"(warnings with no errors alongside a message, or a detail with neither errors nor warnings)",
@@ -1610,6 +1873,8 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save")
+	fmt.Fprintln(w, "  tail-acl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
@@ -1650,6 +1915,31 @@ Test precondition:
   protocol, which is what produces exit 10. lint catches dangling group, host,
   tag, and ipset references, which local evaluation silently treats as matching
   nothing; --indeterminate does not weaken check's verdict.
+
+Watch mode:
+  test --watch never exits non-zero for a test verdict: an exit code is a
+  point-in-time verdict and a watch loop has no single point in time. It exits 0
+  on interrupt whatever the last run said, so use plain test in CI. Exit 2 still
+  signals the watcher's own failures - an unreadable --file, a non-positive
+  --interval, --indeterminate and --interval where they cannot apply, or a write
+  that fails and returns an error, such as a full disk. Piping into a reader
+  that exits early, e.g. test --watch | head -1, does not return you to a
+  prompt. A broken pipe is only detected by writing, and nothing is written
+  between saves, so the watcher keeps polling until the policy file next
+  changes. That write then fails, and the outcome is platform-specific: on Unix
+  the Go runtime raises SIGPIPE (signal 13) on the failed write to fd 1, and the
+  default disposition kills the process with exit 141 before this tool's own
+  error handling runs. On Windows, where there is no SIGPIPE, the failed write
+  is reported as an ordinary error, so this exits 2 through the same path as a
+  full disk. Interrupt the watcher to stop it; do not expect the pipe to.
+
+Interrupts:
+  The first interrupt cancels the run: --watch stops and exits 0, while a
+  command that is mid-request abandons it and exits 2, not 1 - an interrupt is
+  not a verdict, and for upload the change may already have been applied
+  server-side. A second interrupt is handled by the runtime's default
+  disposition, so a command wedged in a syscall that cannot observe the
+  cancellation still dies on Ctrl-C twice.
 `
 
 type stringListFlag []string

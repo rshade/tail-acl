@@ -31,7 +31,7 @@ const defaultFileMode os.FileMode = 0o644
 //
 // SSH shadows the promoted ACL.SSH field so acceptEnv can be preserved.
 // Callers must treat Policy.SSH as the source of truth if SSH authoring is ever
-// added; Load currently mirrors it into ACL.SSH only for read-only evaluators.
+// added; LoadBytes currently mirrors it into ACL.SSH only for read-only evaluators.
 // Write enforces that rule rather than trusting it — see checkSSHSourceOfTruth.
 type Policy struct {
 	tailscale.ACL
@@ -176,26 +176,35 @@ func Load(path string) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadBytes(path, raw)
+}
+
+// LoadBytes decodes a policy from bytes the caller already holds. It exists for
+// a caller that must know exactly which bytes produced a verdict: tail-acl's
+// watch loop content-addresses every run, and hashing its own read while Load
+// took a second would let it report a digest for bytes it never evaluated. name
+// is used only in error messages.
+func LoadBytes(name string, raw []byte) (*Policy, error) {
 	document, err := hujson.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if err = checkDuplicateMembers(document); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	standard, err := hujson.Standardize(raw)
 	if err != nil {
-		return nil, fmt.Errorf("standardizing %s: %w", path, err)
+		return nil, fmt.Errorf("standardizing %s: %w", name, err)
 	}
 
 	var policy Policy
 	decoder := json.NewDecoder(bytes.NewReader(standard))
 	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(&policy); err != nil {
-		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", path, err)
+		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", name, err)
 	}
 	if err = ensureEOF(decoder); err != nil {
-		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", path, err)
+		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", name, err)
 	}
 
 	// SSH authoring does not exist, so this one-way copy is safe: Policy.SSH is
@@ -208,7 +217,7 @@ func Load(path string) (*Policy, error) {
 // sshRules projects Policy.SSH onto the pinned client's shape. It is the only
 // conversion from Policy.SSH, so a caller that needs SSH rules can derive them
 // from the source of truth rather than trusting ACL.SSH, which is a mirror that
-// only Load populates.
+// only LoadBytes populates.
 func (p *Policy) sshRules() []tailscale.ACLSSH {
 	rules := make([]tailscale.ACLSSH, len(p.SSH))
 	for i := range p.SSH {
