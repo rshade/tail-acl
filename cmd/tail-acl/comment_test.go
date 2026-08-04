@@ -315,9 +315,13 @@ func TestCommentRejectedByUnsupportedCommands(t *testing.T) {
 	}
 }
 
-// Posture expressions are opaque CLI arguments. Recognizing the comment flags
-// must not reinterpret other dash-prefixed expressions as options.
-func TestPostureSetPreservesDashPrefixedExpressions(t *testing.T) {
+// Posture expressions are opaque CLI arguments and may legitimately begin
+// with "-" (a negative operand) or look like a flag altogether. Since
+// posture set now parses flags with pflag instead of a hand-rolled
+// interspersed scanner, such an expression must follow a "--" terminator
+// (POSIX Utility Syntax Guideline 10) to reach the policy literally instead
+// of being parsed as an option; --comment must precede the terminator.
+func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 	t.Parallel()
 	t.Run("negative operand", func(t *testing.T) {
 		t.Parallel()
@@ -325,7 +329,7 @@ func TestPostureSetPreservesDashPrefixedExpressions(t *testing.T) {
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
 		if _, err := runTailACL(t, path, "posture", "set", "posture:lab",
-			"-1 < custom:score", "--comment", "allows negative scores"); err != nil {
+			"--comment", "allows negative scores", "--", "-1 < custom:score"); err != nil {
 			t.Fatal(err)
 		}
 		policy, err := aclpolicy.Load(path)
@@ -338,12 +342,12 @@ func TestPostureSetPreservesDashPrefixedExpressions(t *testing.T) {
 		assertCommentsOn(t, path, []string{"allows negative scores"}, "postures", "posture:lab")
 	})
 
-	t.Run("unknown option-shaped expression", func(t *testing.T) {
+	t.Run("flag-shaped expression", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		if _, err := runTailACL(t, path, "posture", "set", "posture:lab", "--custom-check"); err != nil {
+		if _, err := runTailACL(t, path, "posture", "set", "posture:lab", "--", "--custom-check"); err != nil {
 			t.Fatal(err)
 		}
 		policy, err := aclpolicy.Load(path)
@@ -372,6 +376,23 @@ func TestPostureSetPreservesDashPrefixedExpressions(t *testing.T) {
 			t.Errorf("postures[posture:lab] = %q, want %q", policy.Postures["posture:lab"], want)
 		}
 	})
+}
+
+// Without a "--" terminator, a dash-prefixed expression that looks like a
+// flag is now rejected as an unrecognized flag instead of silently becoming a
+// positional and being written into the policy — a typo of --comment as
+// --commnet used to corrupt the postures list this way with exit 0.
+func TestPostureSetRejectsUnrecognizedFlagWithoutTerminator(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, commentAuthoringPolicy)
+
+	_, err := runTailACL(t, path, "posture", "set", "posture:lab",
+		"custom:score > 1", "--commnet", "oops")
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	assertFixtureUnchanged(t, path)
 }
 
 func TestGrantCommentRejectsAmbiguousDuplicateGrant(t *testing.T) {

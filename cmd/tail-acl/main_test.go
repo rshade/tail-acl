@@ -659,14 +659,26 @@ func TestFlagErrorsDoNotPrintAPIKeyFromEnvironment(t *testing.T) {
 		}
 		return ""
 	}
-	for _, args := range [][]string{{"--help"}, {"--not-a-flag"}} {
+	// --help is a wanted invocation under cobra (it prints help to stdout and
+	// returns nil, see ruling 1 in the cobra-conversion plan); --not-a-flag
+	// stays a genuine error. Both must still keep the API key out of stderr.
+	for _, testCase := range []struct {
+		args      []string
+		wantError bool
+	}{
+		{[]string{"--help"}, false},
+		{[]string{"--not-a-flag"}, true},
+	} {
 		var stderr strings.Builder
-		err := run(context.Background(), args, getenv, http.DefaultClient, "", io.Discard, &stderr)
-		if err == nil {
-			t.Errorf("run(%q) unexpectedly succeeded", args)
+		err := run(context.Background(), testCase.args, getenv, http.DefaultClient, "", io.Discard, &stderr)
+		if testCase.wantError && err == nil {
+			t.Errorf("run(%q) unexpectedly succeeded", testCase.args)
+		}
+		if !testCase.wantError && err != nil {
+			t.Errorf("run(%q) = %v, want nil", testCase.args, err)
 		}
 		if strings.Contains(stderr.String(), secret) {
-			t.Errorf("run(%q) exposed API key in stderr: %s", args, stderr.String())
+			t.Errorf("run(%q) exposed API key in stderr: %s", testCase.args, stderr.String())
 		}
 	}
 }
@@ -1718,12 +1730,72 @@ func TestIndeterminateFlagIsTestOnly(t *testing.T) {
 	}
 }
 
-// Calling the flag "test only" invites writing it after the subcommand, where
-// the root FlagSet never sees it. Say which position is meant rather than
-// reporting it as a stray argument.
-func TestIndeterminateFlagAfterSubcommandExplainsPosition(t *testing.T) {
+// --indeterminate is a persistent (cobra) flag, inherited by every
+// subcommand, so it now resolves correctly whether written before or after
+// "test" — an intentional widening from the stdlib [flag.FlagSet]-era root,
+// which only recognized it before the subcommand and reported anything after
+// as a stray argument. This test pins the new, wider behavior: the exit code
+// for a fixed policy must not depend on where --indeterminate appears on the
+// line, and the value placed after "test" must actually take effect rather
+// than being silently ignored.
+func TestIndeterminateFlagPositionDoesNotMatter(t *testing.T) {
 	t.Parallel()
-	for _, arg := range []string{"--indeterminate=fail", "-indeterminate", "--indeterminate"} {
+	// acls[0] omits the port Tailscale requires, so its "deny" assertion for
+	// tag:web:443 can never be evaluated and reports indeterminate.
+	const policy = `{
+		"acls": [
+			{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:web"]},
+			{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:db:5432"]}
+		],
+		"tests": [{"src": "alice@example.com", "accept": ["tag:db:5432"], "deny": ["tag:web:443"]}]
+	}`
+	runWithIndeterminate := func(t *testing.T, args ...string) error {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "acl.hujson")
+		writeTestPolicy(t, path, policy)
+		return run(
+			context.Background(),
+			append([]string{"--file", path}, args...),
+			func(string) string { return "" },
+			http.DefaultClient,
+			"",
+			io.Discard,
+			io.Discard,
+		)
+	}
+
+	t.Run("ignore before test", func(t *testing.T) {
+		t.Parallel()
+		err := runWithIndeterminate(t, "--indeterminate=ignore", "test")
+		if code := exitCode(err); code != exitOK {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+		}
+	})
+	t.Run("ignore after test", func(t *testing.T) {
+		t.Parallel()
+		// The value must actually reach the test run in this position: were it
+		// silently dropped, this would fall back to the default (warn) and exit
+		// exitIndeterminate instead.
+		err := runWithIndeterminate(t, "test", "--indeterminate=ignore")
+		if code := exitCode(err); code != exitOK {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+		}
+	})
+	t.Run("fail after test", func(t *testing.T) {
+		t.Parallel()
+		err := runWithIndeterminate(t, "test", "--indeterminate=fail")
+		if code := exitCode(err); code != exitFailed {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+		}
+	})
+}
+
+// A bare --indeterminate (no value) after "test" is still an error — cobra's
+// own "needs an argument" diagnostic now, rather than the old [flag.FlagSet]-era
+// stray-argument message — and single-dash spelling still normalizes to it.
+func TestIndeterminateFlagWithoutValueAfterSubcommandIsExitTwo(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"-indeterminate", "--indeterminate"} {
 		t.Run(arg, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -1740,8 +1812,8 @@ func TestIndeterminateFlagAfterSubcommandExplainsPosition(t *testing.T) {
 			if code := exitCode(err); code != exitUsage {
 				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 			}
-			if !strings.Contains(err.Error(), "is a global flag") {
-				t.Errorf("error = %v, want the flag position explained", err)
+			if !strings.Contains(err.Error(), "needs an argument") {
+				t.Errorf("error = %v, want a needs-an-argument diagnostic", err)
 			}
 		})
 	}
@@ -2158,11 +2230,9 @@ func TestCheckUsageErrorsAreExitTwo(t *testing.T) {
 
 func TestCheckSeparatePortAcceptsBareIPv6Destination(t *testing.T) {
 	t.Parallel()
-	source, target, protocol, err := parseCheckArgs([]string{
-		"--src", "alice@example.com",
-		"--dst", "2001:db8::1",
-		"--port", "443",
-	})
+	source, target, protocol, err := resolveCheckTarget(
+		"alice@example.com", "2001:db8::1", true, 443, string(aclpolicy.ProtocolAny),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2196,18 +2266,21 @@ func TestVersionFlag(t *testing.T) {
 
 func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	t.Parallel()
-	var stderr strings.Builder
+	// --help is a wanted invocation, not a usage mistake: cobra prints it and
+	// returns nil (ruling 1 in the cobra-conversion plan), and the text goes to
+	// stdout rather than stderr.
+	var stdout strings.Builder
 	err := run(
 		context.Background(),
 		[]string{"--help"},
 		func(string) string { return "" },
 		http.DefaultClient,
 		"",
+		&stdout,
 		io.Discard,
-		&stderr,
 	)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("error = %v, want flag.ErrHelp", err)
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
 	}
 	for _, want := range []string{
 		"check          Answer one reachability question locally",
@@ -2215,7 +2288,7 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 		"typed edits preserve comments in JSON and HuJSON",
 		"tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
 		"check --src alice@example.com --dst tag:web:443",
-		"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
+		lintSummary,
 		"# static policy hygiene findings",
 		"0  success; check reports reachable",
 		"1  operation or policy assertion failed; check reports not reachable",
@@ -2227,9 +2300,49 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 		"--indeterminate does not weaken check's verdict",
 		"--proto sctp",
 	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("help missing %q:\n%s", want, stderr.String())
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("help missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+// TestLeafCommandsHelpWorks locks in the fix for the defect that motivated
+// requiring "--" (see task-6-brief.md): with DisableFlagParsing set, --help
+// on these three leaves reached RunE as a raw positional and cobra's own
+// ParseFlags never ran, so GetBool("help") always read false and the command
+// printed a one-line usage error instead of help text. Now that pflag parses
+// normally, cobra's built-in help flag intercepts before RunE the same way it
+// does for every other command.
+func TestLeafCommandsHelpWorks(t *testing.T) {
+	t.Parallel()
+	commands := [][]string{
+		{"tag-owner", "add", "--help"},
+		{"host", "set", "--help"},
+		{"posture", "set", "--help"},
+	}
+	for _, command := range commands {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			t.Parallel()
+			var stdout strings.Builder
+			err := run(
+				context.Background(),
+				command,
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				io.Discard,
+			)
+			if err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+			if stdout.Len() < 100 {
+				t.Errorf("stdout = %d bytes, want substantial help text:\n%s", stdout.Len(), stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "--comment") {
+				t.Errorf("help output missing --comment flag:\n%s", stdout.String())
+			}
+		})
 	}
 }
 
@@ -2306,6 +2419,73 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 		func(command schemaCommand) bool { return command.Name == commandPostureRemove },
 	) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureRemove)
+	}
+}
+
+// TestParentCommandsDistinguishBareFromUnknownSubcommand covers all four
+// grouping commands (grant, tag-owner, host, posture) in both the bare-invocation
+// and unknown-subcommand shapes. Without an explicit RunE, cobra treats these
+// parents as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
+// PersistentPreRunE ever run, for *any* leftover args — not just none — which
+// let "tail-acl grant bogus" print help and exit 0 exactly like a bare
+// "tail-acl grant" slip through unnoticed. This is the coverage gap that let
+// that regression land undisclosed; see runParentCommand in commands.go for
+// the fix.
+func TestParentCommandsDistinguishBareFromUnknownSubcommand(t *testing.T) {
+	t.Parallel()
+	nouns := []string{cmdGrant, cmdTagOwner, cmdHost, cmdPosture}
+	for _, noun := range nouns {
+		t.Run(noun+" bare", func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				[]string{noun},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if code := exitCode(err); code != exitOK {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+			}
+			if stdout.Len() == 0 {
+				t.Errorf("stdout is empty, want %s's own help", noun)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+		})
+		t.Run(noun+" unknown subcommand", func(t *testing.T) {
+			t.Parallel()
+			// run() itself never writes an error to stderr — only main() does,
+			// by printing whatever run() returns — so the diagnostic is read
+			// off the returned error here, matching every other usage-error
+			// test in this file (e.g. TestIndeterminateFlagRejectsUnknownMode).
+			// This is verified end-to-end against a built binary separately:
+			// main() places the same text on stderr with stdout empty.
+			var stdout strings.Builder
+			err := run(
+				context.Background(),
+				[]string{noun, "bogus"},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				io.Discard,
+			)
+			if code := exitCode(err); code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			want := fmt.Sprintf("unknown %s command \"bogus\"", noun)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+		})
 	}
 }
 

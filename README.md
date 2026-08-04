@@ -38,6 +38,10 @@ tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
 tail-acl --file acl.json posture remove posture:labCompliant
 
+# An expression beginning with a dash needs a `--` terminator, and `--comment`
+# must precede it:
+tail-acl --file acl.json posture set posture:lab --comment "note" -- "-1 < custom:score"
+
 # Author a comment on the entry the command creates:
 tail-acl --file acl.json grant add --src tag:app --dst tag:db --ip tcp:5432 \
   --comment "Database access for application nodes"

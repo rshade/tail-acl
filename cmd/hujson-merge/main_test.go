@@ -275,6 +275,28 @@ func TestIsACLFilename(t *testing.T) {
 	}
 }
 
+// TestBothDashSpellingsAccepted guards against losing single-dash long-flag
+// support (-schema, -version) when the flag parser moved from stdlib flag to
+// pflag; see policycore/cliflags.Normalize. run returns error, not an exit
+// code, so this checks err == nil rather than the brief's sketched code != 0.
+func TestBothDashSpellingsAccepted(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{{"-schema"}, {"--schema"}, {"-version"}, {"--version"}} {
+		t.Run(args[0], func(t *testing.T) {
+			t.Parallel()
+
+			var stdout, stderr bytes.Buffer
+			if err := run(args, &stdout, &stderr); err != nil {
+				t.Fatalf("run(%q) = %v, want nil (stderr: %s)", args, err, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Errorf("run(%q) wrote nothing to stdout", args)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

@@ -28,8 +28,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	tailscale "tailscale.com/client/tailscale/v2"
 
+	"github.com/rshade/tailscale-utils/policycore/cliflags"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
@@ -102,6 +105,10 @@ const (
 	commandPostureSet    = "posture set"
 	commandPostureRemove = "posture remove"
 
+	// lintSummary is shared by commandCatalog and newLintCommand's Short text
+	// so the two descriptions of "lint" cannot drift.
+	lintSummary = "Statically lint policy hygiene (dead grants, undefined refs, over-broad *)"
+
 	policyFormatHuJSON = "hujson"
 )
 
@@ -123,27 +130,22 @@ type options struct {
 }
 
 // indeterminateOption tracks whether the global flag was explicitly supplied
-// so dispatch can enforce that it belongs to test without rejecting its default
-// value from every other command.
+// so run's PersistentPreRunE can enforce that it belongs to test without
+// rejecting its default value from every other command.
+//
+// Set never rejects a value: pflag calls Set while walking flags that precede
+// a subcommand (cobra's TraverseChildren), and an error returned from that
+// walk bypasses root's FlagErrorFunc wrapping, which would misclassify the
+// exit code. Validating the stored mode in PersistentPreRunE instead keeps
+// every rejection on the usageError path.
 type indeterminateOption struct {
 	mode string
 	set  bool
 }
 
 func (o *indeterminateOption) Set(value string) error {
-	switch value {
-	case indeterminateFail, indeterminateWarn, indeterminateIgnore:
-		o.mode, o.set = value, true
-		return nil
-	default:
-		return fmt.Errorf(
-			"unknown indeterminate policy %q; want %s, %s, or %s",
-			value,
-			indeterminateFail,
-			indeterminateWarn,
-			indeterminateIgnore,
-		)
-	}
+	o.mode, o.set = value, true
+	return nil
 }
 
 func (o *indeterminateOption) String() string {
@@ -152,6 +154,10 @@ func (o *indeterminateOption) String() string {
 	}
 	return o.mode
 }
+
+// Type satisfies pflag.Value. The name appears in --help as the flag's
+// argument placeholder.
+func (o *indeterminateOption) Type() string { return "fail|warn|ignore" }
 
 // result is the versioned envelope every command returns. Human rendering emits
 // Message (and Diff, when present); JSON rendering emits the whole struct.
@@ -291,6 +297,51 @@ func exitCode(err error) int {
 	}
 }
 
+// newRootCommand builds the root command and its six flag-file/credential
+// persistent flags. TraverseChildren lets cobra parse each ancestor's flags as
+// it walks the tree, which is what lets tag-owner add, host set, and posture
+// set disable their own flag parsing (see commands.go) while --file and the
+// other global flags, written before the subcommand, still bind correctly.
+func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
+	root := &cobra.Command{
+		Use:           toolName,
+		Short:         "Compile, validate, plan, and upload the tailnet ACL policy.",
+		Version:       buildinfo.Version(toolName, version),
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		// A leftover positional at the root means the first token was not a
+		// recognized subcommand; NoArgs turns that into the same "unknown
+		// command" diagnostic dispatch() used to return.
+		Args:             cobra.NoArgs,
+		TraverseChildren: true,
+	}
+	root.SetVersionTemplate("{{.Version}}\n")
+
+	flags := root.PersistentFlags()
+	flags.StringVar(&opts.file, "file", "acl.json",
+		"policy file (typed edits preserve comments in JSON and HuJSON)")
+	flags.StringVar(&opts.tailnet, "tailnet", getenv("TAILSCALE_TAILNET"),
+		"tailnet name or ID (default: TAILSCALE_TAILNET)")
+	flags.StringVar(&opts.apiKey, "api-key", "", "Tailscale API access token (default: TAILSCALE_API_KEY)")
+	flags.StringVar(&opts.ifMatch, "if-match", "", "optional ETag required for upload")
+	flags.BoolVar(&opts.strict, "strict", false,
+		"test/check: reject a policy containing an unparseable rule instead of warning")
+	opts.indeterminate.mode = indeterminateWarn
+	flags.Var(&opts.indeterminate, "indeterminate",
+		"test only: indeterminate assertion exit policy: fail|warn|ignore (check always exits 10)")
+
+	// Cobra's own parse failures at the resolved leaf must keep exit 2, so they
+	// are wrapped as the same usageError the hand-written diagnostics use.
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return usageError{err}
+	})
+	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		usage(cmd.OutOrStdout(), cmd.Flags())
+	})
+	root.InitDefaultHelpFlag()
+	return root
+}
+
 func run(
 	ctx context.Context,
 	args []string,
@@ -299,79 +350,95 @@ func run(
 	apiURL string,
 	stdout, stderr io.Writer,
 ) error {
-	root := flag.NewFlagSet(toolName, flag.ContinueOnError)
-	root.SetOutput(stderr)
 	var opts options
-	root.StringVar(
-		&opts.file,
-		"file",
-		"acl.json",
-		"policy file (typed edits preserve comments in JSON and HuJSON)",
-	)
-	root.StringVar(
-		&opts.tailnet,
-		"tailnet",
-		getenv("TAILSCALE_TAILNET"),
-		"tailnet name or ID (default: TAILSCALE_TAILNET)",
-	)
-	root.StringVar(&opts.apiKey, "api-key", "", "Tailscale API access token (default: TAILSCALE_API_KEY)")
-	root.StringVar(&opts.ifMatch, "if-match", "", "optional ETag required for upload")
-	root.BoolVar(
-		&opts.strict,
-		"strict",
-		false,
-		"test/check: reject a policy containing an unparseable rule instead of warning",
-	)
-	opts.indeterminate.mode = indeterminateWarn
-	root.Var(
-		&opts.indeterminate,
-		"indeterminate",
-		"test only: indeterminate assertion exit policy: fail|warn|ignore (check always exits 10)",
-	)
-	format := root.String("format", formatHuman, "output format: human|json")
-	verbose := root.Bool("verbose", false, "log operational detail to stderr")
-	showVersion := root.Bool("version", false, "print version and exit")
-	showSchema := root.Bool("schema", false, "print the machine-readable tool schema (JSON) and exit")
-	root.Usage = func() { usage(stderr, root) }
+	var res *result
+	format := formatHuman
+	verbose := false
+	showSchema := false
 
-	if err := root.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
+	root := newRootCommand(getenv, &opts)
+	root.PersistentFlags().StringVar(&format, "format", formatHuman, "output format: human|json")
+	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "log operational detail to stderr")
+	// Registered but unbound: cobra's Version field intercepts --version before
+	// RunE, so no handler here would ever run. The registration must stay under
+	// this exact name and usage text, which schema.golden.json locks — cobra's
+	// own auto-registered flag would read "version for tail-acl" and break the
+	// golden.
+	root.PersistentFlags().Bool("version", false, "print version and exit")
+	root.PersistentFlags().BoolVar(&showSchema, "schema", false,
+		"print the machine-readable tool schema (JSON) and exit")
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		if showSchema {
+			return printSchema(stdout, cmd.Flags())
 		}
-		return usageError{err}
-	}
-	if *showVersion {
-		_, err := fmt.Fprintln(stdout, buildinfo.Version(toolName, version))
-		return err
-	}
-	if *showSchema {
-		return printSchema(stdout, root)
-	}
-	if opts.apiKey == "" {
-		opts.apiKey = getenv("TAILSCALE_API_KEY")
-	}
-	if *format != formatHuman && *format != formatJSON {
-		return usagef("unknown -format %q; want human or json", *format)
-	}
-
-	logger := newLogger(stderr, *verbose)
-	remaining := root.Args()
-	if len(remaining) == 0 {
-		root.Usage()
+		usage(stderr, cmd.Flags())
 		return usageError{errors.New("a command is required")}
 	}
-	if opts.indeterminate.set && remaining[0] != cmdTest {
-		return usagef("--indeterminate applies only to test; check always preserves its three-state verdict")
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if opts.apiKey == "" {
+			opts.apiKey = getenv("TAILSCALE_API_KEY")
+		}
+		if format != formatHuman && format != formatJSON {
+			return usagef("unknown -format %q; want human or json", format)
+		}
+		return validateIndeterminate(cmd.Name(), opts.indeterminate)
 	}
 
-	emitter := newStreamEmitter(stdout, *format)
-	res, dispatchErr := dispatch(ctx, remaining, opts, httpClient, apiURL, logger, emitter)
+	deps := commandDeps{
+		opts:       &opts,
+		result:     &res,
+		httpClient: httpClient,
+		apiURL:     apiURL,
+		stdout:     stdout,
+		stderr:     stderr,
+		format:     &format,
+		verbose:    &verbose,
+	}
+	addSubcommands(ctx, root, &deps)
+
+	root.SetArgs(cliflags.Normalize(root, args))
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	err := root.Execute()
+	// Cobra returns "unknown command \"x\" for \"tail-acl\"" (or, from a
+	// subcommand's NoArgs validator, "...for \"tail-acl lint\"") as a plain
+	// error; dispatch() used to return the same wording wrapped in usageError,
+	// so the wrap happens here rather than only in main() because tests call
+	// run() directly and check exitCode() on its result.
+	if err != nil && strings.HasPrefix(err.Error(), "unknown command") {
+		err = usageError{err}
+	}
 	if res != nil {
-		if err := render(stdout, *format, res); err != nil {
-			return err
+		if renderErr := render(stdout, format, res); renderErr != nil {
+			return renderErr
 		}
 	}
-	return dispatchErr
+	return err
+}
+
+// validateIndeterminate enforces that --indeterminate, once resolvable as a
+// value, is both a known mode and scoped to test. It runs from
+// PersistentPreRunE — after cobra has already parsed the flag — because
+// indeterminateOption.Set no longer rejects bad values itself: TraverseChildren
+// parses ancestor flags outside root's FlagErrorFunc, so an error raised there
+// would reach the caller unwrapped and be misclassified as exit 1 instead of
+// exit 2.
+func validateIndeterminate(commandName string, opt indeterminateOption) error {
+	if !opt.set {
+		return nil
+	}
+	switch opt.mode {
+	case indeterminateFail, indeterminateWarn, indeterminateIgnore:
+	default:
+		return usagef(
+			"unknown indeterminate policy %q; want %s, %s, or %s",
+			opt.mode, indeterminateFail, indeterminateWarn, indeterminateIgnore,
+		)
+	}
+	if commandName != cmdTest {
+		return usagef("--indeterminate applies only to test; check always preserves its three-state verdict")
+	}
+	return nil
 }
 
 func newLogger(w io.Writer, verbose bool) *slog.Logger {
@@ -380,45 +447,6 @@ func newLogger(w io.Writer, verbose bool) *slog.Logger {
 		level = slog.LevelDebug
 	}
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
-}
-
-func dispatch(
-	ctx context.Context,
-	args []string,
-	opts options,
-	httpClient *http.Client,
-	apiURL string,
-	logger *slog.Logger,
-	emitter *streamEmitter,
-) (*result, error) {
-	command := args[0]
-	logger.DebugContext(ctx, "dispatching command", "command", command, "file", opts.file)
-	switch command {
-	case cmdGrant:
-		return runGrant(opts.file, args[1:])
-	case cmdTagOwner:
-		return runTagOwner(opts.file, args[1:])
-	case cmdHost:
-		return runHost(opts.file, args[1:])
-	case cmdPosture:
-		return runPosture(opts.file, args[1:])
-	case cmdMerge:
-		return runMerge(opts.file, args[1:])
-	case cmdValidate:
-		return runValidate(ctx, opts, httpClient, apiURL, args[1:], logger)
-	case cmdTest:
-		return runTest(ctx, opts, args[1:], logger, emitter)
-	case cmdCheck:
-		return runCheck(ctx, opts, args[1:], logger)
-	case cmdLint:
-		return runLint(ctx, opts, args[1:], logger)
-	case cmdPlan:
-		return runPlan(ctx, opts, httpClient, apiURL, args[1:], logger)
-	case cmdUpload:
-		return runUpload(ctx, opts, httpClient, apiURL, args[1:])
-	default:
-		return nil, usagef("unknown command %q", command)
-	}
 }
 
 func newResult(command, status, message string) *result {
@@ -516,39 +544,37 @@ func (e *streamEmitter) emit(res *result) error {
 	return render(e.w, e.format, res)
 }
 
-func runGrant(path string, args []string) (*result, error) {
-	if len(args) == 0 {
-		return nil, usagef("grant requires add or remove")
+// commentFromFlags validates a --comment/--overwrite-comment pair once the
+// caller has already determined whether --comment was explicitly supplied.
+// commentSet distinguishes an unset flag from --comment "": the empty string
+// asks for a comment, and "// " is an edit nobody requested.
+// --overwrite-comment alone is rejected rather than ignored, because doing
+// nothing quietly would read as "the overwrite happened". Shared by all four
+// authoring commands, each of which discovers commentSet from
+// cmd.Flags().Changed(commentFlagName).
+func commentFromFlags(commentSet bool, text string, overwrite bool) (string, bool, error) {
+	if !commentSet {
+		if overwrite {
+			return "", false, usagef("--%s requires --%s", overwriteFlagName, commentFlagName)
+		}
+		return "", false, nil
 	}
-	switch args[0] {
-	case subAdd:
-		return runGrantAdd(path, args[1:])
-	case subRemove:
-		return runGrantRemove(path, args[1:])
-	default:
-		return nil, usagef("unknown grant command %q", args[0])
+	if err := aclpolicy.ValidateCommentText(text); err != nil {
+		return "", false, usageError{err}
 	}
+	return strings.TrimSpace(text), overwrite, nil
 }
 
-// parseGrantAddArgs returns the grant "grant add" was asked to author, plus the
-// comment to attach to it and whether that comment replaces existing ones.
-func parseGrantAddArgs(args []string) (tailscale.Grant, string, bool, error) {
-	fs := flag.NewFlagSet("tail-acl grant add", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var source, destination, ip, srcPosture stringListFlag
-	fs.Var(&source, "src", "grant source; may be repeated")
-	fs.Var(&destination, "dst", "grant destination; may be repeated")
-	fs.Var(&ip, "ip", "IP protocol and port expression; may be repeated")
-	fs.Var(&srcPosture, "src-posture", "required device posture (posture:NAME); may be repeated")
-	text, overwrite := registerCommentFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return tailscale.Grant{}, "", false, usageError{err}
-	}
-	if len(fs.Args()) != 0 {
-		return tailscale.Grant{}, "", false,
-			usagef("unexpected grant add arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	comment, overwriteComment, err := commentText(fs, text, overwrite)
+// resolveGrantAdd validates grant add's flags and returns the grant to author
+// together with its resolved comment. Split out of runGrantAdd to keep that
+// function's cognitive complexity down; the load/dedupe/patch logic there is
+// substantial enough on its own.
+func resolveGrantAdd(
+	source, destination, ip, srcPosture []string,
+	comment string,
+	commentSet, overwriteComment bool,
+) (tailscale.Grant, string, bool, error) {
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
 		return tailscale.Grant{}, "", false, err
 	}
@@ -558,20 +584,26 @@ func parseGrantAddArgs(args []string) (tailscale.Grant, string, bool, error) {
 		}
 	}
 	if len(source) == 0 || len(destination) == 0 || len(ip) == 0 {
-		return tailscale.Grant{}, "", false,
-			usagef("grant add requires at least one --src, --dst, and --ip")
+		return tailscale.Grant{}, "", false, usagef("grant add requires at least one --src, --dst, and --ip")
 	}
 	grant := tailscale.Grant{
-		Source:      []string(source),
-		Destination: []string(destination),
-		IP:          []string(ip),
-		SrcPosture:  []string(srcPosture),
+		Source:      source,
+		Destination: destination,
+		IP:          ip,
+		SrcPosture:  srcPosture,
 	}
 	return grant, comment, overwriteComment, nil
 }
 
-func runGrantAdd(path string, args []string) (*result, error) {
-	grant, comment, overwriteComment, err := parseGrantAddArgs(args)
+func runGrantAdd(
+	path string,
+	source, destination, ip, srcPosture []string,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	grant, comment, overwriteComment, err := resolveGrantAdd(
+		source, destination, ip, srcPosture, comment, commentSet, overwriteComment,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -648,31 +680,22 @@ func commentExistingGrant(path, comment string, overwrite bool, index int) (*res
 		fmt.Sprintf("added comment to grant %d in %s", index, path), path, index), nil
 }
 
-func runGrantRemove(path string, args []string) (*result, error) {
-	fs := flag.NewFlagSet("tail-acl grant remove", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	index := fs.Int("index", -1, "zero-based grant index")
-	if err := fs.Parse(args); err != nil {
-		return nil, usageError{err}
-	}
-	if len(fs.Args()) != 0 {
-		return nil, usagef("unexpected grant remove arguments: %s", strings.Join(fs.Args(), " "))
-	}
+func runGrantRemove(path string, index int) (*result, error) {
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	if *index < 0 || *index >= len(policy.Grants) {
-		return nil, usagef("grant index %d is out of range; policy has %d grants", *index, len(policy.Grants))
+	if index < 0 || index >= len(policy.Grants) {
+		return nil, usagef("grant index %d is out of range; policy has %d grants", index, len(policy.Grants))
 	}
 	// Remove the element, never the whole "grants" key: dropping the key would
 	// carry its comments out with it, which is the data loss this command
 	// exists to avoid. An empty array reloads as an empty slice.
-	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("grants", strconv.Itoa(*index))); err != nil {
+	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("grants", strconv.Itoa(index))); err != nil {
 		return nil, err
 	}
 	return grantResult(commandGrantRemove, statusOK,
-		fmt.Sprintf("removed grant %d from %s", *index, path), path, *index), nil
+		fmt.Sprintf("removed grant %d from %s", index, path), path, index), nil
 }
 
 func grantResult(command, status, message, path string, index int) *result {
@@ -682,22 +705,19 @@ func grantResult(command, status, message, path string, index int) *result {
 	return res
 }
 
-func runTagOwner(path string, args []string) (*result, error) {
-	fs := flag.NewFlagSet("tail-acl tag-owner add", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	text, overwrite := registerCommentFlags(fs)
-	positional, err := parseInterspersed(fs, args)
-	if err != nil {
-		return nil, err
-	}
-	if len(positional) != 3 || positional[0] != subAdd {
+// runTagOwnerAdd implements "tag-owner add TAG OWNER". args is cobra's
+// already-parsed positional slice (see newTagOwnerAddCommand): pflag has
+// separated --comment/--overwrite-comment from TAG and OWNER, so an owner
+// name beginning with "-" needs a "--" terminator before it.
+func runTagOwnerAdd(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
+	if len(args) != 2 { //nolint:mnd // TAG and OWNER
 		return nil, usagef("usage: tail-acl tag-owner add TAG OWNER")
 	}
-	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
 		return nil, err
 	}
-	tag, owner := positional[1], positional[2]
+	tag, owner := args[0], args[1]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
@@ -749,22 +769,18 @@ func commentExistingOwner(path, comment string, overwrite bool, tag, owner strin
 	return res, nil
 }
 
-func runHost(path string, args []string) (*result, error) {
-	fs := flag.NewFlagSet("tail-acl host set", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	text, overwrite := registerCommentFlags(fs)
-	positional, err := parseInterspersed(fs, args)
-	if err != nil {
-		return nil, err
-	}
-	if len(positional) != 3 || positional[0] != subSet {
+// runHostSet implements "host set NAME ADDRESS". See runTagOwnerAdd for why
+// args arrives already parsed and an ADDRESS beginning with "-" needs a "--"
+// terminator.
+func runHostSet(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
+	if len(args) != 2 { //nolint:mnd // NAME and ADDRESS
 		return nil, usagef("usage: tail-acl host set NAME ADDRESS")
 	}
-	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
 		return nil, err
 	}
-	name, address := positional[1], positional[2]
+	name, address := args[0], args[1]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
@@ -797,40 +813,23 @@ func runHost(path string, args []string) (*result, error) {
 	return res, nil
 }
 
-func runPosture(path string, args []string) (*result, error) {
-	if len(args) == 0 {
-		return nil, usagef("posture requires set or remove")
-	}
-	switch args[0] {
-	case subSet:
-		return runPostureSet(path, args[1:])
-	case subRemove:
-		return runPostureRemove(path, args[1:])
-	default:
-		return nil, usagef("unknown posture command %q", args[0])
-	}
-}
-
-func runPostureSet(path string, args []string) (*result, error) {
-	fs := flag.NewFlagSet("tail-acl posture set", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	text, overwrite := registerCommentFlags(fs)
-	positional, err := parseInterspersed(fs, args)
-	if err != nil {
-		return nil, err
-	}
-	if len(positional) < 2 { //nolint:mnd // NAME and at least one EXPR required
+// runPostureSet implements "posture set NAME EXPR [EXPR ...]". See
+// runTagOwnerAdd for why args arrives already parsed. An EXPR beginning with
+// "-" (e.g. "-1 < custom:score") needs a "--" terminator before it, and
+// --comment must precede the terminator.
+func runPostureSet(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
+	if len(args) < 2 { //nolint:mnd // NAME and at least one EXPR required
 		return nil, usagef("usage: tail-acl posture set NAME EXPR [EXPR ...]")
 	}
-	comment, overwriteComment, err := commentText(fs, text, overwrite)
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := aclpolicy.NormalizePostureName(positional[0])
+	canonical, err := aclpolicy.NormalizePostureName(args[0])
 	if err != nil {
 		return nil, usageError{err}
 	}
-	exprs := positional[1:]
+	exprs := args[1:]
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
@@ -907,37 +906,10 @@ const (
 	overwriteFlagName = "overwrite-comment"
 )
 
-func registerCommentFlags(fs *flag.FlagSet) (*string, *bool) {
-	text := fs.String(commentFlagName, "", "attach TEXT to the authored entry as a leading // comment")
-	overwrite := fs.Bool(overwriteFlagName, false,
+func registerCommentFlags(flags *pflag.FlagSet, text *string, overwrite *bool) {
+	flags.StringVar(text, commentFlagName, "", "attach TEXT to the authored entry as a leading // comment")
+	flags.BoolVar(overwrite, overwriteFlagName, false,
 		"replace the entry's existing comments instead of appending to them")
-	return text, overwrite
-}
-
-// commentText returns the validated comment body and whether it replaces the
-// entry's existing comments.
-//
-// fs.Visit is what distinguishes an unset flag from --comment "": the empty
-// string asks for a comment, and "// " is an edit nobody requested.
-// --overwrite-comment alone is rejected rather than ignored, because doing
-// nothing quietly would read as "the overwrite happened".
-func commentText(fs *flag.FlagSet, text *string, overwrite *bool) (string, bool, error) {
-	var set bool
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == commentFlagName {
-			set = true
-		}
-	})
-	if !set {
-		if *overwrite {
-			return "", false, usagef("--%s requires --%s", overwriteFlagName, commentFlagName)
-		}
-		return "", false, nil
-	}
-	if err := aclpolicy.ValidateCommentText(*text); err != nil {
-		return "", false, usageError{err}
-	}
-	return strings.TrimSpace(*text), *overwrite, nil
 }
 
 // commentPatch builds the operation that authors comment onto a node the same
@@ -974,73 +946,11 @@ func commentOperations(path, comment string, overwrite bool, segments ...string)
 	return []aclpolicy.PatchOperation{commentPatch(comment, overwrite, segments...)}, nil
 }
 
-// parseInterspersed parses registered flags appearing anywhere among positional
-// arguments and returns the positionals in order.
-//
-// Go's flag package stops at the first non-flag argument, but the documented
-// form puts the flag last:
-//
-//	tail-acl --file acl.json host set web 100.64.0.10 --comment "..."
-//
-// so parsing has to resume after each positional. Only registered flags are
-// parsed: posture expressions are opaque strings and may legitimately begin
-// with "-", such as "-1 < custom:score". A bare "--" stops flag recognition so
-// even an expression named like a registered flag can be passed literally.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var positional []string
-	for len(args) > 0 {
-		arg := args[0]
-		if arg == "--" {
-			return append(positional, args[1:]...), nil
-		}
-
-		nameValue := strings.TrimPrefix(arg, "-")
-		nameValue = strings.TrimPrefix(nameValue, "-")
-		name, _, hasValue := strings.Cut(nameValue, "=")
-		registered := fs.Lookup(name)
-		if registered == nil || !strings.HasPrefix(arg, "-") || arg == "-" {
-			positional = append(positional, arg)
-			args = args[1:]
-			continue
-		}
-
-		flagArgs := args[:1]
-		consumed := 1
-		boolFlag, isBoolFlag := registered.Value.(interface{ IsBoolFlag() bool })
-		if !hasValue && (!isBoolFlag || !boolFlag.IsBoolFlag()) {
-			if len(args) < 2 { //nolint:mnd // flag name plus its required value
-				err := fs.Parse(flagArgs)
-				if err == nil {
-					err = fmt.Errorf("flag needs an argument: -%s", name)
-				}
-				return nil, usageError{err}
-			}
-			flagArgs = args[:2]
-			consumed = 2
-		}
-		if err := fs.Parse(flagArgs); err != nil {
-			return nil, usageError{err}
-		}
-		args = args[consumed:]
-	}
-	return positional, nil
-}
-
-func runMerge(path string, args []string) (*result, error) {
-	fs := flag.NewFlagSet("tail-acl merge", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var dirs stringListFlag
-	fs.Var(&dirs, "dir", "directory containing ACL files; may be repeated")
-	if err := fs.Parse(args); err != nil {
-		return nil, usageError{err}
-	}
-	if len(fs.Args()) != 0 {
-		return nil, usagef("unexpected merge arguments: %s", strings.Join(fs.Args(), " "))
-	}
+func runMerge(path string, dirs []string) (*result, error) {
 	if len(dirs) == 0 {
 		return nil, usagef("merge requires at least one --dir")
 	}
-	data, paths, err := aclpolicy.MergeDirectories([]string(dirs), path)
+	data, paths, err := aclpolicy.MergeDirectories(dirs, path)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,12 +969,8 @@ func runValidate(
 	opts options,
 	httpClient *http.Client,
 	apiURL string,
-	args []string,
 	logger *slog.Logger,
 ) (*result, error) {
-	if len(args) != 0 {
-		return nil, usagef("validate does not accept arguments")
-	}
 	client, err := apiClient(opts, httpClient, apiURL)
 	if err != nil {
 		return nil, err
@@ -1119,14 +1025,10 @@ func logValidationWarnings(ctx context.Context, logger *slog.Logger, validation 
 func runTest(
 	ctx context.Context,
 	opts options,
-	args []string,
+	testOpts testOptions,
 	logger *slog.Logger,
 	emitter *streamEmitter,
 ) (*result, error) {
-	testOpts, err := parseTestArgs(args)
-	if err != nil {
-		return nil, err
-	}
 	// The same rule run already applies to --indeterminate outside test: a flag
 	// that cannot mean anything here is a caller mistake, not a no-op. Its only
 	// effect is on the exit code, and watch pins the verdict's exit code to 0.
@@ -1148,47 +1050,6 @@ func runTest(
 type testOptions struct {
 	watch    bool
 	interval time.Duration
-}
-
-func parseTestArgs(args []string) (testOptions, error) {
-	// This check must precede fs.Parse. --indeterminate is a root flag, so it has
-	// to come before the subcommand, but its usage text calls it "test only",
-	// which invites the opposite placement. Parsing first would report it as an
-	// undefined flag and bury the one thing the caller needs to know.
-	if len(args) != 0 && strings.HasPrefix(strings.TrimLeft(args[0], "-"), "indeterminate") {
-		return testOptions{}, usagef(
-			"--indeterminate is a global flag: write it before the test subcommand, as in %s",
-			"tail-acl --indeterminate=fail --file acl.json test",
-		)
-	}
-	fs := flag.NewFlagSet("tail-acl test", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	watch := fs.Bool("watch", false,
-		"re-run the assertions whenever the policy file changes; never exits non-zero for a verdict")
-	interval := fs.Duration("interval", defaultWatchInterval, "polling interval for --watch")
-	if err := fs.Parse(args); err != nil {
-		return testOptions{}, usageError{err}
-	}
-	if fs.NArg() != 0 {
-		return testOptions{}, usagef("test does not accept arguments")
-	}
-	// fs.Visit reports only flags actually supplied, so the default value in the
-	// FlagSet never trips this — plain "test" keeps working.
-	intervalSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "interval" {
-			intervalSet = true
-		}
-	})
-	if intervalSet && !*watch {
-		return testOptions{}, usagef("--interval applies only to --watch; nothing polls without it")
-	}
-	// time.NewTicker panics on a non-positive duration, so this guard is a crash
-	// guard, not a style preference.
-	if *interval <= 0 {
-		return testOptions{}, usagef("--interval must be positive, got %s", *interval)
-	}
-	return testOptions{watch: *watch, interval: *interval}, nil
 }
 
 // watchTests re-runs the assertions whenever the policy file's contents change.
@@ -1390,11 +1251,13 @@ func evaluatePolicyTestBytes(
 	return res, nil
 }
 
-func runCheck(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
-	source, target, protocol, err := parseCheckArgs(args)
-	if err != nil {
-		return nil, err
-	}
+func runCheck(
+	ctx context.Context,
+	opts options,
+	source, target string,
+	protocol aclpolicy.Protocol,
+	logger *slog.Logger,
+) (*result, error) {
 	policy, err := aclpolicy.Load(opts.file)
 	if err != nil {
 		return nil, usagef("could not load policy for check: %v", err)
@@ -1429,43 +1292,34 @@ func runCheck(ctx context.Context, opts options, args []string, logger *slog.Log
 	}
 }
 
-func parseCheckArgs(args []string) (string, string, aclpolicy.Protocol, error) {
-	fs := flag.NewFlagSet("tail-acl check", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	source := fs.String("src", "", "source user, group, tag, host, IP, or CIDR")
-	destination := fs.String("dst", "", "destination selector, optionally with :port")
-	port := fs.Int("port", -1, "destination port (alternative to including it in --dst)")
-	protocol := fs.String("proto", string(aclpolicy.ProtocolAny), "IP protocol to ask about: tcp|udp|sctp|any")
-	if err := fs.Parse(args); err != nil {
-		return "", "", "", usageError{err}
-	}
-	if len(fs.Args()) != 0 {
-		return "", "", "", usagef("unexpected check arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	sourceValue := strings.TrimSpace(*source)
-	destinationValue := strings.TrimSpace(*destination)
+// resolveCheckTarget validates check's flags and folds an optional --port into
+// --dst, producing the source/target/protocol EvaluateReachability expects.
+func resolveCheckTarget(
+	source, destination string,
+	portSet bool,
+	port int,
+	protocolRaw string,
+) (string, string, aclpolicy.Protocol, error) {
+	sourceValue := strings.TrimSpace(source)
+	destinationValue := strings.TrimSpace(destination)
 	if sourceValue == "" || destinationValue == "" {
 		return "", "", "", usagef("check requires --src and --dst")
 	}
-	protocolValue := aclpolicy.Protocol(strings.ToLower(strings.TrimSpace(*protocol)))
+	protocolValue := aclpolicy.Protocol(strings.ToLower(strings.TrimSpace(protocolRaw)))
 	switch protocolValue {
 	case aclpolicy.ProtocolAny, aclpolicy.ProtocolTCP, aclpolicy.ProtocolUDP, aclpolicy.ProtocolSCTP:
 	default:
 		return "", "", "", usagef(
 			"unknown --proto %q; want %s, %s, %s, or %s",
-			*protocol,
+			protocolRaw,
 			aclpolicy.ProtocolTCP,
 			aclpolicy.ProtocolUDP,
 			aclpolicy.ProtocolSCTP,
 			aclpolicy.ProtocolAny,
 		)
 	}
-	portSet := false
-	fs.Visit(func(f *flag.Flag) {
-		portSet = portSet || f.Name == "port"
-	})
-	if portSet && (*port < 0 || *port > 65535) {
-		return "", "", "", usagef("--port %d is out of range; want 0-65535", *port)
+	if portSet && (port < 0 || port > 65535) {
+		return "", "", "", usagef("--port %d is out of range; want 0-65535", port)
 	}
 
 	target := destinationValue
@@ -1476,7 +1330,7 @@ func parseCheckArgs(args []string) (string, string, aclpolicy.Protocol, error) {
 		}
 		// Brackets make selectors containing colons (tags and IPv6 addresses)
 		// unambiguous to the shared host:port parser.
-		target = fmt.Sprintf("[%s]:%d", normalizedDestination, *port)
+		target = fmt.Sprintf("[%s]:%d", normalizedDestination, port)
 	}
 	return sourceValue, target, protocolValue, nil
 }
@@ -1568,11 +1422,13 @@ func newCheckResult(path string, decision aclpolicy.ReachabilityResult) *result 
 	return res
 }
 
-func runLint(ctx context.Context, opts options, args []string, logger *slog.Logger) (*result, error) {
-	lintOpts, threshold, err := parseLintArgs(args)
-	if err != nil {
-		return nil, err
-	}
+func runLint(
+	ctx context.Context,
+	opts options,
+	lintOpts aclpolicy.LintOptions,
+	threshold aclpolicy.LintSeverity,
+	logger *slog.Logger,
+) (*result, error) {
 	policy, err := aclpolicy.Load(opts.file)
 	if err != nil {
 		return nil, usagef("could not load policy for lint: %v", err)
@@ -1596,26 +1452,15 @@ func runLint(ctx context.Context, opts options, args []string, logger *slog.Logg
 	return res, nil
 }
 
-func parseLintArgs(args []string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
-	fs := flag.NewFlagSet("tail-acl lint", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	severity := fs.String("severity", string(aclpolicy.LintWarn),
-		"minimum finding severity that sets a non-zero exit: info|warn|error")
-	wildcard := fs.String("wildcard", string(aclpolicy.WildcardAnyToAny),
-		"over-broad wildcard policy: any-to-any|any|off")
-	if err := fs.Parse(args); err != nil {
-		return aclpolicy.LintOptions{}, "", usageError{err}
-	}
-	if len(fs.Args()) != 0 {
-		return aclpolicy.LintOptions{}, "", usagef("unexpected lint arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	threshold, ok := aclpolicy.ParseLintSeverity(*severity)
+// resolveLintOptions validates lint's --severity/--wildcard flags.
+func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
+	threshold, ok := aclpolicy.ParseLintSeverity(severityRaw)
 	if !ok {
-		return aclpolicy.LintOptions{}, "", usagef("unknown -severity %q; want info, warn, or error", *severity)
+		return aclpolicy.LintOptions{}, "", usagef("unknown -severity %q; want info, warn, or error", severityRaw)
 	}
-	wildcardPolicy, ok := aclpolicy.ParseWildcardPolicy(*wildcard)
+	wildcardPolicy, ok := aclpolicy.ParseWildcardPolicy(wildcardRaw)
 	if !ok {
-		return aclpolicy.LintOptions{}, "", usagef("unknown -wildcard %q; want any-to-any, any, or off", *wildcard)
+		return aclpolicy.LintOptions{}, "", usagef("unknown -wildcard %q; want any-to-any, any, or off", wildcardRaw)
 	}
 	return aclpolicy.LintOptions{Wildcard: wildcardPolicy}, threshold, nil
 }
@@ -1643,12 +1488,8 @@ func runPlan(
 	opts options,
 	httpClient *http.Client,
 	apiURL string,
-	args []string,
 	logger *slog.Logger,
 ) (*result, error) {
-	if len(args) != 0 {
-		return nil, usagef("plan does not accept arguments")
-	}
 	client, err := apiClient(opts, httpClient, apiURL)
 	if err != nil {
 		return nil, err
@@ -1700,11 +1541,7 @@ func runUpload(
 	opts options,
 	httpClient *http.Client,
 	apiURL string,
-	args []string,
 ) (*result, error) {
-	if len(args) != 0 {
-		return nil, usagef("upload does not accept arguments")
-	}
 	client, err := apiClient(opts, httpClient, apiURL)
 	if err != nil {
 		return nil, err
@@ -1787,7 +1624,7 @@ func commandCatalog() []schemaCommand {
 		},
 		{
 			cmdLint,
-			"Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
+			lintSummary,
 			"lint [-severity info|warn|error] [-wildcard any-to-any|any|off]",
 		},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
@@ -1798,9 +1635,9 @@ func commandCatalog() []schemaCommand {
 // printSchema emits a machine-readable description of the tool — how to invoke
 // it (global flags), what it does (the command catalog), and its exit-code
 // contract — so an agent can discover and drive it the way a human reads --help.
-func printSchema(w io.Writer, fs *flag.FlagSet) error {
+func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 	var flags []schemaFlag
-	fs.VisitAll(func(f *flag.Flag) {
+	fs.VisitAll(func(f *pflag.Flag) {
 		flags = append(flags, schemaFlag{Name: f.Name, Usage: f.Usage, Default: f.DefValue})
 	})
 	doc := struct {
@@ -1850,7 +1687,7 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 	return enc.Encode(doc)
 }
 
-func usage(w io.Writer, fs *flag.FlagSet) {
+func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "tail-acl — edit, merge, validate, test, check, lint, plan, and upload a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
@@ -1861,6 +1698,9 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "\nGlobal flags:")
+	// PrintDefaults writes to the FlagSet's own configured output (stderr by
+	// default), not to w, so point it at w explicitly before calling it.
+	fs.SetOutput(w)
 	fs.PrintDefaults()
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
@@ -1955,3 +1795,7 @@ func (f *stringListFlag) Set(value string) error {
 func (f *stringListFlag) String() string {
 	return strings.Join(*f, ",")
 }
+
+// Type satisfies pflag.Value. The name appears in --help as the flag's
+// argument placeholder.
+func (f *stringListFlag) Type() string { return "stringList" }

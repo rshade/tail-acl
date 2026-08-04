@@ -21,12 +21,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+
+	"github.com/rshade/tailscale-utils/policycore/cliflags"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
 )
@@ -34,82 +37,111 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".
 var version = "dev"
 
+type options struct {
+	base       string
+	add        string
+	dirs       stringListFlag
+	out        string
+	showSchema bool
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return
-		}
 		fmt.Fprintln(os.Stderr, "hujson-merge:", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("hujson-merge", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	base := fs.String("base", "", "base HuJSON policy file (merged into)")
-	add := fs.String("add", "", "HuJSON snippet to merge in")
-	var dirs stringListFlag
-	fs.Var(&dirs, "dir", "directory containing ACL files; may be repeated")
-	out := fs.String("out", "", "output path; defaults to --base, or acl.json with --dir; '-' is stdout")
-	showVersion := fs.Bool("version", false, "print version and exit")
-	showSchema := fs.Bool("schema", false, "print the machine-readable tool schema (JSON) and exit")
-	fs.Usage = func() {
-		_, _ = fmt.Fprintln(stderr, "usage:")
-		_, _ = fmt.Fprintln(stderr, "  hujson-merge --base FILE --add FILE [--out FILE|-]")
-		_, _ = fmt.Fprintln(stderr, "  hujson-merge --dir DIR [--dir DIR ...] [--out FILE|-]")
-		fs.PrintDefaults()
+	opts := &options{}
+	root := newRootCommand(opts)
+	root.RunE = func(cmd *cobra.Command, positional []string) error {
+		return runMerge(cmd, positional, stdout, stderr, opts)
 	}
-	if err := fs.Parse(args); err != nil {
-		return err
+	root.SetArgs(cliflags.Normalize(root, args))
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	return root.Execute()
+}
+
+func newRootCommand(opts *options) *cobra.Command {
+	root := &cobra.Command{
+		Use:     "hujson-merge",
+		Short:   "Deep-merge HuJSON policy files.",
+		Version: buildinfo.Version("hujson-merge", version),
+		// Diagnostics and usage are written explicitly; cobra stays silent.
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		// Positional arguments are rejected in the body to keep the
+		// diagnostic wording stable now that cobra's completion command
+		// makes this a parent command.
+		Args: cobra.ArbitraryArgs,
 	}
-	if *showVersion {
-		_, err := fmt.Fprintln(stdout, buildinfo.Version("hujson-merge", version))
-		return err
-	}
-	if *showSchema {
-		return printSchema(stdout, fs)
+	root.SetVersionTemplate("{{.Version}}\n")
+
+	flags := root.Flags()
+	flags.StringVar(&opts.base, "base", "", "base HuJSON policy file (merged into)")
+	flags.StringVar(&opts.add, "add", "", "HuJSON snippet to merge in")
+	flags.Var(&opts.dirs, "dir", "directory containing ACL files; may be repeated")
+	flags.StringVar(&opts.out, "out", "", "output path; defaults to --base, or acl.json with --dir; '-' is stdout")
+	// Registered but unbound: cobra's own Version-triggered handling reads this
+	// flag and short-circuits before RunE ever runs, so no field here observes
+	// it. Registering it under this exact name and usage string is still
+	// required — it is what makes InitDefaultVersionFlag skip adding its own
+	// "version for hujson-merge" flag.
+	flags.Bool("version", false, "print version and exit")
+	flags.BoolVar(&opts.showSchema, "schema", false, "print the machine-readable tool schema (JSON) and exit")
+	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		usage(cmd.OutOrStdout(), cmd.Flags())
+	})
+	root.InitDefaultHelpFlag()
+	return root
+}
+
+func runMerge(cmd *cobra.Command, positional []string, stdout, stderr io.Writer, opts *options) error {
+	if opts.showSchema {
+		return printSchema(stdout, cmd.Flags())
 	}
 
-	if len(dirs) != 0 {
-		if *base != "" || *add != "" {
+	if len(opts.dirs) != 0 {
+		if opts.base != "" || opts.add != "" {
 			return errors.New("--dir cannot be combined with --base or --add")
 		}
-		if len(fs.Args()) != 0 {
+		if len(positional) != 0 {
 			return fmt.Errorf(
 				"unexpected positional arguments: %s; use --dir for each directory",
-				strings.Join(fs.Args(), " "),
+				strings.Join(positional, " "),
 			)
 		}
-		dst := *out
+		dst := opts.out
 		if dst == "" {
 			dst = "acl.json"
 		}
-		return mergeDirectories([]string(dirs), dst, stdout, stderr)
+		return mergeDirectories([]string(opts.dirs), dst, stdout, stderr)
 	}
 
-	if len(fs.Args()) != 0 {
-		return fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
+	if len(positional) != 0 {
+		return fmt.Errorf("unexpected positional arguments: %s", strings.Join(positional, " "))
 	}
-	if *base == "" || *add == "" {
-		fs.Usage()
+	if opts.base == "" || opts.add == "" {
+		usage(stderr, cmd.Flags())
 		return errors.New("--base and --add are required unless --dir is used")
 	}
 
-	data, err := aclpolicy.MergePair(*base, *add)
+	data, err := aclpolicy.MergePair(opts.base, opts.add)
 	if err != nil {
 		return err
 	}
 
-	dst := *out
+	dst := opts.out
 	if dst == "" {
-		dst = *base
+		dst = opts.base
 	}
 	if err = writeOutput(dst, data, stdout); err != nil {
 		return err
 	}
 	if dst != "-" {
-		if _, err = fmt.Fprintf(stderr, "hujson-merge: merged %s into %s\n", *add, dst); err != nil {
+		if _, err = fmt.Fprintf(stderr, "hujson-merge: merged %s into %s\n", opts.add, dst); err != nil {
 			return err
 		}
 	}
@@ -129,6 +161,10 @@ func (f *stringListFlag) Set(value string) error {
 func (f *stringListFlag) String() string {
 	return strings.Join(*f, ",")
 }
+
+// Type satisfies pflag.Value. The name appears in --help as the flag's
+// argument placeholder.
+func (f *stringListFlag) Type() string { return "stringList" }
 
 func mergeDirectories(dirs []string, dst string, stdout, stderr io.Writer) error {
 	data, paths, err := aclpolicy.MergeDirectories(dirs, dst)
@@ -162,9 +198,9 @@ type schemaFlag struct {
 
 // printSchema emits a machine-readable description of the tool so an agent can
 // discover and drive it the way a human reads --help.
-func printSchema(w io.Writer, fs *flag.FlagSet) error {
+func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 	var flags []schemaFlag
-	fs.VisitAll(func(f *flag.Flag) {
+	fs.VisitAll(func(f *pflag.Flag) {
 		flags = append(flags, schemaFlag{Name: f.Name, Usage: f.Usage, Default: f.DefValue})
 	})
 	doc := struct {
@@ -181,4 +217,14 @@ func printSchema(w io.Writer, fs *flag.FlagSet) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+func usage(w io.Writer, fs *pflag.FlagSet) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  hujson-merge --base FILE --add FILE [--out FILE|-]")
+	fmt.Fprintln(w, "  hujson-merge --dir DIR [--dir DIR ...] [--out FILE|-]")
+	// PrintDefaults writes to the FlagSet's own configured output (stderr by
+	// default), not to w, so point it at w explicitly before calling it.
+	fs.SetOutput(w)
+	fs.PrintDefaults()
 }

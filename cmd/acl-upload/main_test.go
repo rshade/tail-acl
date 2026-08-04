@@ -157,6 +157,12 @@ func TestRunRequiresCredentials(t *testing.T) {
 	}
 }
 
+// --help is a requested result under cobra and succeeds (exit 0); --not-a-flag
+// is a genuine invocation error. Before the cobra conversion, stdlib flag
+// returned [flag.ErrHelp] (non-nil) for --help too, so both cases used to
+// share one "unexpectedly succeeded" assertion; that no longer holds for
+// --help, so the two are now distinguished by wantErr. The secret-leak
+// assertion is unchanged for both.
 func TestFlagErrorsDoNotPrintAPIKeyFromEnvironment(t *testing.T) {
 	t.Parallel()
 	const secret = "tskey-api-SECRETLEAKCANARY123"
@@ -166,14 +172,44 @@ func TestFlagErrorsDoNotPrintAPIKeyFromEnvironment(t *testing.T) {
 		}
 		return ""
 	}
-	for _, args := range [][]string{{"--help"}, {"--not-a-flag"}} {
+	tests := []struct {
+		args    []string
+		wantErr bool
+	}{
+		{[]string{"--help"}, false},
+		{[]string{"--not-a-flag"}, true},
+	}
+	for _, tt := range tests {
 		var stderr strings.Builder
-		err := run(context.Background(), args, getenv, http.DefaultClient, defaultAPIURL, io.Discard, &stderr)
-		if err == nil {
-			t.Errorf("run(%q) unexpectedly succeeded", args)
+		err := run(context.Background(), tt.args, getenv, http.DefaultClient, defaultAPIURL, io.Discard, &stderr)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("run(%q) error = %v, wantErr %v", tt.args, err, tt.wantErr)
 		}
 		if strings.Contains(stderr.String(), secret) {
-			t.Errorf("run(%q) exposed API key in stderr: %s", args, stderr.String())
+			t.Errorf("run(%q) exposed API key in stderr: %s", tt.args, stderr.String())
 		}
+	}
+}
+
+// TestBothDashSpellingsAccepted guards against losing single-dash long-flag
+// support (-schema, -version) when the flag parser moved from stdlib flag to
+// pflag; see policycore/cliflags.Normalize.
+func TestBothDashSpellingsAccepted(t *testing.T) {
+	t.Parallel()
+	getenv := func(string) string { return "" }
+
+	for _, args := range [][]string{{"-schema"}, {"--schema"}, {"-version"}, {"--version"}} {
+		t.Run(args[0], func(t *testing.T) {
+			t.Parallel()
+
+			var stdout, stderr strings.Builder
+			err := run(context.Background(), args, getenv, http.DefaultClient, defaultAPIURL, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("run(%q) = %v, want nil (stderr: %s)", args, err, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Errorf("run(%q) wrote nothing to stdout", args)
+			}
+		})
 	}
 }
