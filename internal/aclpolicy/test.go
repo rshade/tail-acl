@@ -88,6 +88,14 @@ type TestOptions struct {
 	// Strict rejects a policy containing any rule element the evaluator cannot
 	// parse, rather than reporting verdicts computed while ignoring it.
 	Strict bool
+	// Roster maps a lowercased login to its tailnet role, resolving the role
+	// autogroups the policy file alone cannot decide. Build it with
+	// policycore.ParseRoster, which owns the lowercasing this lookup requires.
+	//
+	// A non-nil Roster asserts the roster is complete and authoritative; see
+	// ReachabilityOptions.Roster for why this is one nilable map rather than a
+	// map beside a HaveRoles bool.
+	Roster map[string]tailscale.UserRole
 }
 
 // TestReport is the pure, deterministic result of evaluating policy.Tests.
@@ -105,7 +113,11 @@ type TestReport struct {
 // Skipped is therefore policy-scoped; an indeterminate assertion is separately
 // path-scoped and is reported only when its evaluation reaches such a defect.
 func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) {
-	matcher := policycore.Matcher{Policy: policy}
+	matcher := policycore.Matcher{
+		Policy:    policy,
+		Roles:     opts.Roster,
+		HaveRoles: opts.Roster != nil,
+	}
 	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return TestReport{}, fmt.Errorf("%s (%d unparseable rule(s) in strict mode)", skipped[0], len(skipped))
@@ -547,8 +559,8 @@ func grantAllows(
 		)}
 	}
 	gate := firstGate(
-		selectorGate("source", sourceMatched, sourceGate),
-		selectorGate("destination", destinationMatched, destinationGate),
+		selectorGate("source", sourceMatched, sourceGate, source),
+		selectorGate("destination", destinationMatched, destinationGate, destination.host),
 		postureGate(grant.SrcPosture),
 		viaGate(grant.Via),
 	)
@@ -617,8 +629,8 @@ func aclAllows(
 		return ruleOutcome{decision: "destination or port did not match"}
 	}
 	gate := firstGate(
-		selectorGate("source", sourceMatched, sourceGate),
-		selectorGate("destination", destinationMatched, destinationGate),
+		selectorGate("source", sourceMatched, sourceGate, source),
+		selectorGate("destination", destinationMatched, destinationGate, destination.host),
 		protocolGate,
 		postureGate(entry.SourcePosture),
 		// Legacy ACLEntry has no Via field, so there is no viaGate counterpart
@@ -654,9 +666,38 @@ func firstGate(gates ...string) string {
 	return ""
 }
 
-func selectorGate(field string, matched bool, selector string) string {
+// selectorGate renders why an unresolved selector left the verdict open, and
+// what — if anything — would settle it.
+//
+// A role autogroup has two distinct causes and they need opposite advice, so
+// they are told apart rather than sharing one sentence. Which cause applies
+// follows from settlesRole: a tag settles a role autogroup outright and so
+// never reaches this function, a user query is unresolved only while no roster
+// was read, and a bare device address is unresolved whether or not one was.
+// LooksLikeUser therefore separates them completely, and the roster hint is
+// unreachable once a roster has been supplied — it cannot go stale or lie, so
+// no HaveRoles parameter is needed to keep it honest.
+//
+// Naming a CLI flag from this package is deliberate: aclpolicy is internal to
+// tail-acl, not a shared library, so the flag is always the right remedy here.
+// policycore, which tailnet-audit also imports, stays free of CLI vocabulary.
+func selectorGate(field string, matched bool, selector, query string) string {
 	if matched || selector == "" {
 		return ""
+	}
+	if policycore.IsRoleAutogroup(selector) {
+		if policycore.LooksLikeUser(query) {
+			return fmt.Sprintf(
+				"%s selector %q cannot be resolved from the policy file; "+
+					"supply --roster PATH to resolve role autogroups",
+				field, selector,
+			)
+		}
+		return fmt.Sprintf(
+			"%s selector %q cannot be resolved for device address %q; a roster maps "+
+				"logins to roles and cannot identify a device's owner",
+			field, selector, query,
+		)
 	}
 	return fmt.Sprintf("%s selector %q cannot be resolved from the policy file", field, selector)
 }

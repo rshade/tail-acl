@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/pflag"
 	tailscale "tailscale.com/client/tailscale/v2"
 
+	"github.com/rshade/tailscale-utils/policycore"
 	"github.com/rshade/tailscale-utils/policycore/cliflags"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
@@ -127,6 +128,7 @@ type options struct {
 	apiKey        string
 	ifMatch       string
 	strict        bool
+	roster        string
 	indeterminate indeterminateOption
 }
 
@@ -327,6 +329,8 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	flags.StringVar(&opts.ifMatch, "if-match", "", "optional ETag required for upload")
 	flags.BoolVar(&opts.strict, "strict", false,
 		"test/check: reject a policy containing an unparseable rule instead of warning")
+	flags.StringVar(&opts.roster, "roster", "",
+		"test/check: PATH to a JSON login-to-role roster, asserting it is complete and authoritative")
 	opts.indeterminate.mode = indeterminateWarn
 	flags.Var(&opts.indeterminate, "indeterminate",
 		"test only: indeterminate assertion exit policy: fail|warn|ignore (check always exits 10)")
@@ -381,6 +385,11 @@ func run(
 		}
 		if format != formatHuman && format != formatJSON {
 			return usagef("unknown -format %q; want human or json", format)
+		}
+		if err := validateRoster(
+			cmd.Name(), opts.roster, root.PersistentFlags().Changed("roster"),
+		); err != nil {
+			return err
 		}
 		return validateIndeterminate(cmd.Name(), opts.indeterminate)
 	}
@@ -440,6 +449,54 @@ func validateIndeterminate(commandName string, opt indeterminateOption) error {
 		return usagef("--indeterminate applies only to test; check always preserves its three-state verdict")
 	}
 	return nil
+}
+
+// validateRoster rejects --roster on every command that cannot consume it.
+// A dropped roster would leave the operator believing role autogroups were
+// resolved when they were not, so this is loud rather than a silent no-op.
+//
+// The test is an allowlist, never a denylist of the other commands: cmd.Name()
+// reports the leaf name, so "tail-acl grant add" arrives here as "add" and
+// "tail-acl posture set" as "set". A denylist naming the parents would let
+// --roster through on every subcommand.
+func validateRoster(commandName, path string, supplied bool) error {
+	if !supplied {
+		return nil
+	}
+	if commandName != cmdTest && commandName != cmdCheck {
+		return usagef("--roster applies only to test and check; " +
+			"no other command resolves role autogroups")
+	}
+	// An explicitly supplied but empty path is rejected here so the two halves
+	// of "supplied" cannot disagree. Scope is decided by Changed(), while the
+	// load below triggers on a non-empty path; without this guard `--roster ""`
+	// would count as supplied for the scope check and as absent for the load,
+	// degrading silently to a roster-blind run. That is exactly the "the
+	// operator believes role autogroups resolved when they did not" confusion
+	// this flag exists to remove, and `--roster "$UNSET_VAR"` in a CI script
+	// reaches it without anyone writing an empty string on purpose.
+	if strings.TrimSpace(path) == "" {
+		return usagef("--roster requires a path, but was supplied with an empty value")
+	}
+	return nil
+}
+
+// loadRoster reads and parses the roster file. Parsing lives in policycore so
+// the lowercasing matches the lookup Matcher.roleMatches performs; this half is
+// only the I/O, keeping the classifier a pure function of its inputs.
+//
+// Every failure is fatal. Degrading to a roster-blind run would answer with
+// confidence built on a file that was never read.
+func loadRoster(path string) (map[string]tailscale.UserRole, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, usagef("could not read --roster %s: %v", path, err)
+	}
+	roster, err := policycore.ParseRoster(raw)
+	if err != nil {
+		return nil, usagef("could not load --roster %s: %v", path, err)
+	}
+	return roster, nil
 }
 
 func newLogger(w io.Writer, verbose bool) *slog.Logger {
@@ -1175,7 +1232,17 @@ func evaluatePolicyTestBytes(
 	if err != nil {
 		return nil, usagef("could not load policy tests: %v", err)
 	}
-	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{Strict: opts.strict})
+	var roster map[string]tailscale.UserRole
+	if opts.roster != "" {
+		roster, err = loadRoster(opts.roster)
+		if err != nil {
+			return nil, err
+		}
+	}
+	report, err := aclpolicy.EvaluateTests(
+		&policy.ACL,
+		aclpolicy.TestOptions{Strict: opts.strict, Roster: roster},
+	)
 	if err != nil {
 		return nil, usagef("could not evaluate policy tests: %v", err)
 	}
@@ -1263,11 +1330,18 @@ func runCheck(
 	if err != nil {
 		return nil, usagef("could not load policy for check: %v", err)
 	}
+	var roster map[string]tailscale.UserRole
+	if opts.roster != "" {
+		roster, err = loadRoster(opts.roster)
+		if err != nil {
+			return nil, err
+		}
+	}
 	decision, err := aclpolicy.EvaluateReachability(
 		&policy.ACL,
 		source,
 		target,
-		aclpolicy.ReachabilityOptions{Strict: opts.strict, Protocol: protocol},
+		aclpolicy.ReachabilityOptions{Strict: opts.strict, Protocol: protocol, Roster: roster},
 	)
 	if err != nil {
 		return nil, usagef("could not evaluate reachability: %v", err)
@@ -1747,6 +1821,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	// default), not to w, so point it at w explicitly before calling it.
 	fs.SetOutput(w)
 	fs.PrintDefaults()
+	fmt.Fprint(w, usageRosterNote)
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
 	fmt.Fprintln(w, "  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved")
@@ -1771,6 +1846,19 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
 	fmt.Fprint(w, usageExitCodes)
 }
+
+// usageRosterNote elaborates --roster beyond its one-line flag summary: the
+// difference between "unknown" and "does not hold that role" is exactly what
+// supplying the file asserts, which a single usage line cannot carry.
+const usageRosterNote = `
+  --roster PATH   test/check only. A JSON roster mapping login to tailnet role,
+                  either {"login": "role"} or the users endpoint's
+                  {"users":[{"loginName":...,"role":...}]}. Supplying it asserts
+                  the roster is COMPLETE and AUTHORITATIVE: a login it does not
+                  list is treated as definitely not holding any role. Without
+                  it, role autogroups cannot be resolved and exit 10 is
+                  returned.
+`
 
 // usageExitCodes is one block rather than a run of Fprintln calls so the help
 // text reads as the paragraph it is. Keep it ASCII: stdout stays parse-clean

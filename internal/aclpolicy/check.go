@@ -87,6 +87,18 @@ type ReachabilityOptions struct {
 	// Protocol narrows the question to one IP protocol. The zero value asks
 	// about TCP or UDP, matching native policy tests.
 	Protocol Protocol
+	// Roster maps a lowercased login to its tailnet role, resolving the role
+	// autogroups the policy file alone cannot decide. Build it with
+	// policycore.ParseRoster, which owns the lowercasing this lookup requires.
+	//
+	// A non-nil Roster asserts the roster is complete and authoritative, so a
+	// login it does not list is a definite non-match. An empty-but-non-nil map
+	// therefore means "the tailnet was read and nobody holds a role", which is
+	// a real answer; nil means no roster was supplied. That is why this is one
+	// nilable map rather than a map beside a HaveRoles bool: a caller cannot
+	// set the roster and forget the flag, because there is no separate flag to
+	// forget.
+	Roster map[string]tailscale.UserRole
 }
 
 // ReachabilityResult is the pure, deterministic answer to one network access
@@ -138,7 +150,11 @@ func EvaluateReachability(
 		)
 	}
 
-	matcher := policycore.Matcher{Policy: policy}
+	matcher := policycore.Matcher{
+		Policy:    policy,
+		Roles:     opts.Roster,
+		HaveRoles: opts.Roster != nil,
+	}
 	skipped := scanRules(matcher)
 	if opts.Strict && len(skipped) != 0 {
 		return ReachabilityResult{}, fmt.Errorf(

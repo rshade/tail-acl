@@ -2587,6 +2587,33 @@ func TestValidateAndUploadUseTailscaleClient(t *testing.T) {
 	}
 }
 
+// The overwrite guard must fire before the client is built, so this aims at an
+// unreachable API: a regression that moved the check below the fetch would still
+// exit exitUsage on the network error. The message assertion is what pins it.
+func TestRunPullRefusesToOverwriteWithoutForce(t *testing.T) {
+	t.Parallel()
+	const existing = "// authored locally\n{\n\t\"grants\": [],\n}\n"
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, existing)
+
+	_, err := runPull(context.Background(), options{
+		file: path, tailnet: "example.com", apiKey: "token",
+	}, false, http.DefaultClient, "https://api.example.invalid")
+	if exitCode(err) != exitUsage {
+		t.Fatalf("runPull error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %q, want it to refuse the overwrite and name --force", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != existing {
+		t.Errorf("policy file = %q, want it unchanged as %q", got, existing)
+	}
+}
+
 func TestRunPullUnreachableLeavesNoFile(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

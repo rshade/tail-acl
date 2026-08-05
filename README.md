@@ -124,6 +124,8 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 `--file` (policy path), `--tailnet` / `--api-key` (default to `TAILSCALE_TAILNET` /
 `TAILSCALE_API_KEY`), `--if-match` (ETag for `upload`), `-strict` (make local
 `test`/`check` evaluation reject any unparseable rule),
+`--roster PATH` (resolve role autogroups for `test`/`check`; see
+[Resolving role autogroups](#resolving-role-autogroups)),
 `--indeterminate fail|warn|ignore` (test exit policy, default `warn`),
 `-format human|json`, `-verbose`, `--version`, `-schema`.
 `TAILSCALE_API_URL` overrides the API base URL (used by tests).
@@ -151,6 +153,54 @@ not merge a fragment into the live policy. Always plan a complete policy first.
   might have been clean, but nothing available could prove it was. This is
   deliberately not a denial: see
   [the safety boundary](#the-safety-boundary) below.
+
+### Resolving role autogroups
+
+`autogroup:admin`, `autogroup:owner`, `autogroup:auditor`, and the `*-admin`
+family name a user's **tailnet role**, which the policy file does not record.
+Without that fact `test` and `check` cannot settle any assertion those selectors
+decide, and report exit `10` rather than guessing.
+
+`--roster PATH` supplies it from a file, so evaluation stays offline and
+deterministic. Two shapes are accepted. The users endpoint's response works
+unmodified, so no transformation step is needed:
+
+```bash
+curl -H "Authorization: Bearer $TAILSCALE_API_KEY" \
+  "https://api.tailscale.com/api/v2/tailnet/$TAILSCALE_TAILNET/users" > roster.json
+tail-acl --roster roster.json check --src alice@example.com --dst tag:audit:8443
+```
+
+A hand-authored map is equivalent, and easier for a small tailnet:
+
+```json
+{
+  "alice@example.com": "admin",
+  "joe@example.com": "member"
+}
+```
+
+Roles are the seven Tailscale roles: `owner`, `member`, `admin`, `it-admin`,
+`network-admin`, `billing-admin`, `auditor`. Logins match case-insensitively.
+An unreadable file, malformed JSON, an unrecognised role, a duplicate login, or
+an empty login name is a fatal error — never a quiet fall back to evaluating
+without the roster.
+
+**Supplying the file asserts that it is complete and authoritative.** A login the
+roster does not list is treated as definitely holding no role, not as unknown.
+That is what turns exit `10` into a verdict, and it is why an empty roster
+(`{}`) is meaningful: it says the tailnet was read and nobody holds a role, which
+is a real answer rather than a missing one. Supply a roster only when it covers
+every user; a partial or filtered read would produce confident wrong denials.
+
+Two things a roster cannot do. It maps logins to roles, so it says nothing about
+which user owns a device: a bare address or CIDR `--src` against a role autogroup
+still reports exit `10`, and says why. And a role autogroup nested inside a
+`group:` is not yet resolved through it.
+
+The file lists login names. Treat it as exactly as sensitive as the policy it
+accompanies. `tail-acl` only reads it — it is never written, cached, or uploaded,
+and a login reaches the output only when it is the identity you asked about.
 
 ## Design
 

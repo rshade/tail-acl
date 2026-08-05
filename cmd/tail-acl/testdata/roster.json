@@ -1,0 +1,4 @@
+{
+  "alice@example.com": "admin",
+  "unused@example.com": "billing-admin"
+}

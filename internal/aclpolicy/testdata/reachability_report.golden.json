@@ -150,13 +150,13 @@
       "kind": "grant",
       "index": 4
     },
-    "evidence": "grant 4 source selector \"autogroup:admin\" cannot be resolved from the policy file",
+    "evidence": "grant 4 source selector \"autogroup:admin\" cannot be resolved from the policy file; supply --roster PATH to resolve role autogroups",
     "trace": [
       "grant 0: destination did not match",
       "grant 1: destination did not match",
       "grant 2: source did not match",
       "grant 3: source did not match",
-      "grant 4: could not evaluate: source selector \"autogroup:admin\" cannot be resolved from the policy file",
+      "grant 4: could not evaluate: source selector \"autogroup:admin\" cannot be resolved from the policy file; supply --roster PATH to resolve role autogroups",
       "grant 5: source did not match"
     ]
   },

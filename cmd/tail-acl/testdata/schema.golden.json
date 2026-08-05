@@ -115,6 +115,11 @@
       "usage": "test only: indeterminate assertion exit policy: fail|warn|ignore (check always exits 10)"
     },
     {
+      "default": "",
+      "name": "roster",
+      "usage": "test/check: PATH to a JSON login-to-role roster, asserting it is complete and authoritative"
+    },
+    {
       "default": "false",
       "name": "schema",
       "usage": "print the machine-readable tool schema (JSON) and exit"
