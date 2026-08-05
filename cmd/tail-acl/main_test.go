@@ -2853,6 +2853,56 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 	}
 }
 
+// TestLintAdviceCaveatDescribesTheRunNotTheDefault guards the human caveat
+// against contradicting the run it is printed on. Under -severity advice the
+// advisory does set a non-zero exit, so claiming otherwise directly above the
+// finding that produced exit 1 would misstate the result channel.
+func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, broadLintPolicy)
+	for _, testCase := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		want     string
+		notWant  string
+	}{
+		{
+			name:     "default threshold",
+			wantCode: exitOK,
+			want:     "does not affect the exit code at the default severity",
+			notWant:  "makes these fail this run",
+		},
+		{
+			name:     "severity advice",
+			args:     []string{"-severity", "advice"},
+			wantCode: exitFailed,
+			want:     "-severity advice makes these fail this run",
+			notWant:  "does not affect the exit code",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			args := append([]string{"--file", path, cmdLint}, testCase.args...)
+			err := run(
+				context.Background(), args,
+				func(string) string { return "" }, nil, "", &stdout, &stderr,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+			if !strings.Contains(stdout.String(), testCase.want) {
+				t.Errorf("stdout missing %q:\n%s", testCase.want, stdout.String())
+			}
+			if strings.Contains(stdout.String(), testCase.notWant) {
+				t.Errorf("stdout has stale caveat %q:\n%s", testCase.notWant, stdout.String())
+			}
+		})
+	}
+}
+
 func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -2884,7 +2934,7 @@ func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 		"INFO unused-group groups[group:unused] group:unused",
 		"advisory (heuristic; not a defect, and does not affect the exit code at the default severity):",
 		"ADVICE broad-rule-untested grants[0].dst[0] tag:db",
-		`  suggested test: {"src":"autogroup:member","deny":["tag:db:5432"]}`,
+		`  suggested test: {"src":"alice@example.com","deny":["tag:db:5432"]}`,
 		"tail-acl: 2 findings: 0 error, 0 warn, 1 info, 1 advice",
 	} {
 		if !strings.Contains(stdout.String(), want) {

@@ -26,6 +26,12 @@ Out of scope — kept in `tail-acl`:
 - `via` routing and posture evaluation
 - Policy parsing, merging, and upload
 
+The one shared policy-shape predicate is `ContainsLiteralWildcard`. Both
+`tail-acl` and `tailnet-audit` use it to keep the ownership boundary between a
+static literal-wildcard advisory and a destination that becomes broad only
+after resolving it against the live fleet. It recognizes only a port-stripped
+literal `*`; it deliberately does not classify any autogroup as a wildcard.
+
 ## Usage
 
 A `Matcher` carries the policy plus the live tailnet facts the policy document

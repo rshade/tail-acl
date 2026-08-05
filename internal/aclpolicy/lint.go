@@ -375,14 +375,32 @@ func emptyGrantReason(grant tailscale.Grant) string {
 }
 
 func wildcardFindings(locator string, sources, destinations []string, wildcard WildcardPolicy) []LintFinding {
+	if wildcard == WildcardOff {
+		return nil
+	}
+	findings := make([]LintFinding, 0)
+
+	// autogroup:danger-all is deliberately not tuned by -wildcard. That policy
+	// exists because a standalone "*" is idiomatic and common; danger-all is an
+	// explicit escape hatch that names every device including ones outside the
+	// tailnet, so it is reported on either side whenever the check is enabled.
+	if containsDangerAll(sources) {
+		findings = append(findings, dangerAllSideFinding(locator+fieldSrc))
+	}
+	if containsDangerAll(destinations) {
+		findings = append(findings, dangerAllSideFinding(locator+fieldDst))
+	}
+
 	sourceStar := containsWildcard(sources)
 	destinationStar := containsWildcard(destinations)
 	switch wildcard {
 	case WildcardOff:
+		// Unreachable — the early return above handles it. Kept so exhaustive
+		// keeps this switch honest if that early return is ever removed.
 		return nil
 	case WildcardAnyToAny:
 		if sourceStar && destinationStar {
-			return []LintFinding{{
+			findings = append(findings, LintFinding{
 				ID:          LintOverbroadWildcard,
 				Severity:    LintWarn,
 				Rule:        locator,
@@ -394,19 +412,40 @@ func wildcardFindings(locator string, sources, destinations []string, wildcard W
 					locator + " destination contains *",
 					"any source may reach any destination",
 				},
-			}}
+			})
 		}
 	case WildcardAny:
-		findings := make([]LintFinding, 0)
 		if sourceStar {
 			findings = append(findings, wildcardSideFinding(locator+fieldSrc))
 		}
 		if destinationStar {
 			findings = append(findings, wildcardSideFinding(locator+fieldDst))
 		}
-		return findings
 	}
-	return nil
+	return findings
+}
+
+func containsDangerAll(selectors []string) bool {
+	for _, selector := range selectors {
+		if strings.TrimSpace(selector) == autogroupDangerAll {
+			return true
+		}
+	}
+	return false
+}
+
+func dangerAllSideFinding(locator string) LintFinding {
+	return LintFinding{
+		ID:       LintOverbroadWildcard,
+		Severity: LintWarn,
+		Rule:     locator,
+		Value:    autogroupDangerAll,
+		Evidence: "selector " + autogroupDangerAll +
+			" names every device, including devices outside the tailnet",
+		Remediation: "replace " + autogroupDangerAll +
+			" with the specific users, groups, or tags the rule is for",
+		Trace: []string{locator + " is " + autogroupDangerAll},
+	}
 }
 
 func wildcardSideFinding(locator string) LintFinding {
@@ -752,12 +791,7 @@ func destinationHost(destination string) string {
 }
 
 func containsWildcard(selectors []string) bool {
-	for _, selector := range selectors {
-		if strings.TrimSpace(selector) == "*" {
-			return true
-		}
-	}
-	return false
+	return policycore.ContainsLiteralWildcard(selectors)
 }
 
 func isLiteralAddress(value string) bool {

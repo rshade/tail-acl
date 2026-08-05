@@ -557,7 +557,14 @@ concrete port, emits a compact JSON test to paste into `tests`. The local
 `tail-acl test` run then goes red because the broad grant reaches that target;
 narrowing the grant makes the test green, and the deny assertion makes the
 advisory quiet. Only `deny` assertions count as coverage; coverage compares the
-destination host selector exactly and ignores source and port.
+destination host selector exactly and ignores source and port. Tailscale policy
+tests require a specific source rather than an autogroup, so the suggestion
+derives the lexicographically smallest user already named in `groups` for a
+member autogroup, or the smallest defined tag for `autogroup:tagged`. If the
+policy supplies no concrete source, or no concrete port, the advisory remains
+but the suggestion is omitted instead of inventing either. A source that would
+equal the destination is also rejected, so the advisory never suggests asserting
+that a selector cannot reach itself.
 
 Intentional broad destinations can be excluded with a reviewed HuJSON config:
 

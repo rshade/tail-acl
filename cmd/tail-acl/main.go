@@ -262,6 +262,11 @@ type result struct {
 	Local       *localTestComponent       `json:"local,omitempty"`
 	Server      *serverTestComponent      `json:"server,omitempty"`
 	Agreement   string                    `json:"agreement,omitempty"`
+	// adviceFails records whether the resolved -severity threshold makes advisory
+	// findings set a non-zero exit. It shapes the human caveat only, so it stays
+	// out of the JSON envelope: the machine contract already carries severity per
+	// finding and the exit code states the verdict.
+	adviceFails bool
 }
 
 type localTestComponent struct {
@@ -605,7 +610,7 @@ func render(w io.Writer, format string, res *result) error {
 		}
 	}
 	if res.Findings != nil {
-		if err := renderLintFindings(w, *res.Findings); err != nil {
+		if err := renderLintFindings(w, *res.Findings, res.adviceFails); err != nil {
 			return err
 		}
 	}
@@ -654,7 +659,7 @@ func renderCompositeTest(w io.Writer, res *result) error {
 	return err
 }
 
-func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
+func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFails bool) error {
 	for _, finding := range findings {
 		if finding.Severity != aclpolicy.LintAdvice {
 			if err := renderLintFinding(w, finding); err != nil {
@@ -669,7 +674,13 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
 	if len(advice) == 0 {
 		return nil
 	}
-	const caveat = "advisory (heuristic; not a defect, and does not affect the exit code at the default severity):"
+	// The caveat states this run's exit behavior, not the default one: printing
+	// "does not affect the exit code" directly above the finding that produced
+	// exit 1 is the kind of claim an operator quotes in a postmortem.
+	caveat := "advisory (heuristic; not a defect, and does not affect the exit code at the default severity):"
+	if adviceFails {
+		caveat = "advisory (heuristic; -severity advice makes these fail this run):"
+	}
 	if _, err := fmt.Fprintln(w, caveat); err != nil {
 		return err
 	}
@@ -2007,6 +2018,7 @@ func runLint(
 	}
 
 	res := newLintResult(opts.file, report)
+	res.adviceFails = aclpolicy.LintAdvice.AtLeast(threshold)
 	if report.CountAtLeast(threshold) > 0 {
 		res.Status = statusFailed
 		return res, errLintFindings
