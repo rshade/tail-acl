@@ -70,6 +70,33 @@ const (
 	// a verdict rather than an error because the policy is well-formed and the
 	// question is well-posed; the fact needed to settle it just is not here.
 	verdictIndeterminate = "indeterminate"
+
+	// localInputError is the fourth value in the local component's vocabulary.
+	// It has no single-shot equivalent: outside --validate a policy that will
+	// not load produces no envelope at all, but the server still judges bytes
+	// this evaluator could not read, and that disagreement is the evidence.
+	localInputError = "input_error"
+
+	serverClean          = "clean"
+	serverRejected       = "rejected"
+	serverIndeterminate  = "indeterminate"
+	serverUnavailable    = "unavailable"
+	serverSuperseded     = "superseded"
+	agreementAgree       = "agree"
+	agreementDisagree    = "disagree"
+	agreementLocalGap    = "local_gap"
+	agreementUnavailable = "unavailable"
+	agreementSuperseded  = "superseded"
+
+	// Sanitized classifications for a control plane that never judged the
+	// policy. They describe why no verdict arrived and deliberately carry no
+	// credential, URL, or response body; "response" is the catch-all for a
+	// server that answered with something unusable.
+	unavailableAuthentication = "authentication"
+	unavailableAuthorization  = "authorization"
+	unavailableRateLimited    = "rate_limited"
+	unavailableTransport      = "transport"
+	unavailableResponse       = "response"
 )
 
 // Command and sub-command names, output formats, and the tool name.
@@ -113,6 +140,16 @@ const (
 	// so the two descriptions of "lint" cannot drift.
 	lintSummary = "Statically lint policy hygiene and broad-rule test coverage " +
 		"(-config currently supports broad-rule-untested allowBroad exclusions)"
+
+	// testSummary is shared by commandCatalog and newTestCommand's Short text
+	// for the same reason. --validate is appended rather than substituted: the
+	// sshTests, -strict, and --indeterminate clauses are the only place either
+	// surface states them, so replacing them would drop documented behavior
+	// from --help and -schema at once.
+	testSummary = "Run network tests locally; sshTests are preserved but not evaluated " +
+		"(-strict rejects unparseable rules; --indeterminate controls only test's exit; " +
+		"--watch re-runs on change and never exits non-zero for a verdict; --watch --validate " +
+		"adds explicit credentialed, read-only authoritative server validation)"
 
 	policyFormatHuJSON = "hujson"
 )
@@ -222,6 +259,27 @@ type result struct {
 	Findings    *[]aclpolicy.LintFinding  `json:"findings,omitempty"`
 	LintSummary *aclpolicy.LintSummary    `json:"lint_summary,omitempty"`
 	Validation  *tailapi.ValidationResult `json:"validation,omitempty"`
+	Local       *localTestComponent       `json:"local,omitempty"`
+	Server      *serverTestComponent      `json:"server,omitempty"`
+	Agreement   string                    `json:"agreement,omitempty"`
+}
+
+type localTestComponent struct {
+	Status          string                      `json:"status"`
+	Message         string                      `json:"message,omitempty"`
+	Assertions      []aclpolicy.AssertionResult `json:"assertions"`
+	Skipped         []aclpolicy.RuleSkip        `json:"skipped,omitempty"`
+	SSHTestsSkipped int                         `json:"ssh_tests_skipped,omitempty"`
+	Summary         *aclpolicy.TestSummary      `json:"summary,omitempty"`
+}
+
+type serverTestComponent struct {
+	Status      string                    `json:"status"`
+	Validation  *tailapi.ValidationResult `json:"validation,omitempty"`
+	Unavailable string                    `json:"unavailable,omitempty"`
+	HTTPStatus  int                       `json:"http_status,omitempty"`
+	RetryAfter  string                    `json:"retry_after,omitempty"`
+	Message     string                    `json:"message,omitempty"`
 }
 
 var (
@@ -538,21 +596,12 @@ func render(w io.Writer, format string, res *result) error {
 			return err
 		}
 	}
+	if err := renderCompositeTest(w, res); err != nil {
+		return err
+	}
 	if res.Assertions != nil {
-		for _, assertion := range *res.Assertions {
-			if _, err := fmt.Fprintf(
-				w,
-				"%s %s %s -> %s (expected %s, got %s; %s)\n",
-				strings.ToUpper(string(assertion.Status)),
-				assertion.ID,
-				assertion.Source,
-				assertion.Destination,
-				assertion.Expected,
-				assertion.Actual,
-				assertion.Evidence,
-			); err != nil {
-				return err
-			}
+		if err := renderAssertions(w, *res.Assertions); err != nil {
+			return err
 		}
 	}
 	if res.Findings != nil {
@@ -561,6 +610,47 @@ func render(w io.Writer, format string, res *result) error {
 		}
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
+	return err
+}
+
+func renderAssertions(w io.Writer, assertions []aclpolicy.AssertionResult) error {
+	for _, assertion := range assertions {
+		if _, err := fmt.Fprintf(
+			w,
+			"%s %s %s -> %s (expected %s, got %s; %s)\n",
+			strings.ToUpper(string(assertion.Status)),
+			assertion.ID,
+			assertion.Source,
+			assertion.Destination,
+			assertion.Expected,
+			assertion.Actual,
+			assertion.Evidence,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderCompositeTest(w io.Writer, res *result) error {
+	if res.Local == nil || res.Server == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintf(
+		w, "SNAPSHOT %s\nLOCAL %s: %s\n", res.PolicyDigest, res.Local.Status, res.Local.Message,
+	); err != nil {
+		return err
+	}
+	// The per-assertion lines are what makes the local half a peer of the
+	// server half rather than a headline. Plain --watch prints them, so
+	// dropping them under --validate would make the authoritative mode the
+	// less informative one exactly when local and server disagree.
+	if err := renderAssertions(w, res.Local.Assertions); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(
+		w, "SERVER %s: %s\nAGREEMENT %s\n", res.Server.Status, res.Server.Message, res.Agreement,
+	)
 	return err
 }
 
@@ -1192,6 +1282,8 @@ func runTest(
 	testOpts testOptions,
 	logger *slog.Logger,
 	emitter *streamEmitter,
+	httpClient *http.Client,
+	apiURL string,
 ) (*result, error) {
 	// The same rule run already applies to --indeterminate outside test: a flag
 	// that cannot mean anything here is a caller mistake, not a no-op. Its only
@@ -1202,6 +1294,13 @@ func runTest(
 		)
 	}
 	if testOpts.watch {
+		if testOpts.validate {
+			client, err := apiClient(opts, httpClient, apiURL)
+			if err != nil {
+				return nil, err
+			}
+			return nil, watchValidatedTests(ctx, opts, testOpts, logger, emitter, client)
+		}
 		// Returning a nil result is what makes run skip its single final render:
 		// watch has already written every verdict it is going to write.
 		return nil, watchTests(ctx, opts, testOpts, logger, emitter)
@@ -1213,6 +1312,7 @@ func runTest(
 // among them: it is a global flag, parsed by run before the subcommand is known.
 type testOptions struct {
 	watch    bool
+	validate bool
 	interval time.Duration
 }
 
@@ -1230,16 +1330,13 @@ func watchTests(
 ) error {
 	// A file unreadable at startup is a caller mistake — a typo in --file — not a
 	// transient mid-save state. Fail loudly rather than polling a path forever.
-	raw, err := os.ReadFile(opts.file)
+	seed, err := os.ReadFile(opts.file)
 	if err != nil {
 		return usagef("could not read policy for watch: %v", err)
 	}
 	logger.InfoContext(ctx, "watching policy file",
 		"file", opts.file, "interval", testOpts.interval)
-	// Seeding pending from the startup read lets an already-stable file reach its
-	// first verdict after one tick instead of two.
-	pending, last := policyDigest(raw), ""
-	readFailed := false
+	poller := newStablePolicyPoller(opts.file, seed)
 
 	ticker := time.NewTicker(testOpts.interval)
 	defer ticker.Stop()
@@ -1252,34 +1349,10 @@ func watchTests(
 		case <-ticker.C:
 		}
 
-		raw, err = os.ReadFile(opts.file)
-		if err != nil {
-			if !readFailed {
-				logger.WarnContext(ctx, "cannot read policy file", "file", opts.file, "error", err)
-				readFailed = true
-			}
-			pending = ""
+		raw, digest, stable := poller.poll(ctx, logger)
+		if !stable {
 			continue
 		}
-		readFailed = false
-
-		digest := policyDigest(raw)
-		switch {
-		case digest == last:
-			// Already graded. An editor that rewrote identical bytes changed
-			// nothing worth re-running.
-			pending = digest
-			continue
-		case digest != pending:
-			// Seen once, not yet confirmed. Requiring two identical polls is both
-			// the quiet period and the guard against grading a half-written file.
-			pending = digest
-			continue
-		}
-
-		// Stable and new. Recording it before evaluating is what makes an
-		// unparseable save log once instead of every tick until it is repaired.
-		last = digest
 		res, evalErr := evaluatePolicyTestBytes(ctx, opts, raw, logger)
 		if res == nil {
 			// No envelope exists for this case outside watch mode either, so
@@ -1306,6 +1379,306 @@ func watchTests(
 			return usagef("could not write watch output: %v", emitErr)
 		}
 	}
+}
+
+// stablePolicyPoller turns one tick into "these exact bytes are stable and not
+// yet graded". Both watch loops share it so the quiet period, the
+// identical-rewrite suppression, and the warn-once read failure cannot drift
+// between plain --watch and --watch --validate; a change to the debounce is a
+// change to one function, not two that only look alike.
+type stablePolicyPoller struct {
+	file       string
+	pending    string
+	last       string
+	readFailed bool
+}
+
+// newStablePolicyPoller seeds pending from the startup read, which lets an
+// already-stable file reach its first verdict after one tick instead of two.
+func newStablePolicyPoller(file string, seed []byte) *stablePolicyPoller {
+	return &stablePolicyPoller{file: file, pending: policyDigest(seed)}
+}
+
+// poll reports the newest stable, not-yet-graded snapshot and whether one
+// exists. There is none when the file is unreadable, unchanged since the last
+// verdict, or has been seen only once so far.
+//
+// The returned bytes are freshly allocated per call and retained nowhere here,
+// so the caller owns them outright — which is what lets --validate hash,
+// evaluate, and POST one slice without copying it first.
+func (p *stablePolicyPoller) poll(ctx context.Context, logger *slog.Logger) ([]byte, string, bool) {
+	raw, err := os.ReadFile(p.file) //nolint:gosec // p.file is the operator's --file; reading it is the command.
+	if err != nil {
+		if !p.readFailed {
+			logger.WarnContext(ctx, "cannot read policy file", "file", p.file, "error", err)
+			p.readFailed = true
+		}
+		p.pending = ""
+		return nil, "", false
+	}
+	p.readFailed = false
+
+	digest := policyDigest(raw)
+	switch {
+	case digest == p.last:
+		// Already graded. An editor that rewrote identical bytes changed
+		// nothing worth re-running.
+		p.pending = digest
+		return nil, "", false
+	case digest != p.pending:
+		// Seen once, not yet confirmed. Requiring two identical polls is both
+		// the quiet period and the guard against grading a half-written file.
+		p.pending = digest
+		return nil, "", false
+	}
+
+	// Stable and new. Recording it before the caller evaluates is what makes an
+	// unparseable save log once instead of every tick until it is repaired.
+	p.last = digest
+	return raw, digest, true
+}
+
+type validatedSnapshot struct {
+	raw    []byte
+	digest string
+	local  *localTestComponent
+}
+
+type validationCompletion struct {
+	snapshot   validatedSnapshot
+	validation tailapi.ValidationResult
+	err        error
+}
+
+//nolint:gocognit // Scheduler coordinates cancellation, coalescing, supersession, and emission.
+func watchValidatedTests(
+	ctx context.Context,
+	opts options,
+	testOpts testOptions,
+	logger *slog.Logger,
+	emitter *streamEmitter,
+	client *tailscale.Client,
+) error {
+	seed, err := os.ReadFile(opts.file)
+	if err != nil {
+		return usagef("could not read policy for watch: %v", err)
+	}
+	logger.InfoContext(
+		ctx, "watching policy file with server validation",
+		"file", opts.file, "interval", testOpts.interval,
+	)
+	poller := newStablePolicyPoller(opts.file, seed)
+	var active, queued *validatedSnapshot
+	var activeSuperseded bool
+	var cancel context.CancelFunc
+	// One buffer slot is sufficient only because start is unreachable while a
+	// request is in flight: it runs under active == nil, or after a completion
+	// has already been drained. That invariant is also what makes the bare
+	// return on ctx.Done safe — the abandoned goroutine's send lands in the
+	// free slot and it exits. A third start site would leak a goroutine per
+	// save with nothing here to catch it.
+	completed := make(chan validationCompletion, 1)
+	start := func(snapshot validatedSnapshot) {
+		requestCtx, requestCancel := context.WithCancel(ctx) //nolint:gosec // Retained and called later.
+		cancel, active = requestCancel, &snapshot
+		go func() {
+			validation, validationErr := tailapi.ValidatePolicy(requestCtx, client, snapshot.raw)
+			completed <- validationCompletion{snapshot, validation, validationErr}
+		}()
+	}
+	emitSuperseded := func(snapshot validatedSnapshot) error {
+		return emitter.emit(compositeTestResult(opts, snapshot, serverTestComponent{Status: serverSuperseded}))
+	}
+	ticker := time.NewTicker(testOpts.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if cancel != nil {
+				cancel()
+			}
+			return nil
+		case completion := <-completed:
+			// A cancelled request completes with a transport error that names
+			// the cancellation, not a verdict. Select picks uniformly when both
+			// this and ctx.Done() are ready — which they are whenever the
+			// interrupt lands while the loop is busy evaluating locally — so
+			// without this guard Ctrl-C exits 2 with a synthetic "unavailable"
+			// roughly half the time instead of exiting 0.
+			if ctx.Err() != nil {
+				return nil
+			}
+			if active == nil || completion.snapshot.digest != active.digest {
+				continue
+			}
+			wasSuperseded := activeSuperseded
+			active, cancel, activeSuperseded = nil, nil, false
+			if wasSuperseded {
+				if queued != nil {
+					next := *queued
+					queued = nil
+					start(next)
+				}
+				continue
+			}
+			server := serverTestComponentFrom(completion.validation, completion.err)
+			// Warnings are verdict data and a stderr event both, exactly as in
+			// validate and plan. A snapshot the server accepts with warnings is
+			// otherwise silent on stderr, which is the one channel an author
+			// watching a second terminal is not reading as JSON.
+			logValidationWarnings(ctx, logger, completion.validation)
+			if err = emitter.emit(compositeTestResult(opts, completion.snapshot, server)); err != nil {
+				return usagef("could not write watch output: %v", err)
+			}
+			if server.Status == serverUnavailable {
+				return usagef("server validation unavailable: %s", server.Message)
+			}
+			if queued != nil {
+				next := *queued
+				queued = nil
+				start(next)
+			}
+		case <-ticker.C:
+			raw, digest, stable := poller.poll(ctx, logger)
+			if !stable {
+				continue
+			}
+			// policy_digest is a provenance claim, not a label: the local
+			// evaluation and the POST body below both read raw, the same slice
+			// poll hashed. No copy is needed to keep them identical because
+			// poll hands back a slice nothing else retains.
+			snapshot := validatedSnapshot{raw, digest, evaluateLocalComponent(ctx, opts, raw, logger)}
+			if active == nil {
+				start(snapshot)
+				continue
+			}
+			if queued != nil {
+				if err = emitSuperseded(*queued); err != nil {
+					return usagef("could not write watch output: %v", err)
+				}
+			}
+			queued = &snapshot
+			if activeSuperseded {
+				continue
+			}
+			activeSuperseded = true
+			if err = emitSuperseded(*active); err != nil {
+				return usagef("could not write watch output: %v", err)
+			}
+			cancel()
+		}
+	}
+}
+
+func evaluateLocalComponent(ctx context.Context, opts options, raw []byte, logger *slog.Logger) *localTestComponent {
+	res, err := evaluatePolicyTestBytes(ctx, opts, raw, logger)
+	if res == nil {
+		message := "local evaluation failed"
+		if err != nil {
+			message = err.Error()
+		}
+		// Unlike plain watch, which emits nothing for a policy that will not
+		// load, this path still submits the bytes: a server that accepts what
+		// the local evaluator cannot read is the schema-drift evidence the mode
+		// exists to surface. The stderr warning stays either way, so degrading
+		// to input_error never hides why the evaluator gave up.
+		logger.WarnContext(ctx, "policy file did not produce a local verdict",
+			"file", opts.file, "error", err)
+		return &localTestComponent{Status: localInputError, Message: message, Assertions: []aclpolicy.AssertionResult{}}
+	}
+	assertions := []aclpolicy.AssertionResult{}
+	if res.Assertions != nil {
+		assertions = *res.Assertions
+	}
+	return &localTestComponent{
+		Status: res.Status, Message: res.Message, Assertions: assertions, Skipped: res.Skipped,
+		SSHTestsSkipped: res.SSHTestsSkipped, Summary: res.TestSummary,
+	}
+}
+
+func serverTestComponentFrom(validation tailapi.ValidationResult, err error) serverTestComponent {
+	server := serverTestComponent{Validation: &validation}
+	switch tailapi.ClassifyValidation(err) {
+	case tailapi.ValidationClean:
+		server.Status = serverClean
+	case tailapi.ValidationRejected:
+		server.Status = serverRejected
+	case tailapi.ValidationIndeterminate:
+		server.Status = serverIndeterminate
+	case tailapi.ValidationUnavailable, tailapi.ValidationNotAttempted:
+		server.Status, server.Unavailable = serverUnavailable, unavailableClass(err)
+		server.Validation = nil
+	}
+	if err != nil {
+		server.Message = err.Error()
+	}
+	var unavailable *tailapi.ValidationUnavailableError
+	if errors.As(err, &unavailable) {
+		server.HTTPStatus = unavailable.Status
+		server.RetryAfter = unavailable.RetryAfter
+	}
+	return server
+}
+
+func unavailableClass(err error) string {
+	var unavailable *tailapi.ValidationUnavailableError
+	if !errors.As(err, &unavailable) {
+		return unavailableResponse
+	}
+	switch unavailable.Status {
+	case http.StatusUnauthorized:
+		return unavailableAuthentication
+	case http.StatusForbidden:
+		return unavailableAuthorization
+	case http.StatusTooManyRequests:
+		return unavailableRateLimited
+	case 0:
+		// No status means the request never reached the control plane, so
+		// rendering one would invent an answer it never gave.
+		return unavailableTransport
+	default:
+		return unavailableResponse
+	}
+}
+
+// compositeTestResult folds the two component verdicts into one envelope. The
+// default arm covers serverIndeterminate as well as serverUnavailable, and that
+// is deliberate rather than an omission: agreement's vocabulary has no
+// indeterminate member because it reports whether the two halves *agree*, and
+// there is nothing to agree with until the server proves acceptance or
+// rejection. server.status keeps the distinction between "answered
+// unreadably" and "never answered" for anyone who needs it.
+func compositeTestResult(opts options, snapshot validatedSnapshot, server serverTestComponent) *result {
+	status, agreement := statusIndeterminate, agreementUnavailable
+	switch server.Status {
+	case serverRejected:
+		status = statusFailed
+		switch snapshot.local.Status {
+		case statusOK:
+			agreement = agreementDisagree
+		case statusFailed:
+			agreement = agreementAgree
+		default:
+			agreement = agreementLocalGap
+		}
+	case serverClean:
+		switch snapshot.local.Status {
+		case statusOK:
+			status, agreement = statusOK, agreementAgree
+		case statusFailed:
+			agreement = agreementDisagree
+		default:
+			agreement = agreementLocalGap
+		}
+	case serverSuperseded:
+		agreement = agreementSuperseded
+	}
+	message := fmt.Sprintf(
+		"local %s; server %s (%s)", snapshot.local.Status, server.Status, agreement,
+	)
+	res := newResult(cmdTest, status, message)
+	res.File, res.PolicyDigest, res.Local, res.Server, res.Agreement = opts.file, snapshot.digest, snapshot.local, &server, agreement
+	return res
 }
 
 // policyDigest content-addresses policy bytes. One value does three jobs: change
@@ -1856,8 +2229,8 @@ func commandCatalog() []schemaCommand {
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{
 			cmdTest,
-			"Run network tests locally; sshTests are preserved but not evaluated (-strict rejects unparseable rules; --indeterminate controls only test's exit; --watch re-runs on change and never exits non-zero for a verdict)",
-			"test [--watch [--interval DURATION]]",
+			testSummary,
+			"test [--watch [--interval DURATION] [--validate]]",
 		},
 		{
 			commandTestAdd,
@@ -1927,9 +2300,14 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 				"unreadable body, a redirect that dropped the request, or an unreachable API), and no " +
 				"verdict is printed in that case. For test --watch, also signals an unreadable --file, " +
 				"a non-positive --interval, incompatible flag combinations (--indeterminate with --watch, " +
-				"--interval without --watch), or a failed write to stdout. An interrupt during a command " +
-				"that is mid-request exits here too rather than as a verdict; for upload that means the " +
-				"change may already have been applied",
+				"--interval without --watch, --validate without --watch), or a failed write to stdout. " +
+				"For test --watch --validate it additionally covers a missing --tailnet or --api-key, " +
+				"which is checked before the loop starts, and a control plane that never judged a " +
+				"snapshot (authentication, authorization, rate_limited, transport, or response), which " +
+				"is reported as one last composite record before the watcher stops. An interrupt during " +
+				"a non-watch command that is mid-request exits here too rather than as a verdict; for " +
+				"upload that means the change may already have been applied. Interrupting either watch " +
+				"mode still exits 0, in-flight validation included",
 			"10": "indeterminate: check could not settle the question, test had an unsettleable assertion under " +
 				"--indeterminate=warn, or validate and plan got a response they cannot read as a verdict " +
 				"(warnings with no errors alongside a message, or a detail with neither errors nor warnings)",
@@ -1974,6 +2352,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save")
 	fmt.Fprintln(w, "  tail-acl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line")
+	fmt.Fprintln(w, "  tail-acl --file acl.hujson test --watch --validate # local plus read-only server verdict")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
@@ -2046,10 +2425,20 @@ Watch mode:
   is reported as an ordinary error, so this exits 2 through the same path as a
   full disk. Interrupt the watcher to stop it; do not expect the pipe to.
 
+Authoritative watch (--validate):
+  test --watch --validate explicitly enables credentialed, read-only network
+  access and emits one composite local/server record per stable snapshot;
+  credentials alone never enable networking, so plain test --watch stays
+  offline whatever the environment holds. It requires --tailnet and --api-key,
+  both checked before the loop starts. Policy verdicts remain stream data, but
+  a control plane that never judged a snapshot ends the watcher with exit 2
+  after emitting its sanitized evidence.
+
 Interrupts:
-  The first interrupt cancels the run: --watch stops and exits 0, while a
-  command that is mid-request abandons it and exits 2, not 1 - an interrupt is
-  not a verdict, and for upload the change may already have been applied
+  The first interrupt cancels the run: either watch mode stops and exits 0,
+  in-flight validation included, while a non-watch command that is mid-request
+  abandons it and exits 2, not 1 - an interrupt is not a verdict, and for
+  upload the change may already have been applied
   server-side. A second interrupt is handled by the runtime's default
   disposition, so a command wedged in a syscall that cannot observe the
   cancellation still dies on Ctrl-C twice.

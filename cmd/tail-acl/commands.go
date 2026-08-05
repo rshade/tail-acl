@@ -248,14 +248,16 @@ func newValidateCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 
 func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	var watch bool
+	var validate bool
 	var interval time.Duration
 	cmd := &cobra.Command{
-		Use: cmdTest,
-		Short: "Run network tests locally; sshTests are preserved but not evaluated " +
-			"(-strict rejects unparseable rules; --indeterminate controls only test's exit; " +
-			"--watch re-runs on change and never exits non-zero for a verdict)",
-		Args: cobra.NoArgs,
+		Use:   cmdTest,
+		Short: testSummary,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if validate && !watch {
+				return usagef("--validate applies only to --watch; use the validate command for a single server check")
+			}
 			if cmd.Flags().Changed("interval") && !watch {
 				return usagef("--interval applies only to --watch; nothing polls without it")
 			}
@@ -263,8 +265,8 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 				return usagef("--interval must be positive, got %s", interval)
 			}
 			out, err := runTest(
-				ctx, *deps.opts, testOptions{watch: watch, interval: interval}, deps.logger(),
-				newStreamEmitter(deps.stdout, *deps.format),
+				ctx, *deps.opts, testOptions{watch: watch, validate: validate, interval: interval}, deps.logger(),
+				newStreamEmitter(deps.stdout, *deps.format), deps.httpClient, deps.apiURL,
 			)
 			*deps.result = out
 			return err
@@ -272,6 +274,8 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&watch, "watch", false,
 		"re-run the assertions whenever the policy file changes; never exits non-zero for a verdict")
+	cmd.Flags().BoolVar(&validate, "validate", false,
+		"with --watch, validate each stable snapshot using the read-only Tailscale API")
 	cmd.Flags().DurationVar(&interval, "interval", defaultWatchInterval, "polling interval for --watch")
 	cmd.AddCommand(newTestAddCommand(deps), newTestRemoveCommand(deps))
 	return cmd

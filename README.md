@@ -581,6 +581,18 @@ is a control-plane coverage question that belongs to `tailnet-audit`, not here.
 The discriminator is "does the finding need the live device inventory?" — if
 yes, it is not a `lint` finding.
 
+### `test --watch --validate`: authoritative save-and-look
+
+`--validate` is legal only with `--watch` and explicitly enables credentialed, read-only network
+access to Tailscale's `/acl/validate` endpoint. It requires `--tailnet`/`TAILSCALE_TAILNET` and
+`--api-key`/`TAILSCALE_API_KEY`; credentials in the environment never change plain `test --watch`.
+Each stable immutable byte snapshot is evaluated locally and submitted unchanged to the server, then
+emitted as one digest-correlated composite human block or NDJSON record. At most one request is
+active and one newest snapshot is pending; newer stable bytes supersede and cancel older work. API
+unavailability emits sanitized evidence and exits 2; policy verdicts remain stream data. An interrupt
+still exits 0 with no record for the cancelled request, so a Ctrl-C mid-validation is never reported
+as an unavailable control plane.
+
 ### `test --watch`: the save-and-look loop
 
 `--watch` re-runs the assertion suite whenever the policy file's contents change, so authoring is a glance at
@@ -589,6 +601,7 @@ a second terminal rather than a command you keep retyping.
 ```bash
 tail-acl --file acl.hujson test --watch              # human output, blank line between runs
 tail-acl -format json --file acl.hujson test --watch # NDJSON, one envelope per line
+tail-acl --file acl.hujson test --watch --validate   # adds explicit read-only server validation
 ```
 
 Four decisions are worth knowing:

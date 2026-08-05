@@ -50,9 +50,10 @@ type ValidationError struct {
 // policy as invalid on the strength of a request that never read it. Status is
 // zero when no HTTP response arrived at all.
 type ValidationUnavailableError struct {
-	Status  int
-	Message string
-	Err     error
+	Status     int
+	Message    string
+	Err        error
+	RetryAfter string
 }
 
 // ValidationIndeterminateError reports a response this client cannot prove
@@ -293,7 +294,12 @@ func ValidatePolicy(
 			Err:     err,
 		}
 	}
-	return classifyValidationResponse(response.StatusCode, body)
+	result, classifyErr := classifyValidationResponse(response.StatusCode, body)
+	var unavailable *ValidationUnavailableError
+	if errors.As(classifyErr, &unavailable) {
+		unavailable.RetryAfter = response.Header.Get("Retry-After")
+	}
+	return result, classifyErr
 }
 
 // methodRewrittenBy returns the final URL when a redirect changed the method
