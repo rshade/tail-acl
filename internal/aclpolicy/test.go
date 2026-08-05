@@ -137,7 +137,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 
 		for assertionIndex, destination := range accept {
 			assertion, assertionErr := evaluateAssertion(
-				matcher, testIndex, assertionIndex, "accept", source, destination, true,
+				matcher, testIndex, assertionIndex, string(TestAccept), source, destination, true,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -146,7 +146,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 		}
 		for assertionIndex, destination := range test.Deny {
 			assertion, assertionErr := evaluateAssertion(
-				matcher, testIndex, assertionIndex, "deny", source, destination, false,
+				matcher, testIndex, assertionIndex, string(TestDeny), source, destination, false,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -345,9 +345,9 @@ func actualText(access Access, allowed bool) string {
 
 func accessText(allowed bool) string {
 	if allowed {
-		return "accept"
+		return string(TestAccept)
 	}
-	return "deny"
+	return string(TestDeny)
 }
 
 type target struct {

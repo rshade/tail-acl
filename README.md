@@ -37,6 +37,9 @@ tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments pre
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
 tail-acl --file acl.json posture remove posture:labCompliant
+tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
+tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
+tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
 
 # An expression beginning with a dash needs a `--` terminator, and `--comment`
 # must precede it:
@@ -110,6 +113,8 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `host set` | Set a host alias to an address (`--comment`) |
 | `posture set` | Add or replace a posture's expression list (`--comment`) |
 | `posture remove` | Remove a posture definition |
+| `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`; merges by source and never renumbers existing assertion IDs |
+| `test remove` | Remove matching assertions for `--src`, pruning empty keys and entries; may renumber later assertion IDs |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
@@ -219,7 +224,7 @@ in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
 the last entry from a block empties it rather than deleting the key, so a
 comment attached to that block is not carried out with it.
 
-The four authoring commands can also **write** a comment. `--comment TEXT`
+Four of the authoring commands can also **write** a comment. `--comment TEXT`
 attaches `// TEXT` to the exact node the command authored: the new `grants`
 element for `grant add`, the added owner element for `tag-owner add`, and the
 `hosts` or `postures` member for `host set` and `posture set`. `TEXT` is one
@@ -377,6 +382,38 @@ Trace entries are human-readable evidence, not a stable contract — their wordi
 changes as the evaluator learns to name a cause more precisely. Machine
 consumers should branch on `status` (or `access` for `check`) and read
 `evidence`, never grep the `trace` array.
+
+### Authoring policy tests
+
+`test add` and `test remove` author the same `tests` assertions the evaluator
+above reads, and never evaluate them — authoring and judging stay separate
+commands. Both add `test_index` and `assertion_ids` to the JSON envelope; these
+are additive schema-version-1 fields. `assertion_ids` carries assertion IDs in
+the same `tests[i].accept[j]` form a `test` run reports, so an added assertion
+can be matched against the run that judges it. `test_index` names the entry the
+edit resolved to, indexed before the edit: for `add`, the entry the first
+requested assertion was merged into or already lived in; for `remove`, the first
+entry matching `--src`. A source may legally hold several entries, so read
+`assertion_ids` — not `test_index` — to learn where each assertion actually sits.
+
+`assertion_ids` on `add` lists **every** requested assertion, including ones the
+policy already had. That is what makes a `no_changes` result useful: CI can read
+the IDs of the assertions it asked for without having to care whether this run or
+an earlier one wrote them. The `add` message counts only the new ones.
+
+Two shapes decide where an edit lands, and both are derived from the rules the
+evaluator applies rather than restated:
+
+- **Accept-side spelling.** An entry that spells the legacy `allow` key keeps it;
+  a new entry uses `accept`. The evaluator reads `accept` when it is non-empty
+  and otherwise falls back to `allow`, and refuses an entry where both are
+  non-empty — so an edit always targets the member the next run will read. An
+  entry carrying an explicitly empty `accept` beside a populated `allow` is
+  therefore edited through `allow`.
+- **Posture-qualified entries.** An entry carrying at least one
+  `srcPostureAttrs` attribute is never a merge or removal target, because the
+  local evaluator cannot run it. An empty `srcPostureAttrs` object does run, so
+  it stays editable.
 
 ### Compatibility
 

@@ -2284,6 +2284,8 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"check          Answer one reachability question locally",
+		"test add       Add deny or accept policy assertions without evaluating them",
+		"test remove    Remove deny or accept policy assertions; removing may renumber later assertion IDs",
 		"posture set    Add or replace a posture's expression list",
 		"typed edits preserve comments in JSON and HuJSON",
 		"tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
@@ -2402,6 +2404,9 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdTest }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdTest)
 	}
+	if !schemaHasDenyFirstTestEdits(doc.Commands) {
+		t.Errorf("schema commands = %#v, want deny-first test add/remove usage", doc.Commands)
+	}
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdCheck }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdCheck)
 	}
@@ -2420,6 +2425,19 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureRemove)
 	}
+}
+
+func schemaHasDenyFirstTestEdits(commands []schemaCommand) bool {
+	for _, name := range []string{commandTestAdd, commandTestRemove} {
+		if !slices.ContainsFunc(commands, func(command schemaCommand) bool {
+			deny := strings.Index(command.Usage, "--deny")
+			accept := strings.Index(command.Usage, "--accept")
+			return command.Name == name && deny >= 0 && deny < accept
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 // TestParentCommandsDistinguishBareFromUnknownSubcommand covers all four

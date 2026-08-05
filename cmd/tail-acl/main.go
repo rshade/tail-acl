@@ -106,6 +106,8 @@ const (
 	commandHostSet       = "host set"
 	commandPostureSet    = "posture set"
 	commandPostureRemove = "posture remove"
+	commandTestAdd       = "test add"
+	commandTestRemove    = "test remove"
 
 	// lintSummary is shared by commandCatalog and newLintCommand's Short text
 	// so the two descriptions of "lint" cannot drift.
@@ -182,8 +184,12 @@ type result struct {
 	Diff         string `json:"diff,omitempty"`
 	Changed      *bool  `json:"changed,omitempty"`
 	GrantIndex   *int   `json:"grant_index,omitempty"`
-	ACLIndex     *int   `json:"acl_index,omitempty"`
-	MergedFiles  *int   `json:"merged_files,omitempty"`
+	// TestIndex and AssertionIDs are set only by test add/remove. A pointer keeps
+	// test index zero distinct from a command that does not edit assertions.
+	TestIndex    *int     `json:"test_index,omitempty"`
+	AssertionIDs []string `json:"assertion_ids,omitempty"`
+	ACLIndex     *int     `json:"acl_index,omitempty"`
+	MergedFiles  *int     `json:"merged_files,omitempty"`
 	// Access is the three-state reachability verdict. Allowed is the older
 	// two-state field and is emitted only for a definite answer: an
 	// indeterminate result omits it rather than serializing false, which a
@@ -954,6 +960,70 @@ func runPostureRemove(path string, args []string) (*result, error) {
 // an edit cannot silently discard policy data the pinned schema does not model.
 func loadForEdit(path string) (*aclpolicy.Policy, error) {
 	return aclpolicy.Load(path)
+}
+
+func runTestAdd(path, source string, deny, accept []string) (*result, error) {
+	if strings.TrimSpace(source) == "" {
+		return nil, usagef("test add requires --src")
+	}
+	if len(deny) == 0 && len(accept) == 0 {
+		return nil, usagef("test add requires at least one --deny or --accept")
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.AddAssertions(policy, source, deny, accept)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	status := statusNoChanges
+	message := fmt.Sprintf("test assertions already present in %s", path)
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		message = fmt.Sprintf("added %d test assertion(s) to %s", len(edit.Operations), path)
+	}
+	return testEditResult(commandTestAdd, status, message, path, edit), nil
+}
+
+func runTestRemove(path, source string, deny, accept []string) (*result, error) {
+	if strings.TrimSpace(source) == "" {
+		return nil, usagef("test remove requires --src")
+	}
+	if len(deny) == 0 && len(accept) == 0 {
+		return nil, usagef("test remove requires at least one --deny or --accept")
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveAssertions(policy, source, deny, accept)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	status := statusNoChanges
+	message := fmt.Sprintf("test assertions not present in %s", path)
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		message = fmt.Sprintf("removed %d test assertion(s) from %s", len(edit.AssertionIDs), path)
+	}
+	return testEditResult(commandTestRemove, status, message, path, edit), nil
+}
+
+func testEditResult(command, status, message, path string, edit aclpolicy.TestEdit) *result {
+	res := newResult(command, status, message)
+	res.File = path
+	res.AssertionIDs = edit.AssertionIDs
+	if edit.TestIndex >= 0 {
+		res.TestIndex = &edit.TestIndex
+	}
+	return res
 }
 
 // Comment flags are registered per command rather than globally. Only the typed
@@ -1735,6 +1805,16 @@ func commandCatalog() []schemaCommand {
 			"test [--watch [--interval DURATION]]",
 		},
 		{
+			commandTestAdd,
+			"Add deny or accept policy assertions without evaluating them; add never renumbers existing assertion IDs",
+			"test add --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]",
+		},
+		{
+			commandTestRemove,
+			"Remove deny or accept policy assertions; removing may renumber later assertion IDs",
+			"test remove --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]",
+		},
+		{
 			cmdCheck,
 			"Answer one reachability question locally",
 			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any]",
@@ -1832,6 +1912,9 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
+	fmt.Fprintln(w, "  tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432")
+	fmt.Fprintln(w, "  tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443")
+	fmt.Fprintln(w, "  tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432")
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save")

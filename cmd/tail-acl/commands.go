@@ -273,6 +273,45 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	cmd.Flags().BoolVar(&watch, "watch", false,
 		"re-run the assertions whenever the policy file changes; never exits non-zero for a verdict")
 	cmd.Flags().DurationVar(&interval, "interval", defaultWatchInterval, "polling interval for --watch")
+	cmd.AddCommand(newTestAddCommand(deps), newTestRemoveCommand(deps))
+	return cmd
+}
+
+func newTestAddCommand(deps *commandDeps) *cobra.Command {
+	var source string
+	var deny, accept stringListFlag
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add deny or accept policy test assertions without evaluating them",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runTestAdd(deps.opts.file, source, []string(deny), []string(accept))
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&source, "src", "", "assertion source")
+	cmd.Flags().Var(&deny, "deny", "denied destination in DST:PORT form; may be repeated")
+	cmd.Flags().Var(&accept, "accept", "accepted destination in DST:PORT form; may be repeated")
+	return cmd
+}
+
+func newTestRemoveCommand(deps *commandDeps) *cobra.Command {
+	var source string
+	var deny, accept stringListFlag
+	cmd := &cobra.Command{
+		Use:   subRemove,
+		Short: "Remove deny or accept policy test assertions; may renumber later assertion IDs",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runTestRemove(deps.opts.file, source, []string(deny), []string(accept))
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&source, "src", "", "assertion source")
+	cmd.Flags().Var(&deny, "deny", "denied destination in DST:PORT form; may be repeated")
+	cmd.Flags().Var(&accept, "accept", "accepted destination in DST:PORT form; may be repeated")
 	return cmd
 }
 
