@@ -8,7 +8,7 @@ Tailscale's policy-file API to validate a candidate, diff it against the live
 tailnet, or upload it.
 
 > **Module** `github.com/rshade/tailscale-utils/tail-acl`. Conforms to the AX
-> conventions in [`../CLAUDE.md`](../CLAUDE.md#ax-conventions-the-shared-standard):
+> conventions in [`../AGENTS.md`](../AGENTS.md#ax-conventions-the-shared-standard):
 > the command result goes to **stdout** (human text, or a versioned JSON
 > envelope with `-format json`); logs and errors go to **stderr**.
 
@@ -73,6 +73,7 @@ tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --pr
 tail-acl --file acl/acl.generated.json lint
 tail-acl --file acl/acl.generated.json lint -severity error   # only fail on errors
 tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
+tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
 
 # Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
 tail-acl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
@@ -119,7 +120,7 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
-| `lint` | Statically report policy-hygiene findings — dead grants, undefined refs, over-broad `*` (`-severity`, `-wildcard`) |
+| `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Replace the entire deployed policy with `--file` (`--if-match` for optimistic concurrency) |
@@ -533,17 +534,47 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `undefined-reference` | error | a `src`/`dst` names a `group:`/`tag:`/`ipset:`/host alias that is not defined |
 | `dst-tag-no-owner` | error | a destination `tag:` has no `tagOwners` entry, so no node can carry it |
 | `overbroad-wildcard` | warn | an over-broad `*` (see `-wildcard`) |
+| `broad-rule-untested` | advice | a blanket source reaches a concrete destination on every port, with no posture/via gate and no deny assertion naming that destination |
 | `grant-empty` | warn | a grant has an empty required selector list and can never match |
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule |
 
-`-severity info|warn|error` (default `warn`) sets the lowest severity that makes
+`-severity advice|info|warn|error` (default `warn`) sets the lowest severity that makes
 the run exit `1`; below it the finding is still reported but the run exits `0`.
+Advice ranks below info, so the new advisory does not change exit behavior for
+existing callers at either the default `warn` threshold or `info`. Pass
+`-severity advice` to make advisories fail the run.
 `-wildcard any-to-any|any|off` (default `any-to-any`) tunes the wildcard check:
 `any-to-any` flags only a grant whose `src` and `dst` are both `*` (a standalone
 `*` is common and allowed), `any` flags every `*`, and `off` disables it.
 Autogroups are treated as defined by their `autogroup:` prefix alone, so a new
 autogroup Tailscale ships never false-positives as an undefined reference.
+
+The `broad-rule-untested` advice tier is heuristic, not a declaration that the
+policy is defective. It closes a deny-first authoring loop: lint identifies an
+all-port grant with no asserted boundary and, when the policy supplies a
+concrete port, emits a compact JSON test to paste into `tests`. The local
+`tail-acl test` run then goes red because the broad grant reaches that target;
+narrowing the grant makes the test green, and the deny assertion makes the
+advisory quiet. Only `deny` assertions count as coverage; coverage compares the
+destination host selector exactly and ignores source and port.
+
+Intentional broad destinations can be excluded with a reviewed HuJSON config:
+
+```hujson
+{
+  "checks": {
+    "broad-rule-untested": {
+      // Destinations everyone is supposed to reach.
+      "allowBroad": ["tag:printer", "tag:logging"],
+    },
+  },
+}
+```
+
+Pass it as `lint -config acl/lint.hujson`. Unknown fields fail the run instead
+of silently discarding an exclusion. Exclusions are keyed by destination so
+they stay stable when merged policy fragments reorder grants.
 
 Lint is deliberately **node-blind**: whether a tag is carried by a real device
 is a control-plane coverage question that belongs to `tailnet-audit`, not here.

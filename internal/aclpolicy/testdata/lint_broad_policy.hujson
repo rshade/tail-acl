@@ -1,0 +1,9 @@
+{
+	"groups": {"group:dev": ["alice@example.com"]},
+	"tagOwners": {"tag:db": ["group:dev"]},
+	"grants": [
+		// Broad and untested; the next grant supplies a policy-derived port.
+		{"src": ["autogroup:member"], "dst": ["tag:db"], "ip": ["*"]},
+		{"src": ["group:dev"], "dst": ["tag:db"], "ip": ["tcp:5432"]},
+	],
+}

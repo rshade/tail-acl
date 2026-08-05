@@ -1,0 +1,27 @@
+{
+  "findings": [
+    {
+      "id": "broad-rule-untested",
+      "severity": "advice",
+      "rule": "grants[0].dst[0]",
+      "value": "tag:db",
+      "evidence": "broad grant reaches tag:db on every port and no deny assertion names it",
+      "remediation": "add a deny assertion for tag:db, then narrow the grant until the assertion passes",
+      "suggestion": "{\"src\":\"autogroup:member\",\"deny\":[\"tag:db:5432\"]}",
+      "trace": [
+        "grants[0] source contains blanket selector autogroup:member",
+        "grants[0] network capability opens every port",
+        "tag:db is a concrete destination",
+        "no tests[].deny entry names tag:db",
+        "suggestion uses derived port 5432 for tag:db"
+      ]
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "error": 0,
+    "warn": 0,
+    "info": 0,
+    "advice": 1
+  }
+}

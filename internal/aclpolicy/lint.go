@@ -12,10 +12,13 @@ import (
 	"github.com/rshade/tailscale-utils/policycore"
 )
 
-// LintSeverity ranks a lint finding. info < warn < error.
+// LintSeverity ranks a lint finding. advice < info < warn < error.
 type LintSeverity string
 
 const (
+	// LintAdvice is a heuristic worth considering, but not a defect. It ranks
+	// below info so adding an advisory never changes existing lint exit codes.
+	LintAdvice LintSeverity = "advice"
 	// LintInfo is hygiene worth surfacing but not a defect (e.g. an unused
 	// definition).
 	LintInfo LintSeverity = "info"
@@ -33,6 +36,7 @@ const (
 	LintUndefinedReference = "undefined-reference"
 	LintDstTagNoOwner      = "dst-tag-no-owner"
 	LintOverbroadWildcard  = "overbroad-wildcard"
+	LintBroadRuleUntested  = "broad-rule-untested"
 	LintGrantEmpty         = "grant-empty"
 	LintDuplicateGrant     = "duplicate-grant"
 	LintUnusedTag          = "unused-tag"
@@ -57,7 +61,8 @@ const (
 
 // Severity ranks, ordered so a higher rank is more severe.
 const (
-	rankInfo = iota
+	rankAdvice = iota
+	rankInfo
 	rankWarn
 	rankError
 )
@@ -77,6 +82,8 @@ const (
 
 func lintSeverityRank(s LintSeverity) int {
 	switch s {
+	case LintAdvice:
+		return rankAdvice
 	case LintInfo:
 		return rankInfo
 	case LintWarn:
@@ -96,7 +103,7 @@ func (s LintSeverity) AtLeast(threshold LintSeverity) bool {
 // ParseLintSeverity parses a severity name, reporting whether it was valid.
 func ParseLintSeverity(value string) (LintSeverity, bool) {
 	switch LintSeverity(value) {
-	case LintInfo, LintWarn, LintError:
+	case LintAdvice, LintInfo, LintWarn, LintError:
 		return LintSeverity(value), true
 	default:
 		return "", false
@@ -125,6 +132,7 @@ type LintFinding struct {
 	Value       string       `json:"value,omitempty"`
 	Evidence    string       `json:"evidence"`
 	Remediation string       `json:"remediation,omitempty"`
+	Suggestion  string       `json:"suggestion,omitempty"`
 	Trace       []string     `json:"trace,omitempty"`
 }
 
@@ -134,6 +142,9 @@ type LintSummary struct {
 	Error int `json:"error"`
 	Warn  int `json:"warn"`
 	Info  int `json:"info"`
+	// Advice is omitted when zero so reports with no advisories retain their
+	// existing JSON shape byte for byte.
+	Advice int `json:"advice,omitempty"`
 }
 
 // LintReport is the pure, deterministic result of statically linting a policy.
@@ -158,6 +169,9 @@ type LintOptions struct {
 	// Wildcard selects how strictly "*" is flagged. The zero value is treated as
 	// WildcardAnyToAny.
 	Wildcard WildcardPolicy
+	// AllowBroadDestinations excludes destination selectors that are
+	// intentionally reachable from a blanket source on every port.
+	AllowBroadDestinations []string
 }
 
 // LintCheck describes one class of lint finding for the machine-readable schema.
@@ -175,6 +189,11 @@ func LintCatalog() []LintCheck {
 		{LintUndefinedReference, LintError, "a src/dst names a group/tag/ipset/host alias that is not defined"},
 		{LintDstTagNoOwner, LintError, "a destination tag has no tagOwners entry, so no node can carry it"},
 		{LintOverbroadWildcard, LintWarn, "an over-broad * selector (tuned by -wildcard)"},
+		{
+			LintBroadRuleUntested,
+			LintAdvice,
+			"a broad all-port grant reaches a concrete destination that no deny assertion names",
+		},
 		{LintGrantEmpty, LintWarn, "a grant has an empty required selector list and can never match"},
 		{LintDuplicateGrant, LintWarn, "a grant is identical to an earlier one"},
 		{LintUnusedTag, LintInfo, "a tag is defined but referenced by no rule"},
@@ -226,6 +245,7 @@ func evaluateLint(
 
 	findings := make([]LintFinding, 0)
 	findings = append(findings, lintGrants(policy, wildcard)...)
+	findings = append(findings, lintBroadRuleUntested(policy, opts.AllowBroadDestinations)...)
 	findings = append(findings, lintACLs(policy, wildcard)...)
 	findings = append(findings, lintSSHRules(policy, sshRules)...)
 	findings = append(findings, lintSSHTests(policy, sshTests)...)
@@ -252,6 +272,8 @@ func evaluateLint(
 	for _, finding := range findings {
 		report.Summary.Total++
 		switch finding.Severity {
+		case LintAdvice:
+			report.Summary.Advice++
 		case LintError:
 			report.Summary.Error++
 		case LintWarn:

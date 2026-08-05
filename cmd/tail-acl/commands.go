@@ -343,7 +343,7 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 }
 
 func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
-	var severity, wildcard string
+	var severity, wildcard, configPath string
 	cmd := &cobra.Command{
 		Use:   cmdLint,
 		Short: lintSummary,
@@ -353,15 +353,17 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := runLint(ctx, *deps.opts, lintOpts, threshold, deps.logger())
+			out, err := runLint(ctx, *deps.opts, lintOpts, threshold, configPath, deps.logger())
 			*deps.result = out
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&severity, "severity", string(aclpolicy.LintWarn),
-		"minimum finding severity that sets a non-zero exit: info|warn|error")
+		"minimum finding severity that sets a non-zero exit: advice|info|warn|error")
 	cmd.Flags().StringVar(&wildcard, "wildcard", string(aclpolicy.WildcardAnyToAny),
 		"over-broad wildcard policy: any-to-any|any|off")
+	cmd.Flags().StringVar(&configPath, "config", "",
+		"HuJSON lint config path (currently broad-rule-untested allowBroad exclusions)")
 	return cmd
 }
 

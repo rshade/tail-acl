@@ -192,19 +192,9 @@ func LoadBytes(name string, raw []byte) (*Policy, error) {
 	if err = checkDuplicateMembers(document); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	standard, err := hujson.Standardize(raw)
-	if err != nil {
-		return nil, fmt.Errorf("standardizing %s: %w", name, err)
-	}
-
 	var policy Policy
-	decoder := json.NewDecoder(bytes.NewReader(standard))
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&policy); err != nil {
-		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", name, err)
-	}
-	if err = ensureEOF(decoder); err != nil {
-		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", name, err)
+	if err = decodeHuJSON(name, raw, "a Tailscale policy", &policy); err != nil {
+		return nil, err
 	}
 
 	// SSH authoring does not exist, so this one-way copy is safe: Policy.SSH is
@@ -212,6 +202,25 @@ func LoadBytes(name string, raw []byte) (*Policy, error) {
 	// read-only evaluator handed &policy.ACL never sees a false empty policy.
 	policy.ACL.SSH = policy.sshRules()
 	return &policy, nil
+}
+
+// decodeHuJSON standardizes and strictly decodes one already-read HuJSON
+// document. Policy and lint-config loading share this path so unknown-field and
+// trailing-value behavior cannot drift between the two local file formats.
+func decodeHuJSON(name string, raw []byte, description string, destination any) error {
+	standard, err := hujson.Standardize(raw)
+	if err != nil {
+		return fmt.Errorf("standardizing %s: %w", name, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(standard))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(destination); err != nil {
+		return fmt.Errorf("decoding %s as %s: %w", name, description, err)
+	}
+	if err = ensureEOF(decoder); err != nil {
+		return fmt.Errorf("decoding %s as %s: %w", name, description, err)
+	}
+	return nil
 }
 
 // sshRules projects Policy.SSH onto the pinned client's shape. It is the only

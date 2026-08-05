@@ -2396,11 +2396,7 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 			t.Errorf("schema usage for %q is missing [--comment TEXT]: %#v", name, doc.Commands)
 		}
 	}
-	if !slices.ContainsFunc(doc.LintFindings, func(check aclpolicy.LintCheck) bool {
-		return check.ID == aclpolicy.LintUndefinedReference
-	}) {
-		t.Errorf("schema lint_findings = %#v, want the finding catalog", doc.LintFindings)
-	}
+	assertSchemaLintFindings(t, doc.LintFindings)
 	if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool { return command.Name == cmdTest }) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, cmdTest)
 	}
@@ -2424,6 +2420,19 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 		func(command schemaCommand) bool { return command.Name == commandPostureRemove },
 	) {
 		t.Errorf("schema commands = %#v, want %q", doc.Commands, commandPostureRemove)
+	}
+}
+
+func assertSchemaLintFindings(t *testing.T, findings []aclpolicy.LintCheck) {
+	t.Helper()
+	hasUndefinedReference := slices.ContainsFunc(findings, func(check aclpolicy.LintCheck) bool {
+		return check.ID == aclpolicy.LintUndefinedReference
+	})
+	hasBroadAdvice := slices.ContainsFunc(findings, func(check aclpolicy.LintCheck) bool {
+		return check.ID == aclpolicy.LintBroadRuleUntested && check.Severity == aclpolicy.LintAdvice
+	})
+	if !hasUndefinedReference || !hasBroadAdvice {
+		t.Errorf("schema lint_findings = %#v, want the complete finding catalog", findings)
 	}
 }
 
@@ -2844,6 +2853,74 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 	}
 }
 
+func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"groups": {
+			"group:dev": ["alice@example.com"],
+			"group:unused": ["nobody@example.com"]
+		},
+		"tagOwners": {"tag:db": ["group:dev"]},
+		"grants": [
+			{"src": ["autogroup:member"], "dst": ["tag:db"], "ip": ["*"]},
+			{"src": ["group:dev"], "dst": ["tag:db"], "ip": ["tcp:5432"]}
+		]
+	}`)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdLint},
+		func(string) string { return "" },
+		nil,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	for _, want := range []string{
+		"INFO unused-group groups[group:unused] group:unused",
+		"advisory (heuristic; not a defect, and does not affect the exit code at the default severity):",
+		"ADVICE broad-rule-untested grants[0].dst[0] tag:db",
+		`  suggested test: {"src":"autogroup:member","deny":["tag:db:5432"]}`,
+		"tail-acl: 2 findings: 0 error, 0 warn, 1 info, 1 advice",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	infoIndex := strings.Index(stdout.String(), "INFO unused-group")
+	caveatIndex := strings.Index(stdout.String(), "advisory (heuristic")
+	adviceIndex := strings.Index(stdout.String(), "ADVICE broad-rule-untested")
+	summaryIndex := strings.Index(stdout.String(), "tail-acl: 2 findings")
+	if infoIndex < 0 || caveatIndex < 0 || adviceIndex < 0 || summaryIndex < 0 ||
+		infoIndex >= caveatIndex || caveatIndex >= adviceIndex || adviceIndex >= summaryIndex {
+		t.Errorf("finding order = info:%d caveat:%d advice:%d summary:%d; output:\n%s",
+			infoIndex, caveatIndex, adviceIndex, summaryIndex, stdout.String())
+	}
+	for _, character := range []byte(stdout.String()) {
+		if character > 127 {
+			t.Fatalf("stdout contains non-ASCII byte %#x: %q", character, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
+func TestNewLintResultUsesSingularFinding(t *testing.T) {
+	t.Parallel()
+
+	res := newLintResult("acl.hujson", aclpolicy.LintReport{
+		Summary: aclpolicy.LintSummary{Total: 1, Advice: 1},
+	})
+	if want := "1 finding: 0 error, 0 warn, 0 info, 1 advice"; res.Message != want {
+		t.Errorf("Message = %q, want %q", res.Message, want)
+	}
+}
+
 func TestLintJSONEnvelope(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -2936,6 +3013,23 @@ func TestLintFlags(t *testing.T) {
 			wantCode: exitFailed,
 		},
 		{
+			name:     "advice does not fail at default warn",
+			policy:   broadLintPolicy,
+			wantCode: exitOK,
+		},
+		{
+			name:     "advice does not fail at info",
+			policy:   broadLintPolicy,
+			args:     []string{"-severity", "info"},
+			wantCode: exitOK,
+		},
+		{
+			name:     "severity advice opts in",
+			policy:   broadLintPolicy,
+			args:     []string{"-severity", "advice"},
+			wantCode: exitFailed,
+		},
+		{
 			name:     "any-to-any wildcard warns by default",
 			policy:   `{"grants": [{"src": ["*"], "dst": ["*"], "ip": ["tcp:443"]}]}`,
 			args:     nil,
@@ -2966,6 +3060,43 @@ func TestLintFlags(t *testing.T) {
 				t.Errorf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
 			}
 		})
+	}
+}
+
+const broadLintPolicy = `{
+	"groups":{"group:dev":["alice@example.com"]},
+	"tagOwners":{"tag:db":["group:dev"]},
+	"grants":[
+		{"src":["autogroup:member"],"dst":["tag:db"],"ip":["*"]},
+		{"src":["group:dev"],"dst":["tag:db"],"ip":["tcp:5432"]}
+	]
+}`
+
+func TestLintConfigAllowBroadAndFailures(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	policyPath := filepath.Join(directory, "acl.hujson")
+	configPath := filepath.Join(directory, "lint.hujson")
+	writeTestPolicy(t, policyPath, broadLintPolicy)
+	writeTestPolicy(t, configPath, `{
+		"checks":{"broad-rule-untested":{"allowBroad":["tag:db"]}}
+	}`)
+	err := run(
+		context.Background(),
+		[]string{"--file", policyPath, cmdLint, "-severity", "advice", "-config", configPath},
+		func(string) string { return "" }, nil, "", io.Discard, io.Discard,
+	)
+	if code := exitCode(err); code != exitOK {
+		t.Errorf("configured exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+
+	err = run(
+		context.Background(),
+		[]string{"--file", policyPath, cmdLint, "-config", filepath.Join(directory, "missing.hujson")},
+		func(string) string { return "" }, nil, "", io.Discard, io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Errorf("missing config exit code = %d, want %d (error %v)", code, exitUsage, err)
 	}
 }
 

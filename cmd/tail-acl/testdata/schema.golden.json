@@ -72,8 +72,8 @@
     },
     {
       "name": "lint",
-      "summary": "Statically lint policy hygiene (dead grants, undefined refs, over-broad *)",
-      "usage": "lint [-severity info|warn|error] [-wildcard any-to-any|any|off]"
+      "summary": "Statically lint policy hygiene and broad-rule test coverage (-config currently supports broad-rule-untested allowBroad exclusions)",
+      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]"
     },
     {
       "name": "pull",
@@ -170,6 +170,11 @@
       "description": "an over-broad * selector (tuned by -wildcard)",
       "id": "overbroad-wildcard",
       "severity": "warn"
+    },
+    {
+      "description": "a broad all-port grant reaches a concrete destination that no deny assertion names",
+      "id": "broad-rule-untested",
+      "severity": "advice"
     },
     {
       "description": "a grant has an empty required selector list and can never match",

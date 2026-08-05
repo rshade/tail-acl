@@ -1,7 +1,7 @@
 // Command tail-acl makes typed edits to a Tailscale policy file and can merge,
 // validate, test, check, lint, plan, or upload it with Tailscale's policy-file API.
 //
-// Output contract (AX conventions, see ../../CLAUDE.md): the command result is
+// Output contract (AX conventions, see ../../../AGENTS.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
 // -format json — while logs and errors go to stderr. Exit codes: 0 success,
 // 1 the operation or an assertion failed, 2 usage/input/collection failed, and
@@ -111,7 +111,8 @@ const (
 
 	// lintSummary is shared by commandCatalog and newLintCommand's Short text
 	// so the two descriptions of "lint" cannot drift.
-	lintSummary = "Statically lint policy hygiene (dead grants, undefined refs, over-broad *)"
+	lintSummary = "Statically lint policy hygiene and broad-rule test coverage " +
+		"(-config currently supports broad-rule-untested allowBroad exclusions)"
 
 	policyFormatHuJSON = "hujson"
 )
@@ -555,24 +556,59 @@ func render(w io.Writer, format string, res *result) error {
 		}
 	}
 	if res.Findings != nil {
-		for _, finding := range *res.Findings {
-			locator := finding.Rule
-			if finding.Value != "" {
-				locator = finding.Rule + " " + finding.Value
-			}
-			if _, err := fmt.Fprintf(
-				w,
-				"%s %s %s: %s\n",
-				strings.ToUpper(string(finding.Severity)),
-				finding.ID,
-				locator,
-				finding.Evidence,
-			); err != nil {
+		if err := renderLintFindings(w, *res.Findings); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
+	return err
+}
+
+func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
+	for _, finding := range findings {
+		if finding.Severity != aclpolicy.LintAdvice {
+			if err := renderLintFinding(w, finding); err != nil {
 				return err
 			}
 		}
 	}
-	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
+	advice := slices.Clone(findings)
+	advice = slices.DeleteFunc(advice, func(finding aclpolicy.LintFinding) bool {
+		return finding.Severity != aclpolicy.LintAdvice
+	})
+	if len(advice) == 0 {
+		return nil
+	}
+	const caveat = "advisory (heuristic; not a defect, and does not affect the exit code at the default severity):"
+	if _, err := fmt.Fprintln(w, caveat); err != nil {
+		return err
+	}
+	for _, finding := range advice {
+		if err := renderLintFinding(w, finding); err != nil {
+			return err
+		}
+		if finding.Suggestion != "" {
+			if _, err := fmt.Fprintln(w, "  suggested test:", finding.Suggestion); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding) error {
+	locator := finding.Rule
+	if finding.Value != "" {
+		locator = finding.Rule + " " + finding.Value
+	}
+	_, err := fmt.Fprintf(
+		w,
+		"%s %s %s: %s\n",
+		strings.ToUpper(string(finding.Severity)),
+		finding.ID,
+		locator,
+		finding.Evidence,
+	)
 	return err
 }
 
@@ -1572,8 +1608,16 @@ func runLint(
 	opts options,
 	lintOpts aclpolicy.LintOptions,
 	threshold aclpolicy.LintSeverity,
+	configPath string,
 	logger *slog.Logger,
 ) (*result, error) {
+	if configPath != "" {
+		config, err := aclpolicy.LoadLintConfig(configPath)
+		if err != nil {
+			return nil, usagef("could not load lint config: %v", err)
+		}
+		lintOpts.AllowBroadDestinations = config.Checks.BroadRuleUntested.AllowBroad
+	}
 	policy, err := aclpolicy.Load(opts.file)
 	if err != nil {
 		return nil, usagef("could not load policy for lint: %v", err)
@@ -1601,7 +1645,10 @@ func runLint(
 func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
 	threshold, ok := aclpolicy.ParseLintSeverity(severityRaw)
 	if !ok {
-		return aclpolicy.LintOptions{}, "", usagef("unknown -severity %q; want info, warn, or error", severityRaw)
+		return aclpolicy.LintOptions{}, "", usagef(
+			"unknown -severity %q; want advice, info, warn, or error",
+			severityRaw,
+		)
 	}
 	wildcardPolicy, ok := aclpolicy.ParseWildcardPolicy(wildcardRaw)
 	if !ok {
@@ -1611,13 +1658,21 @@ func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions,
 }
 
 func newLintResult(path string, report aclpolicy.LintReport) *result {
+	findingNoun := "findings"
+	if report.Summary.Total == 1 {
+		findingNoun = "finding"
+	}
 	message := fmt.Sprintf(
-		"%d findings: %d error, %d warn, %d info",
+		"%d %s: %d error, %d warn, %d info",
 		report.Summary.Total,
+		findingNoun,
 		report.Summary.Error,
 		report.Summary.Warn,
 		report.Summary.Info,
 	)
+	if report.Summary.Advice != 0 {
+		message += fmt.Sprintf(", %d advice", report.Summary.Advice)
+	}
 	if report.Summary.Total == 0 {
 		message = fmt.Sprintf("no policy hygiene findings in %s", path)
 	}
@@ -1822,7 +1877,7 @@ func commandCatalog() []schemaCommand {
 		{
 			cmdLint,
 			lintSummary,
-			"lint [-severity info|warn|error] [-wildcard any-to-any|any|off]",
+			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]",
 		},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
@@ -1924,6 +1979,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")

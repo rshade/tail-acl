@@ -443,8 +443,12 @@ func TestEvaluateLintNilPolicy(t *testing.T) {
 
 func TestLintSeverityHelpers(t *testing.T) {
 	t.Parallel()
-	if !aclpolicy.LintError.AtLeast(aclpolicy.LintWarn) || aclpolicy.LintInfo.AtLeast(aclpolicy.LintWarn) {
+	if !aclpolicy.LintError.AtLeast(aclpolicy.LintWarn) || aclpolicy.LintInfo.AtLeast(aclpolicy.LintWarn) ||
+		aclpolicy.LintAdvice.AtLeast(aclpolicy.LintInfo) {
 		t.Error("AtLeast ranking is wrong")
+	}
+	if severity, ok := aclpolicy.ParseLintSeverity("advice"); !ok || severity != aclpolicy.LintAdvice {
+		t.Error("ParseLintSeverity rejected advice")
 	}
 	if _, ok := aclpolicy.ParseLintSeverity("bogus"); ok {
 		t.Error("ParseLintSeverity accepted a bogus value")
@@ -453,10 +457,14 @@ func TestLintSeverityHelpers(t *testing.T) {
 		t.Error("ParseWildcardPolicy accepted a bogus value")
 	}
 	report := aclpolicy.LintReport{Findings: []aclpolicy.LintFinding{
-		{Severity: aclpolicy.LintInfo}, {Severity: aclpolicy.LintWarn}, {Severity: aclpolicy.LintError},
+		{Severity: aclpolicy.LintAdvice}, {Severity: aclpolicy.LintInfo},
+		{Severity: aclpolicy.LintWarn}, {Severity: aclpolicy.LintError},
 	}}
 	if got := report.CountAtLeast(aclpolicy.LintWarn); got != 2 {
 		t.Errorf("CountAtLeast(warn) = %d, want 2", got)
+	}
+	if got := report.CountAtLeast(aclpolicy.LintAdvice); got != 4 {
+		t.Errorf("CountAtLeast(advice) = %d, want 4", got)
 	}
 }
 
