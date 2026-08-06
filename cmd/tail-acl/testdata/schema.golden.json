@@ -11,6 +11,11 @@
   },
   "commands": [
     {
+      "name": "init",
+      "summary": "Initialize an empty policy for typed authoring",
+      "usage": "init"
+    },
+    {
       "name": "grant add",
       "summary": "Append a grant to the policy",
       "usage": "grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME] [--comment TEXT]"

@@ -46,6 +46,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 
 	root.AddCommand(
 		grant, tagOwner, host, posture,
+		newInitCommand(deps),
 		newMergeCommand(deps),
 		newValidateCommand(ctx, deps),
 		newTestCommand(ctx, deps),
@@ -55,6 +56,19 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),
 	)
+}
+
+func newInitCommand(deps *commandDeps) *cobra.Command {
+	return &cobra.Command{
+		Use:   cmdInit,
+		Short: "Initialize an empty policy for typed authoring",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runInit(deps.opts.file)
+			*deps.result = out
+			return err
+		},
+	}
 }
 
 // runParentCommand is RunE for the four grouping commands (grant, tag-owner,

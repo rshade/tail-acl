@@ -107,6 +107,7 @@ const (
 	cmdTagOwner = "tag-owner"
 	cmdHost     = "host"
 	cmdPosture  = "posture"
+	cmdInit     = "init"
 	cmdMerge    = "merge"
 	cmdValidate = "validate"
 	cmdTest     = "test"
@@ -1229,6 +1230,23 @@ func runMerge(path string, dirs []string) (*result, error) {
 	return res, nil
 }
 
+// runInit creates the smallest valid policy document for typed authoring. It
+// deliberately refuses to replace an existing file: init is a bootstrap, not
+// an alternate upload path or a way to discard comments from a pulled policy.
+func runInit(path string) (*result, error) {
+	if _, err := os.Stat(path); err == nil {
+		return nil, usagef("refusing to overwrite existing policy file %s", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, usagef("checking policy file %s: %v", path, err)
+	}
+	if err := aclpolicy.WriteRaw(path, []byte("{}\n")); err != nil {
+		return nil, usagef("initializing policy file %s: %v", path, err)
+	}
+	res := newResult(cmdInit, statusOK, fmt.Sprintf("initialized empty policy in %s", path))
+	res.File = path
+	return res, nil
+}
+
 func runValidate(
 	ctx context.Context,
 	opts options,
@@ -2223,6 +2241,7 @@ type schemaTypedEditCapability struct {
 // usage() and the -schema document so a human and an agent see the same set.
 func commandCatalog() []schemaCommand {
 	return []schemaCommand{
+		{cmdInit, "Initialize an empty policy for typed authoring", cmdInit},
 		{
 			commandGrantAdd,
 			"Append a grant to the policy",
@@ -2348,6 +2367,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fs.PrintDefaults()
 	fmt.Fprint(w, usageRosterNote)
 	fmt.Fprintln(w, "\nExamples:")
+	fmt.Fprintln(w, "  tail-acl --file acl.json init")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
 	fmt.Fprintln(w, "  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved")
 	fmt.Fprintln(w, "  tail-acl --file acl.json posture set posture:labCompliant \"custom:labCompliant == true\"")

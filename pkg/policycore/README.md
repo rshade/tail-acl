@@ -96,3 +96,9 @@ matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, ""
 
 This is a library module with no binary. It depends only on the Tailscale v2
 API client and the standard library.
+
+## Documentation
+
+This README covers the resolution semantics. For the exported functions,
+signatures, and helper inventory, see the
+[public API reference](./docs/public-api.md).

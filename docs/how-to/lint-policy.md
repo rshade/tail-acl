@@ -1,0 +1,131 @@
+# Lint a policy and act on the findings
+
+`lint` reports policy-hygiene problems that validation does not catch: a policy
+can be valid and still carry grants that match nothing, destination tags no
+node can own, or references to definitions that were renamed away.
+
+This guide covers running the check, triaging what it reports, and turning the
+result into a gate. The full finding table lives in the
+[`tail-acl` README](../../README.md).
+
+## Run it
+
+```sh
+tail-acl --file acl/acl.hujson lint
+```
+
+The run is pure: no credentials, no network. Every finding carries a stable
+id, a severity, a locator such as `grants[2].dst[0]`, evidence, a remediation
+hint, and a decision trace.
+
+For a machine consumer, take the JSON envelope:
+
+```sh
+tail-acl --format json --file acl/acl.hujson lint
+```
+
+## Triage by severity
+
+Severities rank `advice` < `info` < `warn` < `error`. Work them in that order
+from the top:
+
+1. **`error`** — the policy is broken in a way that cannot be intended. A
+   reference names something undefined, or a destination tag has no
+   `tagOwners` entry, so no node can ever carry it. Fix these first.
+2. **`warn`** — the policy is probably not what you meant. An over-broad `*`,
+   a grant that can never match, or a grant duplicated from an earlier one.
+3. **`info`** — a definition nothing references. Usually dead weight left by a
+   rename; occasionally deliberate.
+4. **`advice`** — a heuristic suggestion, not a defect. See the authoring loop
+   below.
+
+## Choose the failure threshold
+
+`-severity` sets the lowest severity that makes the run exit `1`:
+
+```sh
+tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage fails
+tail-acl --file acl/acl.hujson lint                   # default: warn and above
+tail-acl --file acl/acl.hujson lint -severity advice  # advisories fail too
+```
+
+Findings below the threshold are still reported — the threshold changes the
+exit code, not the output. That distinction is what lets one run serve both a
+strict gate and a human reading the full picture.
+
+Tune the wildcard check separately with `-wildcard`:
+
+- `any-to-any` (default) flags only a grant whose `src` and `dst` are both `*`
+- `any` flags every `*`
+- `off` disables the check
+
+## Close the loop on a broad-rule advisory
+
+`broad-rule-untested` fires when a blanket source reaches a concrete
+destination on every port, with no posture or `via` gate and no deny assertion
+naming that destination. It is a prompt, not a verdict.
+
+When the policy supplies a concrete port, the advisory includes a compact JSON
+test to paste into `tests`. That gives you a deny-first authoring loop:
+
+1. Paste the suggested assertion into the policy's `tests`.
+2. Run `tail-acl --file acl/acl.hujson test`. It goes red, because the broad
+   grant does reach that destination.
+3. Narrow the grant until the test goes green.
+4. The deny assertion now covers the destination, so the advisory goes quiet.
+
+Only `deny` assertions count as coverage, and coverage compares the
+destination host selector exactly, ignoring source and port.
+
+If the policy supplies no concrete source or no concrete port, the advisory
+stays but the suggestion is omitted rather than invented.
+
+## Exclude a destination everyone is meant to reach
+
+Some broad destinations are correct. Record that decision in a reviewed
+config rather than lowering the threshold:
+
+```hujson
+{
+  "checks": {
+    "broad-rule-untested": {
+      // Destinations everyone is supposed to reach.
+      "allowBroad": ["tag:printer", "tag:logging"],
+    },
+  },
+}
+```
+
+```sh
+tail-acl --file acl/acl.hujson lint -config acl/lint.hujson
+```
+
+Unknown fields fail the run instead of silently discarding an exclusion.
+Exclusions are keyed by destination, so they stay stable when merged policy
+fragments reorder grants.
+
+## Gate it in CI
+
+```sh
+tail-acl --file acl/acl.hujson lint -severity warn
+```
+
+Exit `0` means nothing at or above the threshold; exit `1` means there is.
+Exit `2` is a usage or input error and never a policy verdict — fail the build
+loudly on it rather than treating it as "clean". See
+[Exit codes](../reference/exit-codes.md) and
+[Gate policy changes in CI](../../../docs/how-to/gate-policy-changes-in-ci.md).
+
+## What lint will not tell you
+
+`lint` is deliberately **node-blind**. Whether a tag is carried by a real
+device, whether a route is approved, whether a key is about to expire — those
+need the live device inventory, and they belong to `tailnet-audit`.
+
+The discriminator is "does this finding need the live fleet?" If yes, it is
+not a `lint` finding.
+
+## Related
+
+- [Adopt tail-acl for an existing tailnet](./bootstrap-existing-tailnet.md)
+- [Offline evaluation and safety](../explanation/offline-evaluation.md)

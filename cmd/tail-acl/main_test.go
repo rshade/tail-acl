@@ -25,6 +25,42 @@ import (
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 )
 
+func TestInitBootstrapsTypedAuthoringWithoutOverwriting(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	runCommand := func() error {
+		return run(
+			context.Background(),
+			[]string{"--file", path, cmdInit},
+			func(string) string { return "" },
+			http.DefaultClient,
+			"",
+			io.Discard,
+			io.Discard,
+		)
+	}
+	if err := runCommand(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{}\n" {
+		t.Fatalf("initialized bytes = %q, want minimal policy", raw)
+	}
+	if err = runCommand(); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("second init error = %v, want overwrite refusal", err)
+	}
+	rawAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rawAfter, raw) {
+		t.Fatalf("second init changed policy: got %q, want %q", rawAfter, raw)
+	}
+}
+
 func TestTypedPolicyEdits(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.json")

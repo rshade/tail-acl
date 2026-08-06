@@ -17,6 +17,16 @@ It ships three binaries: `tail-acl` (the primary CLI), plus the focused helpers
 helpers' behaviour is also available as `tail-acl merge` / `tail-acl upload`;
 prefer `tail-acl` for the full AX-conformant contract.
 
+This README is the primary documentation, and `tail-acl --help` / `--schema`
+are the authoritative command catalogs. Task guides and longer discussions
+have their own pages under [`docs/`](./docs/README.md) — adopting an existing
+tailnet, [linting a policy](./docs/how-to/lint-policy.md),
+[watch mode](./docs/how-to/watch-policy-tests.md), the
+[exit-code reference](./docs/reference/exit-codes.md), and
+[offline evaluation and safety](./docs/explanation/offline-evaluation.md),
+which explains why an indeterminate verdict exits `10` instead of failing
+closed or passing open.
+
 ## Build
 
 ```sh
