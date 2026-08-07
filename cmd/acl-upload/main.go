@@ -190,12 +190,15 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "acl-upload — upload a policy file to a Tailscale tailnet.")
+	fmt.Fprintln(w, "acl-upload: upload a policy file to a Tailscale tailnet.")
 	fmt.Fprintln(w, "\nUsage: acl-upload [--file acl.json] [--tailnet TAILNET] [--api-key TOKEN] [--if-match ETAG]")
 	fmt.Fprintln(w, "\nFlags:")
 	// PrintDefaults writes to the FlagSet's own configured output (stderr by
 	// default), not to w, so point it at w explicitly before calling it.
 	fs.SetOutput(w)
 	fs.PrintDefaults()
+	fmt.Fprintln(w, "\nExamples:")
+	fmt.Fprintln(w, "  TAILSCALE_API_KEY=tskey-api-... TAILSCALE_TAILNET=example.com acl-upload")
+	fmt.Fprintln(w, "  acl-upload --file acl.json --tailnet example.com --api-key tskey-api-... --if-match ETAG")
 	fmt.Fprintln(w, "\nExit codes: 0 success; 1 failure (bad flags, missing credentials, or API error).")
 }

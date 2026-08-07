@@ -220,11 +220,17 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "hujson-merge: deep-merge HuJSON policy files.")
+	fmt.Fprintln(w, "\nUsage:")
 	fmt.Fprintln(w, "  hujson-merge --base FILE --add FILE [--out FILE|-]")
 	fmt.Fprintln(w, "  hujson-merge --dir DIR [--dir DIR ...] [--out FILE|-]")
+	fmt.Fprintln(w, "\nFlags:")
 	// PrintDefaults writes to the FlagSet's own configured output (stderr by
 	// default), not to w, so point it at w explicitly before calling it.
 	fs.SetOutput(w)
 	fs.PrintDefaults()
+	fmt.Fprintln(w, "\nExamples:")
+	fmt.Fprintln(w, "  hujson-merge --base acl.hujson --add web.acl.hujson")
+	fmt.Fprintln(w, "  hujson-merge --dir base --dir overlays --out acl.json")
+	fmt.Fprintln(w, "\nExit codes: 0 success; 1 failure (bad flags, unreadable input, invalid HuJSON, or write error).")
 }

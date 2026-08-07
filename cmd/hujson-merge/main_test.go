@@ -297,6 +297,25 @@ func TestBothDashSpellingsAccepted(t *testing.T) {
 	}
 }
 
+func TestHelpCarriesTheAuditableCLIContract(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run(--help): %v (stderr: %s)", err, stderr.String())
+	}
+	for _, section := range []string{"Examples:", "Exit codes:"} {
+		if !strings.Contains(stdout.String(), section) {
+			t.Errorf("help is missing %q:\n%s", section, stdout.String())
+		}
+	}
+	for _, value := range stdout.Bytes() {
+		if value >= 0x80 {
+			t.Fatalf("help contains non-ASCII bytes: %q", stdout.String())
+		}
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

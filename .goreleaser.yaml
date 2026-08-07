@@ -6,7 +6,9 @@
 # Release object; the workflow builds with `--skip=publish` and attaches the
 # dist/ archives via `gh release upload "<full-prefixed-tag>"` (goreleaser's
 # own publisher can't target a slash-prefixed tag).
-# Local smoke test needs no tag: `goreleaser release --snapshot --clean`.
+# Local smoke test: `GORELEASER_CURRENT_TAG=v0.2.0 goreleaser release --snapshot --clean`.
+# The env var is required because `git describe` ignores module tag prefixes
+# and can otherwise stamp a sibling module's version into this tool.
 version: 2
 
 project_name: tail-acl

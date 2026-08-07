@@ -2343,6 +2343,11 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 			t.Errorf("help missing %q:\n%s", want, stdout.String())
 		}
 	}
+	for _, value := range []byte(stdout.String()) {
+		if value >= 0x80 {
+			t.Fatalf("help contains non-ASCII bytes: %q", stdout.String())
+		}
+	}
 }
 
 // TestLeafCommandsHelpWorks locks in the fix for the defect that motivated

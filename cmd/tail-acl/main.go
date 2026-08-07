@@ -2432,7 +2432,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl — pull, edit, merge, validate, test, check, lint, plan, and upload"+
+	fmt.Fprintln(w, "tail-acl: pull, edit, merge, validate, test, check, lint, plan, and upload"+
 		" a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
