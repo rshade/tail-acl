@@ -89,7 +89,7 @@ tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
 tail-acl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
-tail-acl --file acl/acl.generated.json upload      # apply the policy
+tail-acl --file acl/acl.generated.json upload     # apply, guarded by plan's ETag
 
 # Machine surfaces:
 tail-acl -schema                                   # machine-readable command/flag catalog
@@ -107,9 +107,10 @@ tail-acl --file acl/acl.hujson pull
 ```
 
 `pull` writes the deployed bytes verbatim, including comments and key order, and
-reports the matching ETag. It is an adoption step, not a routine synchronization
+records the matching ETag. It is an adoption step, not a routine synchronization
 workflow: it refuses to replace an existing `--file` unless `--force` is supplied.
-After editing, run `plan`, then pass the reported ETag to `upload --if-match`.
+After editing, run `plan`, review the diff, then run `upload`. The upload uses the
+ETag that `plan` recorded and refuses if the deployed policy changed afterward.
 
 **Warning:** `upload` replaces the entire deployed policy with `--file`; it does
 not merge a fragment into the live policy. Always plan a complete policy first.
@@ -133,18 +134,45 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
-| `upload` | Replace the entire deployed policy with `--file` (`--if-match` for optimistic concurrency) |
+| `upload` | Replace the entire deployed policy with `--file`; defaults `If-Match` to the ETag last observed by `plan`, `pull`, or a successful upload (`--accept-remote-changes` is the explicit opt-out) |
 
 ### Global flags
 
 `--file` (policy path), `--tailnet` / `--api-key` (default to `TAILSCALE_TAILNET` /
-`TAILSCALE_API_KEY`), `--if-match` (ETag for `upload`), `-strict` (make local
+`TAILSCALE_API_KEY`), `--if-match` (explicit ETag override for `upload`), `-strict` (make local
 `test`/`check` evaluation reject any unparseable rule),
 `--roster PATH` (resolve role autogroups for `test`/`check`; see
 [Resolving role autogroups](#resolving-role-autogroups)),
 `--indeterminate fail|warn|ignore` (test exit policy, default `warn`),
 `-format human|json`, `-verbose`, `--version`, `-schema`.
 `TAILSCALE_API_URL` overrides the API base URL (used by tests).
+
+### Upload concurrency safety
+
+`plan` and `pull` write the ETag they observed to `.tail-acl-state.json` beside
+`--file`; a successful `upload` replaces it with the new ETag. The versioned
+state file is gitignored, stores one entry per tailnet, and records observation
+only. It is never parsed as policy, merged, validated, or uploaded. Keeping it
+policy-adjacent makes the safety boundary local to the working copy that made
+the observation, while tailnet keying prevents one `--tailnet` from supplying
+another's precondition.
+
+With no explicit concurrency flag, `upload` reads that entry and sends it as
+`If-Match`. A missing, unreadable, or unkeyed state file is an exit `2` refusal,
+not an unguarded upload. Run `plan` or `pull` to create a fresh observation, or
+supply `--if-match ETAG` explicitly. Existing callers that already pass a
+non-empty `--if-match` do not depend on the state file for their precondition.
+
+`upload --accept-remote-changes` is the explicit escape hatch. It sends no
+`If-Match`, reports the opt-out in human output and as
+`"accepted_remote_changes": true` in JSON, then records the resulting ETag.
+It cannot be combined with `--if-match` and is intentionally not the default.
+
+If the server rejects a stale ETag, pull the deployed policy to a separate file
+and reconcile it through `hujson-merge --base ... --add ...`, the pair-merge
+path that preserves HuJSON comments. Do not use `tail-acl merge` for this
+reconciliation: its directory merge deliberately standardizes output to strict
+JSON and removes comments. Review the result and run `plan` again before retrying.
 
 ### Exit codes
 
@@ -154,10 +182,13 @@ not merge a fragment into the live policy. Always plan a complete policy first.
   the envelope still reports `status: "indeterminate"` and a non-zero
   `test_summary.indeterminate`; `check` reports reachable; `lint` found nothing
   at or above the threshold
-- `1` operation or policy assertion failed (including indeterminate under
-  `--indeterminate=fail`); `check` reports not reachable; `lint` found issues at
+- `1` operation or policy assertion failed (including a stale upload ETag and
+  indeterminate under `--indeterminate=fail`); `check` reports not reachable;
+  `lint` found issues at
   or above the threshold
-- `2` usage, input, or collection error. For `pull`, `validate`, and `plan` this also
+- `2` usage, input, or collection error, including an absent or unreadable
+  upload observation with no explicit override. For `pull`, `validate`, and
+  `plan` this also
   covers a control plane that never judged the policy — expired credentials,
   rate limiting, a server fault, an unreadable response body, a redirect that
   dropped the request, or an unreachable API. No verdict is printed on stdout

@@ -417,14 +417,25 @@ func newPullCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 }
 
 func newUploadCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
-	return &cobra.Command{
+	var acceptRemoteChanges bool
+	cmd := &cobra.Command{
 		Use:   cmdUpload,
 		Short: "Upload the policy to the tailnet",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			out, err := runUpload(ctx, *deps.opts, deps.httpClient, deps.apiURL)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runUpload(
+				ctx,
+				*deps.opts,
+				cmd.Flags().Changed("if-match"),
+				acceptRemoteChanges,
+				deps.httpClient,
+				deps.apiURL,
+			)
 			*deps.result = out
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&acceptRemoteChanges, "accept-remote-changes", false,
+		"upload without If-Match, explicitly accepting remote changes not present in --file")
+	return cmd
 }

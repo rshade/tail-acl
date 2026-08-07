@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
 )
 
 const (
@@ -77,6 +78,9 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	if pulled.File != originalPath || pulled.Tailnet != testTailnet || pulled.ETag != originalETag {
 		t.Errorf("pull envelope = %#v", pulled)
 	}
+	if recorded, readErr := observedstate.Read(originalPath, testTailnet); readErr != nil || recorded != originalETag {
+		t.Errorf("recorded pull ETag = %q, %v; want %q", recorded, readErr, originalETag)
+	}
 	pulledPolicy, err := os.ReadFile(originalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -109,16 +113,19 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 		"ETag "+originalETag,
 	)
 
-	output = runner.mustSucceed(t, "--file", goodPath, "--if-match", trimETag(originalETag), "upload")
+	output = runner.mustSucceed(t, "--file", goodPath, "upload")
 	assertContains(t, output, "uploaded "+goodPath)
 	api.assertPolicy(t, goodPolicy)
 
 	goodETag := policyETag(goodPolicy)
+	if recorded, readErr := observedstate.Read(goodPath, testTailnet); readErr != nil || recorded != goodETag {
+		t.Errorf("recorded upload ETag = %q, %v; want %q", recorded, readErr, goodETag)
+	}
 	output = runner.mustSucceed(t, "--file", goodPath, "plan")
 	assertContains(t, output, "plan valid; no changes", "ETag "+goodETag)
 
 	output = runner.mustFail(t, "--file", originalPath, "--if-match", trimETag(originalETag), "upload")
-	assertContains(t, output, "policy ETag does not match", "(412)")
+	assertContains(t, output, "upload refused", "tail-acl --file <remote-policy.hujson> pull", "hujson-merge --base")
 	api.assertPolicy(t, goodPolicy)
 
 	output = runner.mustSucceed(t, "--file", originalPath, "--if-match", trimETag(goodETag), "upload")
@@ -537,6 +544,7 @@ func (s *policyAPIServer) handleSet(w http.ResponseWriter, r *http.Request) {
 	}
 	s.policy = candidate
 	s.successWrites++
+	w.Header().Set("ETag", policyETag(candidate))
 	w.WriteHeader(http.StatusOK)
 }
 

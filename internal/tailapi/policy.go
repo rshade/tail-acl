@@ -41,6 +41,14 @@ type FetchedPolicy struct {
 	ETag   string
 }
 
+// UploadedPolicy is the exact HuJSON sent to the control plane and the new
+// version returned by a successful upload. HuJSON is retained so a caller can
+// safely verify a read-back when an API response omits its ETag.
+type UploadedPolicy struct {
+	HuJSON []byte
+	ETag   string
+}
+
 // NewClient constructs the official Tailscale API client.
 func NewClient(config Config) (*tailscale.Client, error) {
 	baseURL := config.BaseURL
@@ -59,16 +67,57 @@ func NewClient(config Config) (*tailscale.Client, error) {
 	}, nil
 }
 
-// UploadFile validates path as HuJSON and sets it as the tailnet policy.
-func UploadFile(ctx context.Context, client *tailscale.Client, path, ifMatch string) error {
+// UploadFile validates path as HuJSON and sets it as the tailnet policy. The v2
+// client's raw-HuJSON Set method intentionally returns only an error, so a
+// request-local transport wrapper captures the successful response ETag
+// without a racy second fetch or any mutation of the caller's HTTP client.
+func UploadFile(
+	ctx context.Context,
+	client *tailscale.Client,
+	path, ifMatch string,
+) (UploadedPolicy, error) {
 	raw, err := aclpolicy.ReadRaw(path)
 	if err != nil {
-		return err
+		return UploadedPolicy{}, err
 	}
-	if err = client.PolicyFile().Set(ctx, string(raw), ifMatch); err != nil {
-		return fmt.Errorf("uploading %s: %w", path, err)
+
+	// Initialize defaults on the supplied client before cloning its public
+	// connection settings. NewClient is the only constructor in this package,
+	// so API-key authentication is the supported path here.
+	_ = client.PolicyFile()
+	httpClient := *client.HTTP
+	transport := httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
 	}
-	return nil
+	capture := &etagCaptureTransport{base: transport}
+	httpClient.Transport = capture
+	uploadClient, err := NewClient(Config{
+		APIKey:  client.APIKey,
+		Tailnet: client.Tailnet,
+		BaseURL: client.BaseURL.String(),
+		HTTP:    &httpClient,
+	})
+	if err != nil {
+		return UploadedPolicy{}, err
+	}
+	if err = uploadClient.PolicyFile().Set(ctx, string(raw), ifMatch); err != nil {
+		return UploadedPolicy{}, fmt.Errorf("uploading %s: %w", path, err)
+	}
+	return UploadedPolicy{HuJSON: raw, ETag: capture.etag}, nil
+}
+
+type etagCaptureTransport struct {
+	base http.RoundTripper
+	etag string
+}
+
+func (t *etagCaptureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err == nil && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		t.etag = response.Header.Get("ETag")
+	}
+	return response, err
 }
 
 // FetchPolicy reads the deployed policy without normalizing its HuJSON. The

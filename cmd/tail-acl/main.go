@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +37,7 @@ import (
 	"github.com/rshade/tailscale-utils/policycore/cliflags"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
+	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
 )
 
@@ -220,9 +222,13 @@ type result struct {
 	PolicyDigest string `json:"policy_digest,omitempty"`
 	Tailnet      string `json:"tailnet,omitempty"`
 	ETag         string `json:"etag,omitempty"`
-	Diff         string `json:"diff,omitempty"`
-	Changed      *bool  `json:"changed,omitempty"`
-	GrantIndex   *int   `json:"grant_index,omitempty"`
+	// AcceptedRemoteChanges is emitted only for upload's explicit concurrency
+	// opt-out, so a machine consumer can audit that the safety guard was
+	// deliberately disabled rather than mistaking it for an ordinary upload.
+	AcceptedRemoteChanges bool   `json:"accepted_remote_changes,omitempty"`
+	Diff                  string `json:"diff,omitempty"`
+	Changed               *bool  `json:"changed,omitempty"`
+	GrantIndex            *int   `json:"grant_index,omitempty"`
 	// TestIndex and AssertionIDs are set only by test add/remove. A pointer keeps
 	// test index zero distinct from a command that does not edit assertions.
 	TestIndex    *int     `json:"test_index,omitempty"`
@@ -397,7 +403,8 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	flags.StringVar(&opts.tailnet, "tailnet", getenv("TAILSCALE_TAILNET"),
 		"tailnet name or ID (default: TAILSCALE_TAILNET)")
 	flags.StringVar(&opts.apiKey, "api-key", "", "Tailscale API access token (default: TAILSCALE_API_KEY)")
-	flags.StringVar(&opts.ifMatch, "if-match", "", "optional ETag required for upload")
+	flags.StringVar(&opts.ifMatch, "if-match", "",
+		"upload: explicit ETag overriding the policy-adjacent observed value")
 	flags.BoolVar(&opts.strict, "strict", false,
 		"test/check: reject a policy containing an unparseable rule instead of warning")
 	flags.StringVar(&opts.roster, "roster", "",
@@ -2136,6 +2143,9 @@ func runPlan(
 	if plan.Changed {
 		res.Diff = plan.Diff
 	}
+	if err = observedstate.Record(opts.file, opts.tailnet, plan.ETag); err != nil {
+		return nil, usagef("recording plan ETag: %v", err)
+	}
 	return res, nil
 }
 
@@ -2170,6 +2180,9 @@ func runPull(
 	if err = aclpolicy.WriteRaw(opts.file, policy.HuJSON); err != nil {
 		return nil, usagef("writing pulled policy to %s: %v", opts.file, err)
 	}
+	if err = observedstate.Record(opts.file, opts.tailnet, policy.ETag); err != nil {
+		return nil, usagef("recording pulled ETag: %v", err)
+	}
 	message := fmt.Sprintf("pulled deployed policy for tailnet %s to %s", opts.tailnet, opts.file)
 	if policy.ETag != "" {
 		message += fmt.Sprintf(" (ETag %s)", policy.ETag)
@@ -2184,21 +2197,90 @@ func runPull(
 func runUpload(
 	ctx context.Context,
 	opts options,
+	ifMatchExplicit bool,
+	acceptRemoteChanges bool,
 	httpClient *http.Client,
 	apiURL string,
 ) (*result, error) {
+	if ifMatchExplicit && acceptRemoteChanges {
+		return nil, usagef("--if-match and --accept-remote-changes are mutually exclusive")
+	}
+	if ifMatchExplicit && strings.TrimSpace(opts.ifMatch) == "" {
+		return nil, usagef("--if-match requires a non-empty ETag; use --accept-remote-changes to upload without one")
+	}
 	client, err := apiClient(opts, httpClient, apiURL)
 	if err != nil {
 		return nil, err
 	}
-	if err = tailapi.UploadFile(ctx, client, opts.file, opts.ifMatch); err != nil {
+	if !ifMatchExplicit && !acceptRemoteChanges {
+		observedETag, stateErr := observedstate.Read(opts.file, opts.tailnet)
+		if stateErr != nil {
+			return nil, usagef(
+				"refusing to upload without a recorded ETag for tailnet %s: %v; "+
+					"run plan or pull to observe the deployed policy, supply --if-match, or explicitly opt out with --accept-remote-changes",
+				opts.tailnet, stateErr,
+			)
+		}
+		opts.ifMatch = observedETag
+	}
+	uploaded, err := tailapi.UploadFile(ctx, client, opts.file, opts.ifMatch)
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return nil, errors.New(staleUploadRemediation)
+		}
 		return nil, err
 	}
-	res := newResult(cmdUpload, statusOK, fmt.Sprintf("uploaded %s to tailnet %s", opts.file, opts.tailnet))
+	newETag := uploaded.ETag
+	if newETag == "" {
+		observed, fetchErr := tailapi.FetchPolicy(ctx, client)
+		switch {
+		case fetchErr != nil:
+			return nil, fmt.Errorf(
+				"upload succeeded but its new ETag could not be recorded: %w; run plan before uploading again",
+				fetchErr,
+			)
+		case observed.ETag == "":
+			return nil, errors.New(
+				"upload succeeded but the control plane returned no new ETag; run plan before uploading again",
+			)
+		case !bytes.Equal(observed.HuJSON, uploaded.HuJSON):
+			return nil, errors.New(
+				"upload succeeded, but the deployed policy changed before its new ETag could be recorded; " +
+					"run pull and reconcile before uploading again",
+			)
+		default:
+			newETag = observed.ETag
+		}
+	}
+	if err = observedstate.Record(opts.file, opts.tailnet, newETag); err != nil {
+		return nil, fmt.Errorf(
+			"upload succeeded but its new ETag could not be recorded: %w; run plan before uploading again",
+			err,
+		)
+	}
+	message := fmt.Sprintf("uploaded %s to tailnet %s", opts.file, opts.tailnet)
+	if acceptRemoteChanges {
+		message += " (--accept-remote-changes used; upload sent no If-Match)"
+	}
+	res := newResult(cmdUpload, statusOK, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
+	res.ETag = newETag
+	res.AcceptedRemoteChanges = acceptRemoteChanges
 	return res, nil
 }
+
+func isPreconditionFailed(err error) bool {
+	var apiError tailscale.APIError
+	return errors.As(err, &apiError) && apiError.Status == http.StatusPreconditionFailed
+}
+
+const staleUploadRemediation = "deployed policy changed since the last observation; upload refused. " +
+	"Pull the deployed policy to a separate file with `tail-acl --file <remote-policy.hujson> pull`, " +
+	"then reconcile through the comment-preserving pair merge " +
+	"`hujson-merge --base <remote-policy.hujson> --add <local-change-snippet.hujson> --out <reconciled-policy.hujson>`. " +
+	"Review the result and run `tail-acl --file <reconciled-policy.hujson> plan` before retrying. " +
+	"Do not use `tail-acl merge` for this reconciliation; its directory merge standardizes away HuJSON comments"
 
 func apiClient(opts options, httpClient *http.Client, apiURL string) (*tailscale.Client, error) {
 	if opts.tailnet == "" {
@@ -2285,7 +2367,7 @@ func commandCatalog() []schemaCommand {
 		},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
-		{cmdUpload, "Upload the policy to the tailnet", cmdUpload},
+		{cmdUpload, "Upload the policy to the tailnet", "upload [--accept-remote-changes]"},
 	}
 }
 
@@ -2366,6 +2448,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fs.SetOutput(w)
 	fs.PrintDefaults()
 	fmt.Fprint(w, usageRosterNote)
+	fmt.Fprint(w, usageUploadNote)
 	fmt.Fprintln(w, "\nExamples:")
 	fmt.Fprintln(w, "  tail-acl --file acl.json init")
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
@@ -2393,6 +2476,9 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json upload      # use plan's recorded ETag")
+	//nolint:golines // example line needs to be intact
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json upload --accept-remote-changes # explicit no-If-Match opt-out")
 	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
 	fmt.Fprint(w, usageExitCodes)
 }
@@ -2408,6 +2494,15 @@ const usageRosterNote = `
                   list is treated as definitely not holding any role. Without
                   it, role autogroups cannot be resolved and exit 10 is
                   returned.
+`
+
+const usageUploadNote = `
+  upload safety   plan and pull record the observed ETag in a gitignored
+                  .tail-acl-state.json beside --file, keyed by tailnet. Upload
+                  uses that ETag by default and refuses if the record is absent,
+                  unreadable, or stale. --if-match explicitly overrides the
+                  record. --accept-remote-changes is the explicit opt-out that
+                  sends no If-Match; it cannot be combined with --if-match.
 `
 
 // usageExitCodes is one block rather than a run of Fprintln calls so the help

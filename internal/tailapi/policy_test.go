@@ -21,7 +21,7 @@ func TestUploadAndValidateFile(t *testing.T) {
 	}
 
 	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		if username, password, ok := r.BasicAuth(); !ok || username != "token" || password != "" {
 			t.Errorf("BasicAuth = (%q, %q, %v)", username, password, ok)
@@ -30,6 +30,9 @@ func TestUploadAndValidateFile(t *testing.T) {
 			t.Errorf("Content-Type = %q", r.Header.Get("Content-Type"))
 		}
 		_, _ = io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/api/v2/tailnet/example.com/acl" {
+			w.Header().Set("ETag", `"etag-new"`)
+		}
 	}))
 	defer server.Close()
 
@@ -45,7 +48,7 @@ func TestUploadAndValidateFile(t *testing.T) {
 	if _, err = tailapi.ValidateFile(context.Background(), client, path); err != nil {
 		t.Fatal(err)
 	}
-	if err = tailapi.UploadFile(context.Background(), client, path, `"etag"`); err != nil {
+	if _, err = tailapi.UploadFile(context.Background(), client, path, `"etag"`); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -59,6 +62,41 @@ func TestUploadAndValidateFile(t *testing.T) {
 		if requests[i] != want[i] {
 			t.Errorf("requests[%d] = %q, want %q", i, requests[i], want[i])
 		}
+	}
+}
+
+func TestUploadFileReturnsResponseETagAndExactBytes(t *testing.T) {
+	t.Parallel()
+	const policy = "// keep this comment\n{\n\t\"grants\": [],\n}\n"
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	if err := os.WriteFile(path, []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if string(body) != policy {
+			t.Errorf("upload body = %q, want exact HuJSON bytes", body)
+		}
+		w.Header().Set("ETag", `"etag-new"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey: "token", Tailnet: "example.com", BaseURL: server.URL, HTTP: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploaded, err := tailapi.UploadFile(context.Background(), client, path, `"etag-old"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploaded.ETag != `"etag-new"` || string(uploaded.HuJSON) != policy {
+		t.Errorf("UploadFile() = %#v", uploaded)
 	}
 }
 

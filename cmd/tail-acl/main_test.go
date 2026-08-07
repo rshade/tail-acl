@@ -23,6 +23,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
 )
 
 func TestInitBootstrapsTypedAuthoringWithoutOverwriting(t *testing.T) {
@@ -2600,7 +2601,7 @@ func TestValidateAndUploadUseTailscaleClient(t *testing.T) {
 	writeTestPolicy(t, path, `{"grants": []}`)
 
 	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		username, password, ok := r.BasicAuth()
 		if !ok || username != "token" || password != "" {
@@ -2610,6 +2611,9 @@ func TestValidateAndUploadUseTailscaleClient(t *testing.T) {
 			t.Errorf("Content-Type = %q", r.Header.Get("Content-Type"))
 		}
 		_, _ = io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/api/v2/tailnet/example.com/acl" {
+			w.Header().Set("ETag", `"etag-new"`)
+		}
 	}))
 	defer server.Close()
 
@@ -2646,6 +2650,197 @@ func TestValidateAndUploadUseTailscaleClient(t *testing.T) {
 	for i := range want {
 		if requests[i] != want[i] {
 			t.Errorf("requests[%d] = %q, want %q", i, requests[i], want[i])
+		}
+	}
+}
+
+func TestUploadWithoutObservationRequiresExplicitIntent(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "upload"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_API_KEY": "token",
+				"TAILSCALE_TAILNET": "example.com",
+			}[key]
+		},
+		http.DefaultClient,
+		"https://api.example.invalid",
+		io.Discard,
+		io.Discard,
+	)
+	if exitCode(err) != exitUsage {
+		t.Fatalf("upload error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
+	}
+	for _, want := range []string{"refusing to upload", "run plan or pull", "--if-match", "--accept-remote-changes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+
+	writeTestPolicy(t, observedstate.Path(path), "not JSON\n")
+	err = run(
+		context.Background(),
+		[]string{"--file", path, "upload"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_API_KEY": "token",
+				"TAILSCALE_TAILNET": "example.com",
+			}[key]
+		},
+		http.DefaultClient,
+		"https://api.example.invalid",
+		io.Discard,
+		io.Discard,
+	)
+	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "decoding JSON") {
+		t.Fatalf("unreadable-state upload error = %v, exit = %d", err, exitCode(err))
+	}
+}
+
+func TestUploadOptOutIsVisibleAndRecordsNewETag(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	var gotIfMatch string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("ETag", `"etag-opt-out"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "upload", "--accept-remote-changes"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_API_KEY": "token",
+				"TAILSCALE_TAILNET": "example.com",
+			}[key]
+		},
+		server.Client(),
+		server.URL,
+		&stdout,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIfMatch != "" {
+		t.Errorf("If-Match = %q, want explicit opt-out to omit it", gotIfMatch)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.AcceptedRemoteChanges || !strings.Contains(res.Message, "--accept-remote-changes used") {
+		t.Errorf("opt-out result = %#v", res)
+	}
+	if got, readErr := observedstate.Read(path, "example.com"); readErr != nil || got != `"etag-opt-out"` {
+		t.Errorf("recorded ETag = %q, %v", got, readErr)
+	}
+}
+
+func TestExplicitIfMatchIgnoresUnreadableObservationState(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	writeTestPolicy(t, observedstate.Path(path), "not JSON\n")
+	var gotIfMatch string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("ETag", `"etag-new"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "--if-match", "etag-explicit", "upload"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_API_KEY": "token",
+				"TAILSCALE_TAILNET": "example.com",
+			}[key]
+		},
+		server.Client(),
+		server.URL,
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "upload succeeded but its new ETag could not be recorded") {
+		// The explicit ETag must reach the server even though the corrupt state
+		// then prevents the mandatory post-success record from being updated.
+		t.Fatalf("upload error = %v", err)
+	}
+	if gotIfMatch != `"etag-explicit"` {
+		t.Errorf("If-Match = %q, want explicit override", gotIfMatch)
+	}
+}
+
+func TestStaleUploadRemediationUsesCommentPreservingPairMerge(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `{"message":"policy ETag does not match","data":[]}`)
+	}))
+	defer server.Close()
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "--if-match", "etag-old", "upload"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_API_KEY": "token",
+				"TAILSCALE_TAILNET": "example.com",
+			}[key]
+		},
+		server.Client(),
+		server.URL,
+		io.Discard,
+		io.Discard,
+	)
+	if exitCode(err) != exitFailed {
+		t.Fatalf("stale upload error = %v, exit = %d", err, exitCode(err))
+	}
+	for _, want := range []string{
+		"upload refused",
+		"tail-acl --file <remote-policy.hujson> pull",
+		"hujson-merge --base",
+		"--add <local-change-snippet.hujson>",
+		"Do not use `tail-acl merge`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("remediation missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "412") {
+		t.Errorf("remediation exposes status code instead of the recovery workflow: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	basePath := filepath.Join(tempDir, "remote.hujson")
+	addPath := filepath.Join(tempDir, "snippet.hujson")
+	writeTestPolicy(t, basePath, "// remote comment\n{\n\t\"groups\": {},\n}\n")
+	writeTestPolicy(t, addPath, "{\n\t// local comment\n\t\"hosts\": {\"ci\": \"100.64.0.1\"},\n}\n")
+	merged, mergeErr := aclpolicy.MergePair(basePath, addPath)
+	if mergeErr != nil {
+		t.Fatal(mergeErr)
+	}
+	for _, want := range []string{"// remote comment", "// local comment"} {
+		if !bytes.Contains(merged, []byte(want)) {
+			t.Errorf("comment-preserving remediation dropped %q:\n%s", want, merged)
 		}
 	}
 }

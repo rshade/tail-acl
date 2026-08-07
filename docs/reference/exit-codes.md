@@ -27,6 +27,12 @@ judged the policy exit `2`. Examples include expired credentials, rate limits,
 server faults, unreadable responses, lost request bodies after redirects, and
 an unreachable API.
 
+`upload` exits `2` before making a request when its policy-adjacent observation
+state is absent, unreadable, or has no entry for the selected tailnet and the
+operator supplied neither `--if-match` nor `--accept-remote-changes`. A stale
+record that reaches the server is an operation refusal and exits `1`, with the
+comment-preserving pull-and-pair-merge recovery in the diagnostic.
+
 Watch mode is different: `test --watch` exits `0` when interrupted regardless
 of its latest verdict. Use a single `test` invocation for CI gates.
 

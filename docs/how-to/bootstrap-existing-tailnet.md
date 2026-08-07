@@ -26,7 +26,8 @@ tail-acl --file acl/acl.hujson pull
 
 `pull` writes the deployed bytes verbatim — comments, key order, and formatting
 are preserved — and reports the ETag that identifies the version it fetched.
-Record that ETag.
+It also records that ETag in the gitignored `.tail-acl-state.json` beside the
+policy, keyed by tailnet.
 
 `pull` refuses to overwrite an existing `--file`. If you have already started a
 local policy and intend to discard it, pass `--force`; otherwise pull to a new
@@ -70,21 +71,28 @@ policy the control plane would reject fails here rather than at upload.
 ## 5. Upload with optimistic concurrency
 
 ```sh
-tail-acl --file acl/acl.hujson upload --if-match "<etag-from-step-1>"
+tail-acl --file acl/acl.hujson upload
 ```
 
-`--if-match` makes the upload fail rather than silently clobber a change
-someone else made through the admin console in the meantime. Re-pull, re-plan,
-and retry if it is rejected.
+`upload` defaults `If-Match` to the ETag the latest `plan` recorded, so it fails
+rather than silently clobbering a change someone else made through the admin
+console in the meantime. If it is rejected, pull the deployed policy to a
+separate file, reconcile through the comment-preserving
+`hujson-merge --base ... --add ...` path, review, re-plan, and retry. Do not use
+`tail-acl merge` for this recovery: its directory merge removes comments.
+
+If the state file is absent or unreadable, upload refuses with exit `2`. Run
+`plan` to recreate the observation, pass an explicit `--if-match ETAG`, or use
+`--accept-remote-changes` to deliberately send no precondition. The last choice
+can overwrite changes you have not seen and is never the default.
 
 **`upload` replaces the entire deployed policy with `--file`.** It does not
 merge a fragment into the live policy. Always plan a complete policy first.
 
 ## After adoption
 
-Once the policy lives in version control, `pull` should be rare. Routine work
-is edit → `test` → `lint` → `plan` → `upload`, gated in CI. See
-[Gate policy changes in CI](../../../docs/how-to/gate-policy-changes-in-ci.md).
+Once the policy lives in version control, `pull` should be rare. The interactive
+routine is edit → `test` → `lint` → `plan` → `upload`.
 
 If a later `plan` shows drift you did not author, someone changed the policy
 outside this workflow. Investigate before uploading — an upload would discard

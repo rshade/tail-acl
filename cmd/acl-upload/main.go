@@ -153,7 +153,7 @@ func runUpload(
 	if err != nil {
 		return err
 	}
-	if err = tailapi.UploadFile(ctx, apiClient, opts.file, opts.ifMatch); err != nil {
+	if _, err = tailapi.UploadFile(ctx, apiClient, opts.file, opts.ifMatch); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "acl-upload: uploaded %s to tailnet %s\n", opts.file, opts.tailnet)

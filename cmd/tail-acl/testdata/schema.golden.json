@@ -93,7 +93,7 @@
     {
       "name": "upload",
       "summary": "Upload the policy to the tailnet",
-      "usage": "upload"
+      "usage": "upload [--accept-remote-changes]"
     }
   ],
   "description": "Make typed edits to a Tailscale policy file and pull, merge, validate, test, check, lint, plan, or upload it.",
@@ -122,7 +122,7 @@
     {
       "default": "",
       "name": "if-match",
-      "usage": "optional ETag required for upload"
+      "usage": "upload: explicit ETag overriding the policy-adjacent observed value"
     },
     {
       "default": "warn",
