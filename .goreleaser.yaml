@@ -2,7 +2,8 @@
 #   cd tail-acl && GORELEASER_CURRENT_TAG=v0.2.0 goreleaser release --clean
 # git tags stay prefixed (tail-acl/vX.Y.Z); OSS goreleaser can't strip the
 # prefix, so the release workflow passes the clean semver via
-# GORELEASER_CURRENT_TAG. release-please owns the tag, changelog, and GitHub
+# GORELEASER_CURRENT_TAG and creates a job-local clean tag for validation.
+# release-please owns the prefixed tag, changelog, and GitHub
 # Release object; the workflow builds with `--skip=publish` and attaches the
 # dist/ archives via `gh release upload "<full-prefixed-tag>"` (goreleaser's
 # own publisher can't target a slash-prefixed tag).
