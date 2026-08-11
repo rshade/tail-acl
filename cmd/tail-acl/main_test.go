@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -2437,6 +2436,105 @@ func TestLeafCommandsHelpWorks(t *testing.T) {
 	}
 }
 
+// TestSubcommandHelpIsScopedToItsCommand locks the fix for a help function
+// that leaked down the whole command tree. cobra resolves a command's help
+// function by walking up to the nearest ancestor that set one, so the single
+// root.SetHelpFunc in newRootCommand answered --help for every descendant:
+// "tail-acl lint --help" printed the whole-tool banner, the entire command
+// catalog, every root example, and lint's own --severity/--wildcard/--config
+// listed under a "Global flags:" heading that they are not. Each command now
+// renders its own cobra help, which is the only rendering that separates a
+// command's local flags from the inherited ones; root alone keeps the
+// hand-written whole-tool page.
+func TestSubcommandHelpIsScopedToItsCommand(t *testing.T) {
+	t.Parallel()
+	// Fragments unique to the root page. Any of them in a subcommand's help
+	// means the override leaked down the tree again.
+	rootOnly := []string{
+		"tail-acl: pull, edit, query, merge",
+		"auto-approver remove",
+		"Global flags:",
+		"Exit codes:",
+		"Watch mode:",
+	}
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "leaf",
+			args: []string{cmdLint, "--help"},
+			want: []string{
+				lintSummary,
+				"Usage:\n  tail-acl lint",
+				"Flags:\n",
+				"--severity string",
+				"--wildcard string",
+				"--config string",
+				"Global Flags:\n",
+				"--file string",
+			},
+		},
+		{
+			name: "parent",
+			args: []string{cmdGrant, "--help"},
+			// "Remove a grant by index" is grant remove's own Short, worded
+			// differently from the catalog's "by zero-based index" — so
+			// finding it proves the page was rendered from the command tree
+			// rather than from commandCatalog.
+			want: []string{"Usage:\n  tail-acl grant", "Available Commands:", "Remove a grant by index"},
+		},
+		{
+			name: "nested leaf",
+			args: []string{cmdGrant, subAdd, "--help"},
+			want: []string{"Usage:\n  tail-acl grant add", "--src stringList", "--comment string"},
+		},
+		{
+			name: "long overrides short",
+			args: []string{cmdPull, "--help"},
+			want: []string{"an adoption step, not a routine sync", "--force"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				testCase.args,
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				&stdout,
+				&stderr,
+			)
+			if err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want help on stdout only", stderr.String())
+			}
+			assertOutputFragments(t, stdout.String(), testCase.want, rootOnly)
+		})
+	}
+}
+
+// assertOutputFragments checks a rendered page for the fragments that must be
+// present and the ones whose presence is the regression.
+func assertOutputFragments(t *testing.T, output string, want, unwanted []string) {
+	t.Helper()
+	for _, fragment := range want {
+		if !strings.Contains(output, fragment) {
+			t.Errorf("output missing %q:\n%s", fragment, output)
+		}
+	}
+	for _, fragment := range unwanted {
+		if strings.Contains(output, fragment) {
+			t.Errorf("output contains %q, want it absent:\n%s", fragment, output)
+		}
+	}
+}
+
 func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	t.Parallel()
 	var stdout strings.Builder
@@ -2633,8 +2731,12 @@ func TestExitCodeMapping(t *testing.T) {
 		err  error
 		want int
 	}{
+		// No help case: cobra answers --help itself and returns nil from
+		// Execute, so a help run arrives here as "nil". The row that used to
+		// sit here fed in the standard library's flag.ErrHelp, which nothing
+		// in this stack produces — cobra's ErrHelp is pflag's, a distinct
+		// value — so it asserted over a sentinel run() could never return.
 		{"nil", nil, exitOK},
-		{"help", flag.ErrHelp, exitOK},
 		{"usage", usageError{errors.New("bad flag")}, exitUsage},
 		{"wrapped usage", fmt.Errorf("context: %w", usageError{errors.New("x")}), exitUsage},
 		{"operation", errors.New("api failed"), exitFailed},
@@ -3138,10 +3240,12 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 	}
 }
 
-// TestLintAdviceCaveatDescribesTheRunNotTheDefault guards the human caveat
-// against contradicting the run it is printed on. Under -severity advice the
-// advisory does set a non-zero exit, so claiming otherwise directly above the
-// finding that produced exit 1 would misstate the result channel.
+// TestLintAdviceCaveatDescribesTheRunNotTheDefault guards the human caption
+// against contradicting the run it is printed on. An advisory now reaches the
+// output only under -severity advice, which is also the only threshold at
+// which it sets a non-zero exit — so the caption asserting a failure must never
+// appear above a run that exited 0, and the default threshold must print no
+// advisory block at all rather than one hedged with a stale caveat.
 func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -3154,10 +3258,10 @@ func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 		notWant  string
 	}{
 		{
-			name:     "default threshold",
+			name:     "default threshold withholds the advisory entirely",
 			wantCode: exitOK,
-			want:     "does not affect the exit code at the default severity",
-			notWant:  "makes these fail this run",
+			want:     "no findings at or above warn; 1 total:",
+			notWant:  "advisory (heuristic",
 		},
 		{
 			name:     "severity advice",
@@ -3188,36 +3292,28 @@ func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 	}
 }
 
+// The advisory block is rendered only under -severity advice, which is also
+// the threshold that makes it fail the run, so this exercises exit 1.
 func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
-	writeTestPolicy(t, path, `{
-		"groups": {
-			"group:dev": ["alice@example.com"],
-			"group:unused": ["nobody@example.com"]
-		},
-		"tagOwners": {"tag:db": ["group:dev"]},
-		"grants": [
-			{"src": ["autogroup:member"], "dst": ["tag:db"], "ip": ["*"]},
-			{"src": ["group:dev"], "dst": ["tag:db"], "ip": ["tcp:5432"]}
-		]
-	}`)
+	writeTestPolicy(t, path, mixedLintPolicy)
 	var stdout, stderr strings.Builder
 	err := run(
 		context.Background(),
-		[]string{"--file", path, cmdLint},
+		[]string{"--file", path, cmdLint, "-severity", "advice"},
 		func(string) string { return "" },
 		nil,
 		"",
 		&stdout,
 		&stderr,
 	)
-	if code := exitCode(err); code != exitOK {
-		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
 	}
 	for _, want := range []string{
 		"INFO unused-group groups[group:unused] group:unused",
-		"advisory (heuristic; not a defect, and does not affect the exit code at the default severity):",
+		"advisory (heuristic; not a defect, but -severity advice makes these fail this run):",
 		"ADVICE broad-rule-untested grants[0].dst[0] tag:db",
 		`  suggested test: {"src":"alice@example.com","deny":["tag:db:5432"]}`,
 		"tail-acl: 2 findings: 0 error, 0 warn, 1 info, 1 advice",
@@ -3245,14 +3341,168 @@ func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 	}
 }
 
+// mixedLintPolicy produces exactly one info finding (group:unused is
+// referenced by no rule) and one advice finding (the all-port grant to tag:db
+// carries no deny assertion). Two adjacent tiers below the default threshold is
+// the pair a severity filter has to separate.
+const mixedLintPolicy = `{
+	"groups":{
+		"group:dev":["alice@example.com"],
+		"group:unused":["nobody@example.com"]
+	},
+	"tagOwners":{"tag:db":["group:dev"]},
+	"grants":[
+		{"src":["autogroup:member"],"dst":["tag:db"],"ip":["*"]},
+		{"src":["group:dev"],"dst":["tag:db"],"ip":["tcp:5432"]}
+	]
+}`
+
+// TestLintSeverityFiltersFindings pins -severity as a filter, not only an exit
+// gate: a finding below the threshold is neither printed nor counted in the
+// trailer's headline. That is what an operator means by "-severity warn", and
+// what golangci-lint, shellcheck -S, and staticcheck all do with the flag.
+//
+// The failure mode filtering introduces is the one asserted hardest here: a
+// trailer that reads as a clean policy when the threshold hid everything. The
+// whole-policy breakdown stays on the line and names the flag that reveals the
+// rest, so a suppressed finding is never silent.
+func TestLintSeverityFiltersFindings(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		want     []string
+		notWant  []string
+	}{
+		{
+			name:     "default warn hides both tiers but not their counts",
+			wantCode: exitOK,
+			want: []string{
+				"no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice",
+				"-severity advice shows all",
+			},
+			notWant: []string{"INFO unused-group", "ADVICE broad-rule-untested", "advisory (heuristic"},
+		},
+		{
+			name:     "info admits info and still hides advice",
+			args:     []string{"-severity", "info"},
+			wantCode: exitFailed,
+			want: []string{
+				"INFO unused-group",
+				"1 finding at or above info; 2 total: 0 error, 0 warn, 1 info, 1 advice",
+			},
+			notWant: []string{"ADVICE broad-rule-untested", "advisory (heuristic"},
+		},
+		{
+			name:     "advice admits everything and drops the threshold note",
+			args:     []string{"-severity", "advice"},
+			wantCode: exitFailed,
+			want: []string{
+				"INFO unused-group",
+				"ADVICE broad-rule-untested",
+				"2 findings: 0 error, 0 warn, 1 info, 1 advice",
+			},
+			notWant: []string{"at or above", "shows all"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, mixedLintPolicy)
+			var stdout, stderr strings.Builder
+			err := run(
+				context.Background(),
+				append([]string{"--file", path, cmdLint}, testCase.args...),
+				func(string) string { return "" }, nil, "", &stdout, &stderr,
+			)
+			if code := exitCode(err); code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantCode, err)
+			}
+			assertOutputFragments(t, stdout.String(), testCase.want, testCase.notWant)
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want quiet", stderr.String())
+			}
+		})
+	}
+}
+
+// TestLintJSONFilteringKeepsWholePolicyCounts pins the machine half of the same
+// contract. findings carries only what passed the threshold, lint_summary still
+// counts the whole policy, and lint_severity_threshold names the threshold that
+// explains the gap between them — without that field a consumer cannot tell a
+// clean policy from a filtered report.
+func TestLintJSONFilteringKeepsWholePolicyCounts(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, mixedLintPolicy)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, cmdLint},
+		func(string) string { return "" }, nil, "", &stdout, &stderr,
+	)
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	var envelope struct {
+		Findings          []aclpolicy.LintFinding `json:"findings"`
+		LintSummary       aclpolicy.LintSummary   `json:"lint_summary"`
+		SeverityThreshold string                  `json:"lint_severity_threshold"`
+	}
+	if decodeErr := json.Unmarshal([]byte(stdout.String()), &envelope); decodeErr != nil {
+		t.Fatalf("decode: %v\n%s", decodeErr, stdout.String())
+	}
+	if len(envelope.Findings) != 0 {
+		t.Errorf("findings = %+v, want empty at the default warn threshold", envelope.Findings)
+	}
+	if envelope.LintSummary.Total != 2 || envelope.LintSummary.Info != 1 || envelope.LintSummary.Advice != 1 {
+		t.Errorf("lint_summary = %+v, want the whole-policy counts (2 total, 1 info, 1 advice)", envelope.LintSummary)
+	}
+	if envelope.SeverityThreshold != string(aclpolicy.LintWarn) {
+		t.Errorf("lint_severity_threshold = %q, want %q", envelope.SeverityThreshold, aclpolicy.LintWarn)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
+	}
+}
+
 func TestNewLintResultUsesSingularFinding(t *testing.T) {
 	t.Parallel()
 
 	res := newLintResult("acl.hujson", aclpolicy.LintReport{
-		Summary: aclpolicy.LintSummary{Total: 1, Advice: 1},
-	})
+		Findings: []aclpolicy.LintFinding{{ID: "broad-rule-untested", Severity: aclpolicy.LintAdvice}},
+		Summary:  aclpolicy.LintSummary{Total: 1, Advice: 1},
+	}, aclpolicy.LintAdvice)
 	if want := "1 finding: 0 error, 0 warn, 0 info, 1 advice"; res.Message != want {
 		t.Errorf("Message = %q, want %q", res.Message, want)
+	}
+}
+
+// TestNewLintResultSingularCountsWhatItReported guards the other half of the
+// noun agreement: once -severity filters, the headline count is the reported
+// one, so a run that withheld two of three findings must still read "1
+// finding" rather than agreeing with the whole-policy total beside it.
+func TestNewLintResultSingularCountsWhatItReported(t *testing.T) {
+	t.Parallel()
+
+	res := newLintResult("acl.hujson", aclpolicy.LintReport{
+		Findings: []aclpolicy.LintFinding{
+			{ID: "overbroad-wildcard", Severity: aclpolicy.LintWarn},
+			{ID: "unused-group", Severity: aclpolicy.LintInfo},
+			{ID: "broad-rule-untested", Severity: aclpolicy.LintAdvice},
+		},
+		Summary: aclpolicy.LintSummary{Total: 3, Warn: 1, Info: 1, Advice: 1},
+	}, aclpolicy.LintWarn)
+	want := "1 finding at or above warn; 3 total: 0 error, 1 warn, 1 info, 1 advice (-severity advice shows all)"
+	if res.Message != want {
+		t.Errorf("Message = %q, want %q", res.Message, want)
+	}
+	if len(*res.Findings) != 1 {
+		t.Errorf("Findings = %+v, want only the warn finding", *res.Findings)
+	}
+	if res.LintSummary.Total != 3 {
+		t.Errorf("LintSummary.Total = %d, want the whole-policy 3", res.LintSummary.Total)
 	}
 }
 
@@ -4027,10 +4277,12 @@ func TestSchemaAndUsageDocumentWatch(t *testing.T) {
 				&stdout,
 				&stderr,
 			)
-			if err != nil && !errors.Is(err, flag.ErrHelp) {
+			if err != nil {
 				t.Fatalf("run: %v", err)
 			}
-			// -schema writes to stdout; --help writes usage to stderr.
+			// Both -schema and --help are wanted invocations that write their
+			// result to stdout; stderr is joined only so a stray diagnostic
+			// shows up in the failure message rather than being dropped.
 			combined := stdout.String() + stderr.String()
 			for _, fragment := range testCase.fragments {
 				if !strings.Contains(combined, fragment) {

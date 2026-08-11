@@ -11,12 +11,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -270,8 +270,18 @@ type result struct {
 	// Findings is a pointer for the same reason as Assertions: a lint run with a
 	// clean policy still emits "findings": [] rather than dropping the key, while
 	// every other command omits it.
-	Findings    *[]aclpolicy.LintFinding `json:"findings,omitempty"`
-	LintSummary *aclpolicy.LintSummary   `json:"lint_summary,omitempty"`
+	Findings *[]aclpolicy.LintFinding `json:"findings,omitempty"`
+	// LintSummary counts the whole policy, not the filtered Findings above it.
+	// Keeping it whole is what stops -severity from hiding anything silently:
+	// a consumer can always see that findings were suppressed, and
+	// LintThreshold says by what.
+	LintSummary *aclpolicy.LintSummary `json:"lint_summary,omitempty"`
+	// LintThreshold is the resolved -severity. It belongs in the envelope
+	// because Findings is filtered by it: without the threshold a consumer
+	// cannot tell a clean policy from a filtered report, and the summary's
+	// larger counts would read as a contradiction rather than as the rest of
+	// the policy.
+	LintThreshold string `json:"lint_severity_threshold,omitempty"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
 	// that matched nothing still emits "results": [], which a consumer can tell
@@ -281,11 +291,6 @@ type result struct {
 	Local      *localTestComponent       `json:"local,omitempty"`
 	Server     *serverTestComponent      `json:"server,omitempty"`
 	Agreement  string                    `json:"agreement,omitempty"`
-	// adviceFails records whether the resolved -severity threshold makes advisory
-	// findings set a non-zero exit. It shapes the human caveat only, so it stays
-	// out of the JSON envelope: the machine contract already carries severity per
-	// finding and the exit code states the verdict.
-	adviceFails bool
 }
 
 type localTestComponent struct {
@@ -342,7 +347,7 @@ func realMain() int {
 		apiURL = tailapi.DefaultBaseURL
 	}
 	err := run(ctx, os.Args[1:], os.Getenv, client, apiURL, os.Stdout, os.Stderr)
-	if err != nil && !errors.Is(err, flag.ErrHelp) {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tail-acl:", err)
 	}
 	return exitCode(err)
@@ -366,11 +371,19 @@ func restoreDefaultAfterCancel(ctx context.Context, stop context.CancelFunc) {
 }
 
 // exitCode maps a run error onto the documented exit-code scheme.
+//
+// --help needs no case of its own: cobra recognizes its own help request
+// before RunE, calls HelpFunc, and returns nil from Execute, so a help
+// invocation reaches here as the nil case. The [flag.ErrHelp] arm this used to
+// carry was a leftover from the stdlib-flag era and could never have fired —
+// cobra aliases its "flag" import to pflag, whose ErrHelp is a distinct value
+// from the standard library's, so the guard named a sentinel this program's
+// stack cannot produce.
 func exitCode(err error) int {
 	var ue usageError
 	outcome := tailapi.ClassifyValidation(err)
 	switch {
-	case err == nil, errors.Is(err, flag.ErrHelp):
+	case err == nil:
 		return exitOK
 	case errors.Is(err, errReachabilityIndeterminate), outcome == tailapi.ValidationIndeterminate:
 		return exitIndeterminate
@@ -430,7 +443,18 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usageError{err}
 	})
+	// cobra resolves a command's help function by walking up to the nearest
+	// ancestor that set one, so an override here answers --help for the entire
+	// tree unless it hands descendants back. Without the dispatch, every
+	// subcommand's --help printed this whole-tool page: "tail-acl lint --help"
+	// listed the full command catalog, every root example, and lint's own
+	// --severity/--wildcard/--config under a "Global flags:" heading that they
+	// are not. Only root gets the hand-written page.
 	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		if cmd != root {
+			commandHelp(cmd)
+			return
+		}
 		usage(cmd.OutOrStdout(), cmd.Flags())
 	})
 	root.InitDefaultHelpFlag()
@@ -634,7 +658,7 @@ func render(w io.Writer, format string, res *result) error {
 		}
 	}
 	if res.Findings != nil {
-		if err := renderLintFindings(w, *res.Findings, res.adviceFails); err != nil {
+		if err := renderLintFindings(w, *res.Findings); err != nil {
 			return err
 		}
 	}
@@ -683,7 +707,13 @@ func renderCompositeTest(w io.Writer, res *result) error {
 	return err
 }
 
-func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFails bool) error {
+// renderLintFindings prints the findings that survived the -severity filter,
+// holding the advisory tier back to a captioned block of its own. Advice ranks
+// below every other tier, so a finding reaching here at all means the threshold
+// was -severity advice — which is also the only threshold at which an advisory
+// sets a non-zero exit. That equivalence is why the caption can state this
+// run's exit behavior outright instead of hedging across thresholds.
+func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
 	for _, finding := range findings {
 		if finding.Severity != aclpolicy.LintAdvice {
 			if err := renderLintFinding(w, finding); err != nil {
@@ -698,13 +728,10 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFai
 	if len(advice) == 0 {
 		return nil
 	}
-	// The caveat states this run's exit behavior, not the default one: printing
-	// "does not affect the exit code" directly above the finding that produced
-	// exit 1 is the kind of claim an operator quotes in a postmortem.
-	caveat := "advisory (heuristic; not a defect, and does not affect the exit code at the default severity):"
-	if adviceFails {
-		caveat = "advisory (heuristic; -severity advice makes these fail this run):"
-	}
+	// The caption states this run's exit behavior, not the default one:
+	// printing "does not affect the exit code" directly above the finding that
+	// produced exit 1 is the kind of claim an operator quotes in a postmortem.
+	caveat := "advisory (heuristic; not a defect, but -severity advice makes these fail this run):"
 	if _, err := fmt.Fprintln(w, caveat); err != nil {
 		return err
 	}
@@ -2201,8 +2228,9 @@ func runLint(
 		}
 	}
 
-	res := newLintResult(opts.file, report)
-	res.adviceFails = aclpolicy.LintAdvice.AtLeast(threshold)
+	res := newLintResult(opts.file, report, threshold)
+	// The gate reads the whole report, not the filtered result: the two must
+	// agree, and CountAtLeast applies the same threshold the filter did.
 	if report.CountAtLeast(threshold) > 0 {
 		res.Status = statusFailed
 		return res, errLintFindings
@@ -2226,30 +2254,61 @@ func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions,
 	return aclpolicy.LintOptions{Wildcard: wildcardPolicy}, threshold, nil
 }
 
-func newLintResult(path string, report aclpolicy.LintReport) *result {
-	findingNoun := "findings"
-	if report.Summary.Total == 1 {
-		findingNoun = "finding"
-	}
-	message := fmt.Sprintf(
-		"%d %s: %d error, %d warn, %d info",
-		report.Summary.Total,
-		findingNoun,
-		report.Summary.Error,
-		report.Summary.Warn,
-		report.Summary.Info,
-	)
-	if report.Summary.Advice != 0 {
-		message += fmt.Sprintf(", %d advice", report.Summary.Advice)
-	}
-	if report.Summary.Total == 0 {
-		message = fmt.Sprintf("no policy hygiene findings in %s", path)
-	}
-	res := newResult(cmdLint, statusOK, message)
+// newLintResult applies the -severity threshold to the report. The filter lives
+// here rather than in EvaluatePolicyLint because the classifier's job is to
+// return everything it found (AX convention 9); which tiers an operator wants
+// to act on is a presentation decision, and keeping the whole report in hand is
+// what lets the trailer report what it withheld.
+func newLintResult(path string, report aclpolicy.LintReport, threshold aclpolicy.LintSeverity) *result {
+	reported := slices.DeleteFunc(slices.Clone(report.Findings), func(finding aclpolicy.LintFinding) bool {
+		return !finding.Severity.AtLeast(threshold)
+	})
+	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, len(reported), threshold))
 	res.File = path
-	res.Findings = &report.Findings
+	res.Findings = &reported
 	res.LintSummary = &report.Summary
+	res.LintThreshold = string(threshold)
 	return res
+}
+
+// lintMessage states what was reported and, whenever the threshold withheld
+// something, what it withheld. The failure mode it exists to prevent is a
+// trailer reading as a clean policy when the policy was not clean and the
+// threshold was merely high, so the whole-policy breakdown stays on the line
+// and names the flag that reveals the rest.
+func lintMessage(
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) string {
+	breakdown := fmt.Sprintf("%d error, %d warn, %d info", summary.Error, summary.Warn, summary.Info)
+	if summary.Advice != 0 {
+		breakdown += fmt.Sprintf(", %d advice", summary.Advice)
+	}
+	switch {
+	case summary.Total == 0:
+		return fmt.Sprintf("no policy hygiene findings in %s", path)
+	case reported == summary.Total:
+		return fmt.Sprintf("%d %s: %s", summary.Total, findingNoun(summary.Total), breakdown)
+	case reported == 0:
+		return fmt.Sprintf(
+			"no findings at or above %s; %d total: %s (-severity advice shows all)",
+			threshold, summary.Total, breakdown,
+		)
+	default:
+		return fmt.Sprintf(
+			"%d %s at or above %s; %d total: %s (-severity advice shows all)",
+			reported, findingNoun(reported), threshold, summary.Total, breakdown,
+		)
+	}
+}
+
+func findingNoun(count int) string {
+	if count == 1 {
+		return "finding"
+	}
+	return "findings"
 }
 
 func runPlan(
@@ -2601,6 +2660,34 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// commandHelp renders one command's own help, which is what every command
+// except root now answers --help with. cobra's default help is the command's
+// Long (or Short) followed by its usage template, and that template is the only
+// rendering that splits a command's local flags from the inherited ones — the
+// distinction the whole-tool page cannot make. Its default help function is
+// unreachable once SetHelpFunc overrides it (Command.helpFunc is unexported and
+// HelpFunc walks up to the override), so those two pieces are reproduced here.
+//
+// UsageString is avoided deliberately: its non-nil-error path funnels through
+// cobra.CheckErr, which calls [os.Exit]. cmd.Usage() renders the same template
+// and returns the error instead.
+func commandHelp(cmd *cobra.Command) {
+	out := cmd.OutOrStdout()
+	// Usage writes to OutOrStderr, and the two resolve to the same writer only
+	// once a caller has wired one; pin it so help lands on stdout either way.
+	cmd.SetOut(out)
+	if text := cmp.Or(cmd.Long, cmd.Short); text != "" {
+		fmt.Fprintf(out, "%s\n\n", strings.TrimRight(text, " \t\n"))
+	}
+	if err := cmd.Usage(); err != nil {
+		cmd.PrintErrln(err)
+	}
+	// The exit-code scheme is a property of the tool, not of one command, and
+	// AX convention 7 requires --help to carry it; point at the page that does
+	// rather than repeating four exit codes under every command.
+	fmt.Fprintf(out, "\nRun \"%s --help\" for the exit-code scheme and the full command list.\n", cmd.Root().Name())
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {

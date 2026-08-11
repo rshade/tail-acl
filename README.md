@@ -87,7 +87,7 @@ tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --pr
 
 # Statically lint policy hygiene (no credentials or network):
 tail-acl --file acl/acl.generated.json lint
-tail-acl --file acl/acl.generated.json lint -severity error   # only fail on errors
+tail-acl --file acl/acl.generated.json lint -severity error   # only report and fail on errors
 tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
 tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
 
@@ -647,11 +647,19 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
 
-`-severity advice|info|warn|error` (default `warn`) sets the lowest severity that makes
-the run exit `1`; below it the finding is still reported but the run exits `0`.
-Advice ranks below info, so the new advisory does not change exit behavior for
-existing callers at either the default `warn` threshold or `info`. Pass
-`-severity advice` to make advisories fail the run.
+`-severity advice|info|warn|error` (default `warn`) sets the lowest severity
+`lint` reports and fails on. A finding below the threshold is neither printed
+nor carried in the JSON `findings` array, and the run exits `0`. Severities rank
+`advice` < `info` < `warn` < `error`, so the default reports `warn` and `error`
+and withholds `info` and `advice` — pass `-severity advice` to see everything,
+which also makes advisories fail the run.
+
+Nothing is withheld silently. `lint_summary` counts the whole policy whatever
+the threshold, `lint_severity_threshold` records the threshold that filtered the
+array, and the human trailer names both — `no findings at or above warn; 2
+total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)`. A clean
+policy is the distinct message `no policy hygiene findings in <file>`, so a
+quiet run is never ambiguous between "clean" and "filtered".
 `-wildcard any-to-any|any|off` (default `any-to-any`) tunes the wildcard check:
 `any-to-any` flags only a grant whose `src` and `dst` are both `*` (a standalone
 `*` is common and allowed), `any` flags every `*`, and `off` disables it.

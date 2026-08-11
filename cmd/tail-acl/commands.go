@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -103,29 +102,14 @@ func newInitCommand(deps *commandDeps) *cobra.Command {
 // exit 0: printing help and exiting 0 for a bare parent is what git remote,
 // gh repo, and docker network all do, and is more useful than an error for a
 // caller who is legitimately exploring the command tree.
+// A bare parent prints the same page its own --help does, rather than a
+// second hand-written rendering of the same facts.
 func runParentCommand(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		parentUsage(cmd.OutOrStdout(), cmd)
+		commandHelp(cmd)
 		return nil
 	}
 	return usagef("unknown %s command %q", cmd.Name(), args[0])
-}
-
-// parentUsage prints cmd's own short description and child verbs. cmd.Usage()
-// would work too (nothing here overrides UsageFunc, so it resolves cobra's
-// own per-command default correctly scoped to cmd rather than root's), but
-// UsageString's non-nil-error path funnels through cobra.CheckErr, which
-// calls [os.Exit] — not a risk worth taking for a [bytes.Buffer] write that in
-// practice cannot fail. This keeps the same [io.Writer]-based style as usage()
-// and stays entirely in code this package controls.
-func parentUsage(w io.Writer, cmd *cobra.Command) {
-	fmt.Fprintf(w, "%s\n\n", cmd.Short)
-	fmt.Fprintf(w, "Usage:\n  %s [command]\n\n", cmd.CommandPath())
-	fmt.Fprintln(w, "Available commands:")
-	for _, sub := range cmd.Commands() {
-		fmt.Fprintf(w, "  %-8s %s\n", sub.Name(), sub.Short)
-	}
-	fmt.Fprintf(w, "\nUse \"%s [command] --help\" for more information.\n", cmd.CommandPath())
 }
 
 func newGrantAddCommand(deps *commandDeps) *cobra.Command {
@@ -453,7 +437,7 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&severity, "severity", string(aclpolicy.LintWarn),
-		"minimum finding severity that sets a non-zero exit: advice|info|warn|error")
+		"lowest finding severity to report and fail on: advice|info|warn|error")
 	cmd.Flags().StringVar(&wildcard, "wildcard", string(aclpolicy.WildcardAnyToAny),
 		"over-broad wildcard policy: any-to-any|any|off")
 	cmd.Flags().StringVar(&configPath, "config", "",

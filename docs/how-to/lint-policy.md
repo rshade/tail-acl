@@ -36,22 +36,31 @@ from the top:
    a grant that can never match, or a grant duplicated from an earlier one.
 3. **`info`** — a definition nothing references. Usually dead weight left by a
    rename; occasionally deliberate.
-4. **`advice`** — a heuristic suggestion, not a defect. See the authoring loop
-   below.
+4. **`advice`** — a heuristic suggestion, not a defect. Below the default
+   threshold, so `lint` withholds it until you ask with `-severity advice`. See
+   the authoring loop below.
 
-## Choose the failure threshold
+## Choose the threshold
 
-`-severity` sets the lowest severity that makes the run exit `1`:
+`-severity` sets the lowest severity `lint` reports and fails on:
 
 ```sh
-tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage fails
+tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage
 tail-acl --file acl/acl.hujson lint                   # default: warn and above
-tail-acl --file acl/acl.hujson lint -severity advice  # advisories fail too
+tail-acl --file acl/acl.hujson lint -severity advice  # everything, advisories fail too
 ```
 
-Findings below the threshold are still reported — the threshold changes the
-exit code, not the output. That distinction is what lets one run serve both a
-strict gate and a human reading the full picture.
+A finding below the threshold is neither printed nor carried in the JSON
+`findings` array. The counts survive it, though: `lint_summary` covers the whole
+policy at every threshold, and the trailer names what it withheld —
+
+```text
+tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)
+```
+
+A policy with nothing to report reads differently, `no policy hygiene findings
+in acl/acl.hujson`, so a quiet run never leaves you guessing whether the policy
+was clean or the threshold was high.
 
 Tune the wildcard check separately with `-wildcard`:
 
@@ -64,6 +73,15 @@ Tune the wildcard check separately with `-wildcard`:
 `broad-rule-untested` fires when a blanket source reaches a concrete
 destination on every port, with no posture or `via` gate and no deny assertion
 naming that destination. It is a prompt, not a verdict.
+
+Advisories sit below the default threshold, so start by asking for them:
+
+```sh
+tail-acl --file acl/acl.hujson lint -severity advice
+```
+
+That exits `1` while any advisory stands — deliberate, since you are asking to
+be held to them. Run without the flag for a gate that ignores them.
 
 When the policy supplies a concrete port, the advisory includes a compact JSON
 test to paste into `tests`. That gives you a deny-first authoring loop:
@@ -110,7 +128,10 @@ fragments reorder grants.
 tail-acl --file acl/acl.hujson lint -severity warn
 ```
 
-Exit `0` means nothing at or above the threshold; exit `1` means there is.
+Exit `0` means nothing at or above the threshold; exit `1` means there is. The
+log shows only findings at or above it too, but the trailer still counts the
+rest, so a CI run stays honest about what it chose not to gate on.
+
 Exit `2` is a usage or input error and never a policy verdict — fail the build
 loudly on it rather than treating it as "clean". See
 [Exit codes](../reference/exit-codes.md) and
