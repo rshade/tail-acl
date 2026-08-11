@@ -3603,15 +3603,7 @@ func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
 	err := run(
 		context.Background(),
 		[]string{"--file", path, cmdLint, "--online-validation"},
-		func(key string) string {
-			switch key {
-			case "TAILSCALE_TAILNET":
-				return "example.com"
-			case "TAILSCALE_API_KEY":
-				return "tskey-test"
-			}
-			return ""
-		},
+		credentialedEnv,
 		server.Client(),
 		server.URL,
 		&stdout,
@@ -3622,6 +3614,87 @@ func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "svc-in-source") {
 		t.Errorf("stdout lost the offline findings:\n%s", stdout.String())
+	}
+}
+
+// credentialedEnv supplies the tailnet and key that --online-validation
+// requires, so a test exercises the network path rather than the
+// missing-credentials skip.
+func credentialedEnv(key string) string {
+	switch key {
+	case "TAILSCALE_TAILNET":
+		return "example.com"
+	case "TAILSCALE_API_KEY":
+		return "tskey-test"
+	}
+	return ""
+}
+
+// TestLintOnlineSCIMSyncCheck covers lint --online-validation's second
+// control-plane call. There is no API listing synced groups, so a group that is
+// referenced but not actually syncing surfaces only as an /acl/validate
+// warning; nothing else in the suite exercises that path, so deleting the
+// EvaluateSCIMGroupSync call left every test green.
+//
+// The second subtest pins the same invariant the services call already has: a
+// later failure must narrow the report, not empty it. That matters more here
+// because the failure arrives after the first call has already populated the
+// report.
+func TestLintOnlineSCIMSyncCheck(t *testing.T) {
+	t.Parallel()
+	const syncWarning = "group:contractors@example.com is not syncing from SCIM and will be ignored"
+	for _, testCase := range []struct {
+		name         string
+		validateCode int
+		wantExit     int
+		want         []string
+	}{
+		{
+			name:         "warning becomes a finding",
+			validateCode: http.StatusOK,
+			wantExit:     exitFailed,
+			want:         []string{"scim-group-unsynced"},
+		},
+		{
+			// The services call has already succeeded and svc-in-source is an
+			// offline finding, so both must still reach stdout.
+			name:         "validate failure keeps what was already found",
+			validateCode: http.StatusForbidden,
+			wantExit:     exitUsage,
+			want:         []string{"svc-in-source"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "validate") {
+					w.WriteHeader(testCase.validateCode)
+					if testCase.validateCode == http.StatusOK {
+						fmt.Fprintf(w, `{"data":[{"user":"x","warnings":[%q]}]}`, syncWarning)
+					}
+					return
+				}
+				fmt.Fprint(w, `{"vipServices":[]}`)
+			}))
+			defer server.Close()
+
+			path := filepath.Join(t.TempDir(), "acl.hujson")
+			writeTestPolicy(t, path, `{
+				"tagOwners": {"tag:web": ["autogroup:admin"]},
+				"grants": [{"src": ["svc:bad"], "dst": ["tag:web"], "ip": ["tcp:443"]}]
+			}`)
+
+			var stdout strings.Builder
+			err := run(
+				context.Background(),
+				[]string{"--file", path, cmdLint, "--online-validation"},
+				credentialedEnv, server.Client(), server.URL, &stdout, io.Discard,
+			)
+			if code := exitCode(err); code != testCase.wantExit {
+				t.Fatalf("exit code = %d, want %d (error %v)", code, testCase.wantExit, err)
+			}
+			assertOutputFragments(t, stdout.String(), testCase.want, nil)
+		})
 	}
 }
 

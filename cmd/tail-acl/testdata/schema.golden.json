@@ -240,6 +240,11 @@
       "description": "a svc: destination names a service not found in the tailnet (requires --online-validation)",
       "id": "svc-unknown",
       "severity": "warn"
+    },
+    {
+      "description": "a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
+      "id": "scim-group-unsynced",
+      "severity": "warn"
     }
   ],
   "name": "tail-acl",

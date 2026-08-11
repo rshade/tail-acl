@@ -2303,7 +2303,49 @@ func lintOnline(
 	// to aclpolicy, and a copy of that switch out here would silently stop
 	// summing to Total the day a severity is added.
 	report.Add(aclpolicy.EvaluateServiceExistence(policy, names)...)
+
+	warnings, err := collectSCIMSyncWarnings(ctx, client, opts.file, logger)
+	if err != nil {
+		return err
+	}
+	report.Add(aclpolicy.EvaluateSCIMGroupSync(warnings)...)
 	return nil
+}
+
+// collectSCIMSyncWarnings submits the policy to /acl/validate and returns the
+// flat list of control-plane warning strings. There is no API to list synced
+// groups, so a group referenced but not actually syncing from SCIM surfaces only
+// here, as a validation warning. A control plane that never judged the policy
+// (ValidationUnavailable) is a collection failure and is propagated so exitCode
+// maps it to exit 2; every other validate outcome — including a policy the
+// control plane rejects — is not lint's verdict to render, so it is logged at
+// WARN and whatever warnings were collected (possibly none) are returned.
+func collectSCIMSyncWarnings(
+	ctx context.Context,
+	client *tailscale.Client,
+	path string,
+	logger *slog.Logger,
+) ([]string, error) {
+	result, err := tailapi.ValidateFile(ctx, client, path)
+	if err != nil {
+		// Judged() rather than == ValidationUnavailable: NotAttempted is the
+		// other "the control plane never answered" outcome - an unreadable
+		// policy file or a request that could not be built - and treating it
+		// as a completed check reported the policy clean on a check that never
+		// ran. Rejected and Indeterminate stay on the continue path, since
+		// both carry usable warnings.
+		if !tailapi.ClassifyValidation(err).Judged() {
+			return nil, err
+		}
+		logger.WarnContext(ctx, "control-plane validation did not prove the policy clean; "+
+			"reporting any SCIM-sync warnings it returned and continuing lint",
+			"error", err)
+	}
+	warnings := make([]string, 0)
+	for _, detail := range result.Warnings {
+		warnings = append(warnings, detail.Warnings...)
+	}
+	return warnings, nil
 }
 
 // resolveLintOptions validates lint's --severity/--wildcard flags and folds the

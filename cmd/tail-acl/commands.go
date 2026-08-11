@@ -470,10 +470,11 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	cmd.Flags().BoolVar(&strictSCIMGroups, "strict-scim-groups", false,
 		"error on undeclared SCIM/IdP-synced groups (group:<name>@<domain>) instead of exempting them")
 	cmd.Flags().Var(&scimDomains, "scim-domains",
-		"narrow the SCIM-group exemption to these @domains (comma-separated; may be repeated)")
+		"narrow the SCIM-group exemption to these @domains and their subdomains "+
+			"(comma-separated; may be repeated)")
 	cmd.Flags().BoolVar(&online, "online-validation", false,
-		"verify svc: (and later group) references exist in the tailnet via the control plane; "+
-			"requires --tailnet/--api-key")
+		"check svc: destinations and SCIM group sync against the control plane, read-only "+
+			"(lists services, then submits the policy to /acl/validate); requires --tailnet/--api-key")
 	return cmd
 }
 

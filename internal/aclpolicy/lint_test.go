@@ -2,6 +2,7 @@ package aclpolicy_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tailscale "tailscale.com/client/tailscale/v2"
@@ -308,6 +309,86 @@ func TestEvaluateServiceExistence(t *testing.T) {
 	}
 	if finding.Value != "svc:ghost" {
 		t.Errorf("finding value = %q, want svc:ghost", finding.Value)
+	}
+}
+
+// TestEvaluateSCIMGroupSync covers the pure classifier behind the SCIM half of
+// lint --online-validation, fed captured control-plane warning strings with no
+// network.
+func TestEvaluateSCIMGroupSync(t *testing.T) {
+	t.Parallel()
+	const notSyncing = " is not syncing from SCIM and will be ignored by rules in the policy file"
+	tests := []struct {
+		name                 string
+		warnings             []string
+		wantCount            int
+		wantValue            string
+		wantEvidenceContains string
+	}{
+		{
+			name:      "warning names the group selector",
+			warnings:  []string{"group:contractors@example.com" + notSyncing},
+			wantCount: 1,
+			wantValue: "group:contractors@example.com",
+		},
+		{
+			name: "same group twice is deduplicated",
+			warnings: []string{
+				"group:contractors@example.com" + notSyncing,
+				"group:contractors@example.com" + notSyncing,
+			},
+			wantCount: 1,
+			wantValue: "group:contractors@example.com",
+		},
+		{
+			name:                 "warning without a group token still reports",
+			warnings:             []string{"a referenced entity is not syncing from SCIM and will be ignored"},
+			wantCount:            1,
+			wantValue:            "",
+			wantEvidenceContains: "not syncing from SCIM",
+		},
+		{
+			name:      "unrelated warning is ignored",
+			warnings:  []string{"some other warning"},
+			wantCount: 0,
+		},
+		{
+			name:      "empty input",
+			warnings:  nil,
+			wantCount: 0,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			findings := aclpolicy.EvaluateSCIMGroupSync(testCase.warnings)
+			if findings == nil {
+				t.Fatal("findings = nil, want non-nil slice")
+			}
+			if len(findings) != testCase.wantCount {
+				t.Fatalf("findings = %#v, want %d", findings, testCase.wantCount)
+			}
+			if testCase.wantCount == 0 {
+				return
+			}
+			assertSCIMFinding(t, findings[0], testCase.wantValue, testCase.wantEvidenceContains)
+		})
+	}
+}
+
+func assertSCIMFinding(t *testing.T, finding aclpolicy.LintFinding, wantValue, wantEvidenceContains string) {
+	t.Helper()
+	if finding.ID != aclpolicy.LintSCIMGroupUnknown {
+		t.Errorf("finding ID = %q, want %q", finding.ID, aclpolicy.LintSCIMGroupUnknown)
+	}
+	if finding.Severity != aclpolicy.LintWarn {
+		t.Errorf("finding severity = %q, want warn", finding.Severity)
+	}
+	if finding.Value != wantValue {
+		t.Errorf("finding value = %q, want %q", finding.Value, wantValue)
+	}
+	if wantEvidenceContains != "" && !strings.Contains(finding.Evidence, wantEvidenceContains) {
+		t.Errorf("finding evidence = %q, want it to contain %q", finding.Evidence, wantEvidenceContains)
 	}
 }
 

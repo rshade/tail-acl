@@ -648,6 +648,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
 | `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |
+| `scim-group-unsynced` | warn | a `group:` reference the control plane reports is not syncing from SCIM (requires `-online-validation`) |
 
 `-severity advice|info|warn|error` (default `warn`) sets the lowest severity
 `lint` reports and fails on. A finding below the threshold is neither printed
@@ -680,8 +681,11 @@ credentialed `plan`/`validate` commands consult the control plane. Two flags
 tune it:
 
 - `-scim-domains a.com,b.com` (comma-separated, repeatable) narrows the
-  exemption to groups whose `@domain` suffix is listed (case-insensitive); a
-  SCIM-shaped group in any other domain still reports `undefined-reference`.
+  exemption to groups whose `@domain` equals a listed domain or is a subdomain
+  of one (case-insensitive) — so `example.com` also covers
+  `group:x@eng.example.com`. A SCIM-shaped group in any other domain still
+  reports `undefined-reference`; a lookalike such as `notexample.com` or
+  `example.com.evil` is not matched.
 - `-strict-scim-groups` restores the pre-exemption behavior: every group not in
   the local `groups` map is an `undefined-reference` error, SCIM-shaped or not.
 
@@ -713,12 +717,32 @@ each `svc:` destination not found. A missing service is a **warning, not an
 error**, because services are late-bound: Tailscale itself validates a policy
 that names a service that does not yet exist. Without credentials,
 `-online-validation` logs a warning to stderr and continues with the offline
-findings only rather than failing. When later extended, the same flag will
-verify group references (already counted as `scim_group_refs`).
+findings only rather than failing.
+
+`-online-validation` **also** cross-checks SCIM group references. There is no API
+to list IdP/SCIM-synced groups, so sync status is discovered indirectly: `lint`
+POSTs the policy to the control plane's `/acl/validate` endpoint (read-only; it
+never mutates the tailnet) and surfaces any "not syncing from SCIM" warning it
+returns as a `scim-group-unsynced` (warn) finding. This is the online complement
+to the offline `scim_group_refs` count: offline counts SCIM-shaped references it
+exempted, online reports which of them the control plane says are not actually
+syncing — a distinction the offline linter, which only inspects name shape,
+cannot make. A control plane that never judged the policy is a collection failure
+(exit `2`); a policy the control plane merely rejects is not `lint`'s verdict, so
+that outcome is logged to stderr and lint continues with any warnings collected.
+This path cannot be exercised against a live SCIM-backed tailnet in this
+project's test environment (no org-IdP-backed tailnet is available), so it is
+covered by unit tests against captured warning payloads rather than a live SCIM
+sync.
+
+`-online-validation` makes two read-only calls: it lists the tailnet's services,
+then submits the policy to `/acl/validate`, whose warnings are the only place a
+referenced-but-not-syncing group surfaces. The token therefore needs the scope
+for both, not services-read alone.
 
 Credentials that are present but *rejected* are a different case: a token that
-cannot list services exits `2`, because a check that never ran must not report
-the policy clean. The offline findings are still printed, so a failed online
+cannot complete either call exits `2`, because a check that never ran must not
+report the policy clean. The offline findings are still printed, so a failed online
 check narrows the report rather than emptying it. Note also that
 `-online-validation` only verifies `svc:` selectors in grant and ACL
 destinations and in `tests`; a `svc:` counted in `svc_refs` from an

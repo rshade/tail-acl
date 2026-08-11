@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
@@ -45,7 +46,15 @@ const (
 	LintUnusedIPSet        = "unused-ipset"
 	LintServiceInSource    = "svc-in-source"
 	LintServiceUnknown     = "svc-unknown"
+	LintSCIMGroupUnknown   = "scim-group-unsynced"
 )
+
+// scimNotSyncingMarker is the stable substring of the control-plane validation
+// warning emitted when a policy references a group that is not actually syncing
+// from SCIM. The full sentence ("... and will be ignored by rules in the policy
+// file") is matched only on this fragment so a trailing-word tweak upstream does
+// not silence the check.
+const scimNotSyncingMarker = "is not syncing from scim"
 
 // WildcardPolicy controls how strictly the overbroad-wildcard check treats "*".
 type WildcardPolicy string
@@ -240,6 +249,11 @@ func LintCatalog() []LintCheck {
 			LintWarn,
 			"a svc: destination names a service not found in the tailnet (requires --online-validation)",
 		},
+		{
+			LintSCIMGroupUnknown,
+			LintWarn,
+			"a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
+		},
 	}
 }
 
@@ -293,7 +307,7 @@ func EvaluateServiceExistence(policy *tailscale.ACL, knownServices []string) []L
 	seen := make(map[string]bool)
 	report := func(locator, selector string) {
 		selector = strings.TrimSpace(selector)
-		if !policycore.LooksLikeService(selector) || known[selector] || seen[selector] {
+		if !looksLikeService(selector) || known[selector] || seen[selector] {
 			return
 		}
 		seen[selector] = true
@@ -337,6 +351,71 @@ func EvaluateServiceExistence(policy *tailscale.ACL, knownServices []string) []L
 		}
 	}
 	return findings
+}
+
+// EvaluateSCIMGroupSync is the pure, network-free classifier behind the SCIM
+// half of lint --online-validation. Because the control plane exposes no API to
+// list IdP/SCIM-synced groups, sync status is discovered indirectly: the policy
+// is submitted to /acl/validate, and a group referenced but not actually syncing
+// comes back as a validation warning. The caller flattens those warning strings
+// (ValidationResult.Warnings[].Warnings) and passes them here, keeping this
+// classifier unit-testable with no network.
+//
+// For each warning that reports a group is not syncing from SCIM it emits one
+// LintWarn scim-group-unsynced finding. It is a warn, not an error, because the
+// policy still validates — the not-syncing rule is simply ignored — so this is
+// advisory, mirroring svc-unknown. Findings are deduplicated by the offending
+// group: selector (or by the whole warning text when no selector can be
+// extracted). This is independent of the offline scim_group_refs count: offline
+// counts SCIM-shaped references it exempted, online reports which of them the
+// control plane says are not actually syncing.
+func EvaluateSCIMGroupSync(warnings []string) []LintFinding {
+	findings := make([]LintFinding, 0)
+	seen := make(map[string]bool)
+	for _, warning := range warnings {
+		if !strings.Contains(strings.ToLower(warning), scimNotSyncingMarker) {
+			continue
+		}
+		selector := extractGroupSelector(warning)
+		key := selector
+		if key == "" {
+			key = warning
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		findings = append(findings, LintFinding{
+			ID:          LintSCIMGroupUnknown,
+			Severity:    LintWarn,
+			Rule:        "scim",
+			Value:       selector,
+			Evidence:    warning,
+			Remediation: "ensure the group is provisioned and syncing in your IdP/SCIM, or remove the reference",
+			Trace:       []string{"control plane reported: " + warning},
+		})
+	}
+	return findings
+}
+
+// extractGroupSelector returns the first group: token in a control-plane warning
+// (from "group:" to the next whitespace or quote), or "" when the warning names
+// no selector. The control plane phrases the warning around the offending
+// selector but the surrounding words are not a stable contract, so only the
+// group: token is lifted out.
+func extractGroupSelector(warning string) string {
+	start := strings.Index(warning, "group:")
+	if start < 0 {
+		return ""
+	}
+	rest := warning[start:]
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '"' || r == '\'' || r == '`'
+	})
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func evaluateLint(
@@ -700,7 +779,7 @@ func (l *refLinter) sourceReferenceFinding(rule, selector string) (LintFinding, 
 	// is a warn, not an error, and it must not also route through
 	// undefinedReferenceReason (which the svc: case there exempts anyway) and
 	// double-report. Count it so svc_refs is position-independent.
-	if policycore.LooksLikeService(selector) {
+	if looksLikeService(selector) {
 		l.svcRefs[selector] = true
 		return serviceInSourceFinding(rule, selector), true
 	}
@@ -825,7 +904,7 @@ func (l *refLinter) undefinedReferenceReason(selector string) string {
 		// when it is IdP/SCIM-synced (group:<name>@<domain>). Unless strict mode
 		// is requested, treat a SCIM-shaped selector as resolved and count it,
 		// so the static linter does not false-positive every synced group.
-		if !l.scim.strict && policycore.LooksLikeSCIMGroup(selector, l.scim.domains) {
+		if !l.scim.strict && looksLikeSCIMGroup(selector, l.scim.domains) {
 			l.scimRefs[selector] = true
 			return ""
 		}
@@ -840,7 +919,7 @@ func (l *refLinter) undefinedReferenceReason(selector string) string {
 			return "is not defined in ipsets"
 		}
 		return ""
-	case policycore.LooksLikeService(selector):
+	case looksLikeService(selector):
 		// A svc: selector names a Tailscale Service, which resolves at the
 		// control plane (the vip-services API) and never in the policy file, so
 		// it is never an undefined-host reference. Count it and exempt it in
@@ -855,6 +934,106 @@ func (l *refLinter) undefinedReferenceReason(selector string) string {
 		return ""
 	}
 	return "is not defined in hosts"
+}
+
+// looksLikeService reports whether selector names a Tailscale Service
+// (svc:<name>). Services resolve at the control plane (the vip-services API),
+// never in a policy's local definitions, so like autogroups the name is
+// recognized by its prefix alone; a static linter has nothing local to resolve
+// the remainder against. This is a lint-hygiene heuristic (whether to suppress
+// an undefined-reference finding), not selector resolution, so it lives here
+// rather than in policycore.
+// The name must be non-empty, for the same reason looksLikeSCIMGroup requires
+// both halves: recognizing a selector suppresses undefined-reference, so a bare
+// "svc:" would be declared resolvable while naming nothing. A policy rendered
+// from "svc:${SERVICE_NAME}" with the variable unset produces exactly that.
+func looksLikeService(selector string) bool {
+	return len(selector) > len("svc:") && strings.HasPrefix(selector, "svc:")
+}
+
+// looksLikeSCIMGroup reports whether selector names an IdP/SCIM-synced group
+// (group:<name>@<domain>). With no domains, any group:*@* matches; with
+// domains, a selector matches when its @domain equals a listed domain or is a
+// subdomain of one (ASCII-case-insensitive) — so example.com also covers
+// eng.example.com. The group name portion may contain spaces (e.g.
+// group:finance team@example.com); only the substring after the last "@" is
+// treated as the domain.
+//
+// It is a name-shape heuristic, not a membership check: a SCIM group resolves
+// at the control plane and never appears in a policy's local groups map, so an
+// "@" in the name after the group: prefix is the only local signal available.
+// The "@" is illegal in a local group name, so the two vocabularies cannot
+// collide. Like looksLikeService it is a lint-hygiene heuristic, so it lives in
+// aclpolicy rather than in policycore's shared selector-resolution surface.
+func looksLikeSCIMGroup(selector string, domains []string) bool {
+	remainder, ok := strings.CutPrefix(selector, "group:")
+	if !ok {
+		return false
+	}
+	// Both halves must be non-empty. The exemption suppresses an
+	// undefined-reference error, so a selector that is merely "@-shaped" rather
+	// than SCIM-shaped must not qualify: a templated policy that emits
+	// "group:${TEAM}@${DOMAIN}" with one variable unset produces "group:eng@"
+	// or "group:@corp.com", and both are hard undefined references.
+	at := strings.LastIndex(remainder, "@")
+	if at <= 0 || at == len(remainder)-1 {
+		return false
+	}
+	if len(domains) == 0 {
+		return true
+	}
+	domain := remainder[at+1:]
+	for _, candidate := range domains {
+		if domainMatches(domain, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// domainMatches reports whether domain equals candidate or is a subdomain of
+// it, matched ASCII-case-insensitively. A leading "." on candidate is
+// tolerated (".example.com" behaves like "example.com"), so an operator who
+// writes the suffix form still gets the exact-domain match too.
+func domainMatches(domain, candidate string) bool {
+	candidate = strings.TrimPrefix(candidate, ".")
+	if candidate == "" {
+		return false
+	}
+	if asciiEqualFold(domain, candidate) {
+		return true
+	}
+	return len(domain) > len(candidate)+1 &&
+		asciiEqualFold(domain[len(domain)-len(candidate):], candidate) &&
+		domain[len(domain)-len(candidate)-1] == '.'
+}
+
+// asciiEqualFold compares two domains case-insensitively over ASCII only.
+// [strings.EqualFold] applies Unicode simple folding, under which U+017F (long s)
+// folds to "s" and U+212A (Kelvin sign) folds to "k" - so "banKexample"
+// would match a "bank.example" narrowing. That widens the exemption, which is
+// the direction this flag exists to prevent, so the fold is kept to ASCII and
+// any non-ASCII byte makes the two domains simply unequal.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		x, y := a[i], b[i]
+		if x >= utf8.RuneSelf || y >= utf8.RuneSelf {
+			return false
+		}
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 func lintDuplicateGrants(policy *tailscale.ACL) ([]LintFinding, error) {
