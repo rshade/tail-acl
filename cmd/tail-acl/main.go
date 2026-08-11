@@ -267,17 +267,24 @@ type result struct {
 	SSHTestsSkipped int                    `json:"ssh_tests_skipped,omitempty"`
 	TestSummary     *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 	Policy          json.RawMessage        `json:"policy,omitempty"`
-	// Findings is the complete lint report. The -severity threshold controls the
-	// human view and exit status, but the versioned JSON envelope keeps every
+	// Findings is the complete lint report. An explicit -severity threshold
+	// controls the human view and exit status; when the flag is omitted, the
+	// human view also keeps every finding while the default warn threshold still
+	// controls exit status. The versioned JSON envelope always keeps every
 	// finding so existing machine consumers do not silently lose lower tiers.
 	// The pointer preserves "findings": [] for a clean lint run while every other
 	// command omits the field.
 	Findings *[]aclpolicy.LintFinding `json:"findings,omitempty"`
 	// LintSummary counts the whole policy, matching Findings above it.
 	LintSummary *aclpolicy.LintSummary `json:"lint_summary,omitempty"`
-	// LintThreshold is the resolved -severity used for the human view and exit
-	// status. It is informational in JSON; Findings remains the complete report.
+	// LintThreshold is the resolved -severity used for exit status and, when the
+	// flag was explicit, the human view. It is informational in JSON; Findings
+	// remains the complete report.
 	LintThreshold string `json:"lint_severity_threshold,omitempty"`
+	// LintSeverityExplicit distinguishes an omitted -severity (show everything,
+	// fail at warn) from an explicit -severity warn (show and fail at warn). It is
+	// presentation state, not part of the versioned JSON envelope.
+	LintSeverityExplicit bool `json:"-"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
 	// that matched nothing still emits "results": [], which a consumer can tell
@@ -667,11 +674,16 @@ func render(w io.Writer, format string, colorize bool, res *result) error {
 	}
 	reportedFindings := []aclpolicy.LintFinding(nil)
 	if res.Findings != nil {
-		reportedFindings = lintFindingsAtLeast(
-			*res.Findings,
-			aclpolicy.LintSeverity(res.LintThreshold),
-		)
-		if err := renderLintFindings(w, reportedFindings, colorize); err != nil {
+		reportedFindings = slices.Clone(*res.Findings)
+		if res.LintSeverityExplicit {
+			reportedFindings = lintFindingsAtLeast(
+				reportedFindings,
+				aclpolicy.LintSeverity(res.LintThreshold),
+			)
+		}
+		if err := renderLintFindings(
+			w, reportedFindings, aclpolicy.LintSeverity(res.LintThreshold), colorize,
+		); err != nil {
 			return err
 		}
 	}
@@ -740,13 +752,17 @@ func lintFindingsAtLeast(
 	})
 }
 
-// renderLintFindings prints the findings that survived the -severity filter,
-// holding the advisory tier back to a captioned block of its own. Advice ranks
-// below every other tier, so a finding reaching here at all means the threshold
-// was -severity advice — which is also the only threshold at which an advisory
-// sets a non-zero exit. That equivalence is why the caption can state this
-// run's exit behavior outright instead of hedging across thresholds.
-func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, colorize bool) error {
+// renderLintFindings prints the findings selected for the human view, holding
+// the advisory tier back to a captioned block of its own. The resolved failure
+// threshold lets that caption describe this run accurately: an omitted flag
+// displays advice without making it fatal, while an explicit -severity advice
+// both displays it and lowers the failure floor.
+func renderLintFindings(
+	w io.Writer,
+	findings []aclpolicy.LintFinding,
+	threshold aclpolicy.LintSeverity,
+	colorize bool,
+) error {
 	for _, finding := range findings {
 		if finding.Severity != aclpolicy.LintAdvice {
 			if err := renderLintFinding(w, finding, colorize); err != nil {
@@ -761,10 +777,16 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, colorize 
 	if len(advice) == 0 {
 		return nil
 	}
-	// The caption states this run's exit behavior, not the default one:
+	// The caption states this run's exit behavior, not merely the default one:
 	// printing "does not affect the exit code" directly above the finding that
 	// produced exit 1 is the kind of claim an operator quotes in a postmortem.
-	caveat := "advisory (heuristic; not a defect, but -severity advice makes these fail this run):"
+	caveat := fmt.Sprintf(
+		"advisory (heuristic; not a defect; these are below the %s failure floor and do not affect this run's exit code):",
+		threshold,
+	)
+	if aclpolicy.LintAdvice.AtLeast(threshold) {
+		caveat = "advisory (heuristic; not a defect, but -severity advice makes these fail this run):"
+	}
 	if _, err := fmt.Fprintln(w, caveat); err != nil {
 		return err
 	}
@@ -2242,6 +2264,7 @@ func runLint(
 	opts options,
 	lintOpts aclpolicy.LintOptions,
 	threshold aclpolicy.LintSeverity,
+	severityExplicit bool,
 	configPath string,
 	online bool,
 	httpClient *http.Client,
@@ -2283,15 +2306,16 @@ func runLint(
 		}
 	}
 
-	res := newLintResult(opts.file, report, threshold)
+	res := newLintResult(opts.file, report, threshold, severityExplicit)
 	// A collection failure outranks the policy verdict: the report is rendered
 	// either way, but the exit code must say "could not check" rather than
 	// "policy is clean".
 	if onlineErr != nil {
 		return res, onlineErr
 	}
-	// The gate reads the whole report, not the filtered result: the two must
-	// agree, and CountAtLeast applies the same threshold the filter did.
+	// The gate always reads the whole report. When -severity was explicit, the
+	// human filter uses the same floor; when it was omitted, the human view shows
+	// everything but this default warn floor still controls the exit status.
 	if report.CountAtLeast(threshold) > 0 {
 		res.Status = statusFailed
 		return res, errLintFindings
@@ -2398,6 +2422,12 @@ func resolveLintOptions(
 ) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
 	threshold, ok := aclpolicy.ParseLintSeverity(severityRaw)
 	if !ok {
+		if strings.Contains(severityRaw, ",") {
+			return aclpolicy.LintOptions{}, "", usagef(
+				"-severity accepts one minimum, not a list; choose advice, info, warn, or error " +
+					"(warn already includes error)",
+			)
+		}
 		return aclpolicy.LintOptions{}, "", usagef(
 			"unknown -severity %q; want advice, info, warn, or error",
 			severityRaw,
@@ -2432,17 +2462,28 @@ func resolveLintOptions(
 	}, threshold, nil
 }
 
-// newLintResult keeps the complete report for the versioned JSON envelope and
-// applies -severity only to the human-summary count. The renderer derives the
-// thresholded human finding list; the classifier and machine contract retain
-// everything they found (AX conventions 2 and 9).
-func newLintResult(path string, report aclpolicy.LintReport, threshold aclpolicy.LintSeverity) *result {
+// newLintResult keeps the complete report for the versioned JSON envelope. An
+// explicit -severity applies to the human-summary count; an omitted flag shows
+// the whole report while retaining warn as the failure threshold. The renderer
+// applies the same presentation choice, and the classifier and machine contract
+// retain everything they found (AX conventions 2 and 9).
+func newLintResult(
+	path string,
+	report aclpolicy.LintReport,
+	threshold aclpolicy.LintSeverity,
+	severityExplicit bool,
+) *result {
 	findings := slices.Clone(report.Findings)
-	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, report.CountAtLeast(threshold), threshold))
+	reported := report.Summary.Total
+	if severityExplicit {
+		reported = report.CountAtLeast(threshold)
+	}
+	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, reported, threshold))
 	res.File = path
 	res.Findings = &findings
 	res.LintSummary = &report.Summary
 	res.LintThreshold = string(threshold)
+	res.LintSeverityExplicit = severityExplicit
 	return res
 }
 
@@ -2519,7 +2560,7 @@ func lintSummarySegments(
 		segs = append(segs, summarySegment{text: scim})
 	}
 	if reported != summary.Total {
-		segs = append(segs, summarySegment{text: " (-severity advice shows all)"})
+		segs = append(segs, summarySegment{text: " (-severity advice shows/fails on all)"})
 	}
 	return segs
 }

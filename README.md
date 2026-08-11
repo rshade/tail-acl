@@ -664,20 +664,22 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `scim-group-shadows-local` | warn | a SCIM-shaped `group:<name>@<domain>` reference has the same name half as a declared local `group:<name>` |
 | `scim-group-unsynced` | warn | a `group:` reference the control plane reports is not syncing from SCIM (requires `-online-validation`) |
 
-`-severity advice|info|warn|error` (default `warn`) sets the lowest severity
-`lint` prints in human output and fails on. A finding below the threshold is not
-printed in the human view and does not affect the exit status, but the versioned
-JSON `findings` array always carries the complete report. Severities rank
-`advice` < `info` < `warn` < `error`, so the default human view reports `warn`
-and `error` and withholds `info` and `advice` — pass `-severity advice` to print
-everything, which also makes advisories fail the run.
+Without `-severity`, `lint` prints every finding in human output and uses `warn`
+as the failure floor: `warn` and `error` make the run fail, while visible `info`
+and `advice` findings do not. Supplying `-severity advice|info|warn|error` sets
+both the display floor and the failure floor. Severities rank `advice` < `info`
+< `warn` < `error`, so `-severity warn` displays and fails on both `warn` and
+`error`; it is a single minimum, not an exact-match list, and
+`-severity=warn,error` is therefore invalid and unnecessary.
 
-Nothing is withheld silently. `lint_summary` and JSON `findings` cover the whole
-policy whatever the threshold, `lint_severity_threshold` records the human and
-exit gate, and the human trailer names both — `no findings at or above warn; 2
-total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)`. A clean
-policy is the distinct message `no policy hygiene findings in <file>`, so a
-quiet run is never ambiguous between "clean" and "filtered".
+When an explicit threshold withholds findings, it never does so silently.
+`lint_summary` and the versioned JSON `findings` array cover the whole policy at
+every floor, `lint_severity_threshold` records the exit floor, and the human
+trailer names what the explicit filter withheld — `no findings at or above
+warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows/fails
+on all)`.
+A clean policy is the distinct message `no policy hygiene findings in <file>`.
+
 `-wildcard any-to-any|any|off` (default `any-to-any`) tunes the wildcard check:
 `any-to-any` flags only a grant whose `src` and `dst` are both `*` (a standalone
 `*` is common and allowed), `any` flags every `*`, and `off` disables it.
@@ -746,10 +748,10 @@ read-only through the `vip-services` Get endpoint and emit `svc-unknown` (warn)
 when that exact policy selector returns not found. A missing service is a
 **warning, not an error**, because services are late-bound: Tailscale itself
 validates a policy that names a service that does not yet exist. Like every
-warn-tier finding, it is printed and makes the run fail at the default
-`-severity warn`. Set `-severity error` when online warnings should remain
-visible in the whole-policy summary but should not appear as reported findings
-or fail the run. Without credentials, `-online-validation` logs a warning to
+warn-tier finding, it is printed and makes the run fail at the default warn
+failure floor. Set `-severity error` when online warnings should remain visible
+in the whole-policy summary but should not appear as reported findings or fail
+the run. Without credentials, `-online-validation` logs a warning to
 stderr and continues with the offline findings only rather than failing.
 
 `-online-validation` **also** cross-checks SCIM group references. There is no API

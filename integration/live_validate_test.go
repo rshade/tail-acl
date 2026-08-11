@@ -191,7 +191,7 @@ type liveValidationCredentials struct {
 func liveValidateCredentials(t *testing.T) liveValidationCredentials {
 	t.Helper()
 	if os.Getenv(liveValidateEnv) != "1" {
-		t.Skipf("set %s=1 with scratch-tailnet credentials to run the /acl/validate evidence gate",
+		t.Skipf("set %s=1 with scratch-tailnet credentials to run the live control-plane gates",
 			liveValidateEnv)
 	}
 	credentials := liveValidationCredentials{

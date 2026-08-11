@@ -3241,11 +3241,10 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 }
 
 // TestLintAdviceCaveatDescribesTheRunNotTheDefault guards the human caption
-// against contradicting the run it is printed on. An advisory now reaches the
-// output only under -severity advice, which is also the only threshold at
-// which it sets a non-zero exit — so the caption asserting a failure must never
-// appear above a run that exited 0, and the default threshold must print no
-// advisory block at all rather than one hedged with a stale caveat.
+// against contradicting the run it is printed on. The default view displays an
+// advisory without letting it affect the warn-floor exit; -severity advice
+// lowers that floor and makes the same finding fatal. The captions must tell
+// those two runs apart.
 func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -3258,10 +3257,10 @@ func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 		notWant  string
 	}{
 		{
-			name:     "default threshold withholds the advisory entirely",
+			name:     "default view shows non-fatal advisory",
 			wantCode: exitOK,
-			want:     "no findings at or above warn; 1 total:",
-			notWant:  "advisory (heuristic",
+			want:     "below the warn failure floor and do not affect this run's exit code",
+			notWant:  "makes these fail this run",
 		},
 		{
 			name:     "severity advice",
@@ -3292,8 +3291,8 @@ func TestLintAdviceCaveatDescribesTheRunNotTheDefault(t *testing.T) {
 	}
 }
 
-// The advisory block is rendered only under -severity advice, which is also
-// the threshold that makes it fail the run, so this exercises exit 1.
+// An explicit -severity advice makes the rendered advisory fail the run, so
+// this exercises the fatal caption and exit 1.
 func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -3357,10 +3356,10 @@ const mixedLintPolicy = `{
 	]
 }`
 
-// TestLintSeverityFiltersFindings pins -severity as a filter, not only an exit
-// gate: a finding below the threshold is neither printed nor counted in the
-// trailer's headline. That is what an operator means by "-severity warn", and
-// what golangci-lint, shellcheck -S, and staticcheck all do with the flag.
+// TestLintSeverityFiltersFindings pins the omitted-versus-explicit split. With
+// no flag, lint displays its complete report while keeping warn as the failure
+// floor. An explicit -severity is a filter as well as an exit gate: a finding
+// below that floor is neither printed nor counted in the trailer's headline.
 //
 // The failure mode filtering introduces is the one asserted hardest here: a
 // trailer that reads as a clean policy when the threshold hid everything. The
@@ -3376,13 +3375,15 @@ func TestLintSeverityFiltersFindings(t *testing.T) {
 		notWant  []string
 	}{
 		{
-			name:     "default warn hides both tiers but not their counts",
+			name:     "omitted severity displays all without lowering the failure floor",
 			wantCode: exitOK,
 			want: []string{
-				"no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice",
-				"-severity advice shows all",
+				"INFO unused-group",
+				"ADVICE broad-rule-untested",
+				"below the warn failure floor and do not affect this run's exit code",
+				"2 findings: 0 error, 0 warn, 1 info, 1 advice",
 			},
-			notWant: []string{"INFO unused-group", "ADVICE broad-rule-untested", "advisory (heuristic"},
+			notWant: []string{"at or above", "shows all", "makes these fail this run"},
 		},
 		{
 			name:     "info admits info and still hides advice",
@@ -3427,10 +3428,64 @@ func TestLintSeverityFiltersFindings(t *testing.T) {
 	}
 }
 
+// TestLintSeverityIsASingleFloor guards the CLI meaning that prompted the
+// flag: warn includes warn and every more-severe finding (currently error). A
+// comma list would imply exact-set filtering, so it is rejected with guidance
+// toward the equivalent single floor instead of being accepted ambiguously.
+func TestLintSeverityIsASingleFloor(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	for _, args := range [][]string{
+		{"--file", path, cmdInit},
+		{"--file", path, cmdGrant, subAdd, "--src", "*", "--dst", "*", "--ip", "tcp:443"},
+		{
+			"--file", path, cmdGrant, subAdd,
+			"--src", "group:missing", "--dst", "tag:missing", "--ip", "tcp:443",
+		},
+		{"--file", path, cmdHost, subSet, "unused-host", "100.64.0.1"},
+	} {
+		if err := run(
+			context.Background(), args,
+			func(string) string { return "" }, nil, "", io.Discard, io.Discard,
+		); err != nil {
+			t.Fatalf("author severity probe with %v: %v", args, err)
+		}
+	}
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdLint, "--severity", "warn"},
+		func(string) string { return "" }, nil, "", &stdout, io.Discard,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("--severity warn exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+	assertOutputFragments(t, stdout.String(), []string{
+		"WARN overbroad-wildcard",
+		"ERROR dst-tag-no-owner",
+		"ERROR undefined-reference",
+	}, []string{"INFO unused-host"})
+
+	err = run(
+		context.Background(),
+		[]string{"--file", path, cmdLint, "--severity=warn,error"},
+		func(string) string { return "" }, nil, "", io.Discard, io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("comma-list exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	if !strings.Contains(err.Error(), "one minimum, not a list") ||
+		!strings.Contains(err.Error(), "warn already includes error") {
+		t.Errorf("comma-list error = %q, want single-floor guidance", err)
+	}
+}
+
 // TestLintJSONKeepsAllFindingsBelowThreshold pins the version-1 machine
-// contract: -severity controls the exit status and human presentation, but it
-// must not remove lower-tier findings from the JSON envelope. Consumers that
-// predate the flag still receive the complete report.
+// contract: the resolved severity controls exit status and an explicit flag
+// also controls human presentation, but neither may remove lower-tier findings
+// from the JSON envelope. Consumers that predate the flag still receive the
+// complete report.
 func TestLintJSONKeepsAllFindingsBelowThreshold(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -3480,7 +3535,7 @@ func TestNewLintResultUsesSingularFinding(t *testing.T) {
 	res := newLintResult("acl.hujson", aclpolicy.LintReport{
 		Findings: []aclpolicy.LintFinding{{ID: "broad-rule-untested", Severity: aclpolicy.LintAdvice}},
 		Summary:  aclpolicy.LintSummary{Total: 1, Advice: 1},
-	}, aclpolicy.LintAdvice)
+	}, aclpolicy.LintAdvice, true)
 	if want := "1 finding: 0 error, 0 warn, 0 info, 1 advice"; res.Message != want {
 		t.Errorf("Message = %q, want %q", res.Message, want)
 	}
@@ -3499,8 +3554,9 @@ func TestNewLintResultKeepsAllFindingsButCountsTheHumanView(t *testing.T) {
 			{ID: "broad-rule-untested", Severity: aclpolicy.LintAdvice},
 		},
 		Summary: aclpolicy.LintSummary{Total: 3, Warn: 1, Info: 1, Advice: 1},
-	}, aclpolicy.LintWarn)
-	want := "1 finding at or above warn; 3 total: 0 error, 1 warn, 1 info, 1 advice (-severity advice shows all)"
+	}, aclpolicy.LintWarn, true)
+	want := "1 finding at or above warn; 3 total: 0 error, 1 warn, 1 info, 1 advice " +
+		"(-severity advice shows/fails on all)"
 	if res.Message != want {
 		t.Errorf("Message = %q, want %q", res.Message, want)
 	}

@@ -456,7 +456,7 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 		Use:   cmdLint,
 		Short: lintSummary,
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			lintOpts, threshold, err := resolveLintOptions(
 				severity, wildcard, strictSCIMGroups, scimDomains,
 			)
@@ -464,7 +464,7 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 				return err
 			}
 			out, err := runLint(
-				ctx, *deps.opts, lintOpts, threshold, configPath,
+				ctx, *deps.opts, lintOpts, threshold, cmd.Flags().Changed("severity"), configPath,
 				online, deps.httpClient, deps.apiURL, deps.logger(),
 			)
 			*deps.result = out
@@ -472,7 +472,8 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&severity, "severity", string(aclpolicy.LintWarn),
-		"lowest finding severity to report and fail on: advice|info|warn|error")
+		"lowest finding severity to report and fail on when set: advice|info|warn|error; "+
+			"when omitted, report all and fail on warn or error")
 	cmd.Flags().StringVar(&wildcard, "wildcard", string(aclpolicy.WildcardAnyToAny),
 		"over-broad wildcard policy: any-to-any|any|off")
 	cmd.Flags().StringVar(&configPath, "config", "",

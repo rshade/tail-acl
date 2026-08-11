@@ -170,11 +170,10 @@ const mixedSeverityPolicy = `{
 // even though stdout here is a buffer (not a TTY) — always is the override that
 // forces color for pipes and pagers, and doubles as the test hook.
 //
-// -severity advice is what puts every finding on the page: the default warn
-// threshold withholds both of this policy's findings, so the per-finding
-// prefixes would never render and the summary would take the withheld-findings
-// wording instead of "2 findings:". Reporting an advisory at that threshold is
-// also what makes the run exit 1.
+// -severity advice is explicit here because it makes every displayed finding
+// fatal, so this test covers both the full set of severity colors and exit 1.
+// The omitted flag would display the same findings but retain warn as its
+// failure floor and exit 0 for this policy.
 func TestLintColorAlwaysPaintsSeverities(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
@@ -249,8 +248,8 @@ func TestLintColorAlwaysLeavesJSONClean(t *testing.T) {
 // otherwise pass the entire suite: dropping its trailing newline, so a TTY lint
 // runs into the shell prompt; and skipping the uncoloured segments when the
 // threshold withheld findings, so a terminal user loses the "N at or above
-// warn" lead-in and the "-severity advice shows all" hint that the JSON
-// message still carries.
+// warn" lead-in and the "-severity advice shows/fails on all" hint that the
+// JSON message still carries.
 func TestLintColorIsPurelyDecorative(t *testing.T) {
 	t.Parallel()
 	escape := regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -264,8 +263,9 @@ func TestLintColorIsPurelyDecorative(t *testing.T) {
 			policy: `{"tagOwners": {"tag:web": ["autogroup:admin"]}, "grants": []}`,
 		},
 		{
-			name:   "threshold withholds everything",
+			name:   "explicit threshold withholds everything",
 			policy: mixedLintPolicy,
+			args:   []string{"-severity", "warn"},
 		},
 		{
 			name:   "threshold withholds nothing",
@@ -273,8 +273,9 @@ func TestLintColorIsPurelyDecorative(t *testing.T) {
 			args:   []string{"-severity", "advice"},
 		},
 		{
-			name:   "threshold withholds some",
+			name:   "explicit threshold withholds some",
 			policy: `{"grants": [{"src": ["*"], "dst": ["*"], "ip": ["tcp:443"]}, {"src": ["group:x@corp.example"], "dst": ["tag:nobody"], "ip": ["tcp:80"]}]}`,
+			args:   []string{"-severity", "warn"},
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

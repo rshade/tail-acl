@@ -36,32 +36,36 @@ from the top:
    a grant that can never match, or a grant duplicated from an earlier one.
 3. **`info`** — a definition nothing references. Usually dead weight left by a
    rename; occasionally deliberate.
-4. **`advice`** — a heuristic suggestion, not a defect. Below the default
-   threshold, so `lint` withholds it until you ask with `-severity advice`. See
-   the authoring loop below.
+4. **`advice`** — a heuristic suggestion, not a defect. It appears in the
+   default complete report but sits below the default failure floor, so it does
+   not fail the run unless you ask for `-severity advice`. See the authoring
+   loop below.
 
 ## Choose the threshold
 
-`-severity` sets the lowest severity `lint` reports and fails on:
+With no `-severity`, `lint` reports everything but fails only on `warn` and
+`error`. Supplying the flag sets the lowest severity it both reports and fails
+on:
 
 ```sh
-tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage
-tail-acl --file acl/acl.hujson lint                   # default: warn and above
-tail-acl --file acl/acl.hujson lint -severity advice  # everything, advisories fail too
+tail-acl --file acl/acl.hujson lint                   # show all; fail on warn and error
+tail-acl --file acl/acl.hujson lint -severity error   # show/fail on only hard breakage
+tail-acl --file acl/acl.hujson lint -severity warn    # show/fail on warn and error
+tail-acl --file acl/acl.hujson lint -severity advice  # show/fail on everything
 ```
 
-A finding below the threshold is not printed in the human view and does not
-affect the exit status. The versioned JSON `findings` array and `lint_summary`
-still cover the whole policy at every threshold, and the human trailer names
-what it withheld —
+The value is one floor, not an exact inclusion list: `-severity warn` already
+includes `warn` and the more-severe `error`, so `-severity=warn,error` is invalid
+and unnecessary. When an explicit floor withholds findings, the versioned JSON
+`findings` array and `lint_summary` still cover the whole policy, and the human
+trailer names what it withheld —
 
 ```text
-tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)
+tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows/fails on all)
 ```
 
-A policy with nothing to report reads differently, `no policy hygiene findings
-in acl/acl.hujson`, so a quiet run never leaves you guessing whether the policy
-was clean or the threshold was high.
+That example comes from an explicit `-severity warn`. A policy with nothing to
+report reads differently, `no policy hygiene findings in acl/acl.hujson`.
 
 ## Keep IdP-synced groups out of the findings
 
@@ -116,7 +120,8 @@ Tune the wildcard check separately with `-wildcard`:
 destination on every port, with no posture or `via` gate and no deny assertion
 naming that destination. It is a prompt, not a verdict.
 
-Advisories sit below the default threshold, so start by asking for them:
+Advisories are visible by default but sit below the default failure floor. To
+make them gate the run, lower the floor explicitly:
 
 ```sh
 tail-acl --file acl/acl.hujson lint -severity advice
