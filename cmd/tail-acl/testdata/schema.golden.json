@@ -130,6 +130,11 @@
       "usage": "Tailscale API access token (default: TAILSCALE_API_KEY)"
     },
     {
+      "default": "auto",
+      "name": "color",
+      "usage": "colorize human output: auto|always|never"
+    },
+    {
       "default": "acl.json",
       "name": "file",
       "usage": "policy file (typed edits preserve comments in JSON and HuJSON)"

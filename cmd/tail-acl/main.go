@@ -341,6 +341,7 @@ func realMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	restoreDefaultAfterCancel(ctx, stop)
+	enableVirtualTerminal()
 	client := &http.Client{Timeout: httpTimeout}
 	apiURL := os.Getenv("TAILSCALE_API_URL")
 	if apiURL == "" {
@@ -472,11 +473,13 @@ func run(
 	var opts options
 	var res *result
 	format := formatHuman
+	colorRaw := colorModeAuto
 	verbose := false
 	showSchema := false
 
 	root := newRootCommand(getenv, &opts)
 	root.PersistentFlags().StringVar(&format, "format", formatHuman, "output format: human|json")
+	root.PersistentFlags().StringVar(&colorRaw, "color", colorModeAuto, "colorize human output: auto|always|never")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "log operational detail to stderr")
 	// Registered but unbound: cobra's Version field intercepts --version before
 	// RunE, so no handler here would ever run. The registration must stay under
@@ -500,6 +503,9 @@ func run(
 		if format != formatHuman && format != formatJSON {
 			return usagef("unknown -format %q; want human or json", format)
 		}
+		if _, ok := parseColorMode(colorRaw); !ok {
+			return usagef("unknown -color %q; want auto, always, or never", colorRaw)
+		}
 		if err := validateRoster(
 			cmd.Name(), opts.roster, root.PersistentFlags().Changed("roster"),
 		); err != nil {
@@ -516,6 +522,8 @@ func run(
 		stdout:     stdout,
 		stderr:     stderr,
 		format:     &format,
+		colorRaw:   &colorRaw,
+		getenv:     getenv,
 		verbose:    &verbose,
 	}
 	addSubcommands(ctx, root, &deps)
@@ -533,7 +541,9 @@ func run(
 		err = usageError{err}
 	}
 	if res != nil {
-		if renderErr := render(stdout, format, res); renderErr != nil {
+		mode, _ := parseColorMode(colorRaw)
+		colorize := colorEnabled(format, mode, stdout, getenv)
+		if renderErr := render(stdout, format, colorize, res); renderErr != nil {
 			return renderErr
 		}
 	}
@@ -633,8 +643,10 @@ func newResult(command, status, message string) *result {
 
 // render writes the result to stdout in the requested format. Human output
 // prints the diff (when present) followed by the summary line; JSON output
-// emits the versioned envelope.
-func render(w io.Writer, format string, res *result) error {
+// emits the versioned envelope. colorize adds ANSI severity color to lint human
+// output; it is always false for JSON (colorEnabled enforces this), so the
+// envelope stays byte-clean regardless.
+func render(w io.Writer, format string, colorize bool, res *result) error {
 	if format == formatJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -658,9 +670,17 @@ func render(w io.Writer, format string, res *result) error {
 		}
 	}
 	if res.Findings != nil {
-		if err := renderLintFindings(w, *res.Findings); err != nil {
+		if err := renderLintFindings(w, *res.Findings, colorize); err != nil {
 			return err
 		}
+	}
+	// The lint summary is the one line where counts carry severity color, so it
+	// is rebuilt from the structured summary rather than reprinting res.Message.
+	// Every other command keeps the plain "tail-acl: <message>" line.
+	if colorize && res.Command == cmdLint && res.LintSummary != nil && res.Findings != nil {
+		return renderLintSummaryLine(
+			w, res.File, *res.LintSummary, len(*res.Findings), aclpolicy.LintSeverity(res.LintThreshold),
+		)
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
 	return err
@@ -713,10 +733,10 @@ func renderCompositeTest(w io.Writer, res *result) error {
 // was -severity advice — which is also the only threshold at which an advisory
 // sets a non-zero exit. That equivalence is why the caption can state this
 // run's exit behavior outright instead of hedging across thresholds.
-func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
+func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, colorize bool) error {
 	for _, finding := range findings {
 		if finding.Severity != aclpolicy.LintAdvice {
-			if err := renderLintFinding(w, finding); err != nil {
+			if err := renderLintFinding(w, finding, colorize); err != nil {
 				return err
 			}
 		}
@@ -736,7 +756,7 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
 		return err
 	}
 	for _, finding := range advice {
-		if err := renderLintFinding(w, finding); err != nil {
+		if err := renderLintFinding(w, finding, colorize); err != nil {
 			return err
 		}
 		if finding.Suggestion != "" {
@@ -748,15 +768,18 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding) error {
 	return nil
 }
 
-func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding) error {
+func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding, colorize bool) error {
 	locator := finding.Rule
 	if finding.Value != "" {
 		locator = finding.Rule + " " + finding.Value
 	}
+	// Only the severity keyword is colored; the id, locator, and evidence stay
+	// default so the line reads as one severity-tagged sentence, not a rainbow.
+	prefix := paint(colorize, severityColor(finding.Severity), strings.ToUpper(string(finding.Severity)))
 	_, err := fmt.Fprintf(
 		w,
 		"%s %s %s: %s\n",
-		strings.ToUpper(string(finding.Severity)),
+		prefix,
 		finding.ID,
 		locator,
 		finding.Evidence,
@@ -768,16 +791,19 @@ func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding) error {
 // turns a single verdict into a sequence, and the two formats need opposite
 // things from that: JSON drops its indentation so each envelope is one
 // independently parseable NDJSON line, while human output gains a blank line
-// between runs so the scroll-back reads as a red-green history. Nothing here
-// writes ANSI — stdout stays parse-clean whether or not it is a terminal.
+// between runs so the scroll-back reads as a red-green history. colorize is
+// carried through to render but only ever affects lint output; watch mode drives
+// test, so the human stream here stays plain in practice — and JSON never
+// colors, so NDJSON is still parse-clean whether or not stdout is a terminal.
 type streamEmitter struct {
-	w      io.Writer
-	format string
-	wrote  bool
+	w        io.Writer
+	format   string
+	colorize bool
+	wrote    bool
 }
 
-func newStreamEmitter(w io.Writer, format string) *streamEmitter {
-	return &streamEmitter{w: w, format: format}
+func newStreamEmitter(w io.Writer, format string, colorize bool) *streamEmitter {
+	return &streamEmitter{w: w, format: format, colorize: colorize}
 }
 
 func (e *streamEmitter) emit(res *result) error {
@@ -793,7 +819,7 @@ func (e *streamEmitter) emit(res *result) error {
 		}
 	}
 	e.wrote = true
-	return render(e.w, e.format, res)
+	return render(e.w, e.format, e.colorize, res)
 }
 
 // commentFromFlags validates a --comment/--overwrite-comment pair once the
@@ -2420,28 +2446,107 @@ func lintMessage(
 	reported int,
 	threshold aclpolicy.LintSeverity,
 ) string {
-	breakdown := fmt.Sprintf("%d error, %d warn, %d info", summary.Error, summary.Warn, summary.Info)
-	if summary.Advice != 0 {
-		breakdown += fmt.Sprintf(", %d advice", summary.Advice)
+	var b strings.Builder
+	for _, seg := range lintSummarySegments(path, summary, reported, threshold) {
+		b.WriteString(seg.text)
 	}
+	return b.String()
+}
+
+// summarySegment is one span of the lint summary line: its literal text and the
+// ANSI color that span carries (empty for none). Concatenating every segment's
+// text reproduces the plain message byte for byte, which is what lets
+// lintMessage (plain, into res.Message) and renderLintSummaryLine (colored)
+// share one definition of the wording — the "colors match the output" contract.
+type summarySegment struct {
+	text  string
+	color string
+}
+
+// lintSummarySegments splits the summary into colorable spans. Only the count
+// tokens ("0 error", "33 warn", …) carry color; the lead-in, the separators,
+// the withheld-findings clause, and the scim/svc reference tallies stay
+// default. The zero-total case has no counts to color, matching the plain
+// wording exactly.
+func lintSummarySegments(
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) []summarySegment {
 	scim := refNote(summary.SCIMGroupRefs, "scim group reference", "scim group references") +
 		refNote(summary.SvcRefs, "svc reference", "svc references")
-	switch {
-	case summary.Total == 0:
-		return fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)
-	case reported == summary.Total:
-		return fmt.Sprintf("%d %s: %s%s", summary.Total, findingNoun(summary.Total), breakdown, scim)
-	case reported == 0:
-		return fmt.Sprintf(
-			"no findings at or above %s; %d total: %s%s (-severity advice shows all)",
-			threshold, summary.Total, breakdown, scim,
-		)
+	if summary.Total == 0 {
+		return []summarySegment{{text: fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)}}
+	}
+	var segs []summarySegment
+	switch reported {
+	case summary.Total:
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf("%d %s: ", summary.Total, findingNoun(summary.Total)),
+		})
+	case 0:
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf("no findings at or above %s; %d total: ", threshold, summary.Total),
+		})
 	default:
-		return fmt.Sprintf(
-			"%d %s at or above %s; %d total: %s%s (-severity advice shows all)",
-			reported, findingNoun(reported), threshold, summary.Total, breakdown, scim,
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf(
+				"%d %s at or above %s; %d total: ", reported, findingNoun(reported), threshold, summary.Total,
+			),
+		})
+	}
+	segs = append(segs, breakdownSegments(summary)...)
+	if scim != "" {
+		segs = append(segs, summarySegment{text: scim})
+	}
+	if reported != summary.Total {
+		segs = append(segs, summarySegment{text: " (-severity advice shows all)"})
+	}
+	return segs
+}
+
+// breakdownSegments returns the whole-policy severity counts, each colored by
+// its own severity so the breakdown reads at a glance.
+func breakdownSegments(summary aclpolicy.LintSummary) []summarySegment {
+	segs := []summarySegment{
+		{text: fmt.Sprintf("%d error", summary.Error), color: countColor(aclpolicy.LintError, summary.Error)},
+		{text: ", "},
+		{text: fmt.Sprintf("%d warn", summary.Warn), color: countColor(aclpolicy.LintWarn, summary.Warn)},
+		{text: ", "},
+		{text: fmt.Sprintf("%d info", summary.Info), color: countColor(aclpolicy.LintInfo, summary.Info)},
+	}
+	if summary.Advice != 0 {
+		segs = append(segs,
+			summarySegment{text: ", "},
+			summarySegment{
+				text:  fmt.Sprintf("%d advice", summary.Advice),
+				color: countColor(aclpolicy.LintAdvice, summary.Advice),
+			},
 		)
 	}
+	return segs
+}
+
+// renderLintSummaryLine writes the colored summary line. It is reached only when
+// colorize is true and the result is a lint report; the plain path in render
+// keeps printing res.Message so non-lint commands and no-color runs are
+// untouched.
+func renderLintSummaryLine(
+	w io.Writer,
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) error {
+	var b strings.Builder
+	b.WriteString("tail-acl: ")
+	for _, seg := range lintSummarySegments(path, summary, reported, threshold) {
+		b.WriteString(paint(true, seg.color, seg.text))
+	}
+	b.WriteString("\n")
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // refNote renders a count of references the linter recognized but did not flag.

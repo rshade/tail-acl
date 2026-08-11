@@ -24,10 +24,20 @@ type commandDeps struct {
 	stdout     io.Writer
 	stderr     io.Writer
 	format     *string
+	colorRaw   *string
+	getenv     func(string) string
 	verbose    *bool
 }
 
 func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
+
+// colorize resolves whether human output on stdout should carry ANSI color.
+// It reads the flag pointers after cobra has parsed them, so watch mode (which
+// builds its streamEmitter inside a command's RunE) sees the resolved values.
+func (d *commandDeps) colorize() bool {
+	mode, _ := parseColorMode(*d.colorRaw)
+	return colorEnabled(*d.format, mode, d.stdout, d.getenv)
+}
 
 // addSubcommands registers the leaf commands, grouping the five that share
 // a noun (grant, tag-owner, host, posture, auto-approver) under a parent command.
@@ -357,7 +367,7 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			}
 			out, err := runTest(
 				ctx, *deps.opts, testOptions{watch: watch, validate: validate, interval: interval}, deps.logger(),
-				newStreamEmitter(deps.stdout, *deps.format), deps.httpClient, deps.apiURL,
+				newStreamEmitter(deps.stdout, *deps.format, deps.colorize()), deps.httpClient, deps.apiURL,
 			)
 			*deps.result = out
 			return err

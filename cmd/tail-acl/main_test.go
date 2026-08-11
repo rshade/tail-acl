@@ -3871,7 +3871,7 @@ func writeTestPolicy(t *testing.T, path, content string) {
 func TestStreamEmitterJSONIsNDJSON(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder
-	emitter := newStreamEmitter(&out, formatJSON)
+	emitter := newStreamEmitter(&out, formatJSON, false)
 	for _, message := range []string{"first", "second"} {
 		if err := emitter.emit(newResult(cmdTest, statusOK, message)); err != nil {
 			t.Fatalf("emit: %v", err)
@@ -3895,7 +3895,7 @@ func TestStreamEmitterJSONIsNDJSON(t *testing.T) {
 func TestStreamEmitterHumanSeparatesRunsWithOneBlankLine(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder
-	emitter := newStreamEmitter(&out, formatHuman)
+	emitter := newStreamEmitter(&out, formatHuman, false)
 	for _, message := range []string{"first", "second"} {
 		if err := emitter.emit(newResult(cmdTest, statusOK, message)); err != nil {
 			t.Fatalf("emit: %v", err)

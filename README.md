@@ -205,8 +205,20 @@ diffable against each other.
 `--roster PATH` (resolve role autogroups for `test`/`check`; see
 [Resolving role autogroups](#resolving-role-autogroups)),
 `--indeterminate fail|warn|ignore` (test exit policy, default `warn`),
-`-format human|json`, `-verbose`, `--version`, `-schema`.
+`-format human|json`, `-verbose`, `--version`, `-schema`,
+`--color auto|always|never` (colorize human output, default `auto`).
 `TAILSCALE_API_URL` overrides the API base URL (used by tests).
+
+### Color
+
+`lint` tags each finding's severity with color — `error` red, `warn` yellow,
+`info` blue, `advice` dim — and colors the summary counts the same way, with a
+zero count shown green as an all-clear. `--color auto` (the default) emits color
+only when stdout is a real terminal; a pipe, a redirect, or `-format json` stays
+plain, so the machine contract is never colored. `--color always` forces color
+on (for paging through `less -R`), `--color never` forces it off, and setting
+the `NO_COLOR` environment variable to any non-empty value disables color under
+`auto`.
 
 ### Upload concurrency safety
 
