@@ -11,12 +11,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -267,11 +267,17 @@ type result struct {
 	SSHTestsSkipped int                    `json:"ssh_tests_skipped,omitempty"`
 	TestSummary     *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 	Policy          json.RawMessage        `json:"policy,omitempty"`
-	// Findings is a pointer for the same reason as Assertions: a lint run with a
-	// clean policy still emits "findings": [] rather than dropping the key, while
-	// every other command omits it.
-	Findings    *[]aclpolicy.LintFinding `json:"findings,omitempty"`
-	LintSummary *aclpolicy.LintSummary   `json:"lint_summary,omitempty"`
+	// Findings is the complete lint report. The -severity threshold controls the
+	// human view and exit status, but the versioned JSON envelope keeps every
+	// finding so existing machine consumers do not silently lose lower tiers.
+	// The pointer preserves "findings": [] for a clean lint run while every other
+	// command omits the field.
+	Findings *[]aclpolicy.LintFinding `json:"findings,omitempty"`
+	// LintSummary counts the whole policy, matching Findings above it.
+	LintSummary *aclpolicy.LintSummary `json:"lint_summary,omitempty"`
+	// LintThreshold is the resolved -severity used for the human view and exit
+	// status. It is informational in JSON; Findings remains the complete report.
+	LintThreshold string `json:"lint_severity_threshold,omitempty"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
 	// that matched nothing still emits "results": [], which a consumer can tell
@@ -281,11 +287,6 @@ type result struct {
 	Local      *localTestComponent       `json:"local,omitempty"`
 	Server     *serverTestComponent      `json:"server,omitempty"`
 	Agreement  string                    `json:"agreement,omitempty"`
-	// adviceFails records whether the resolved -severity threshold makes advisory
-	// findings set a non-zero exit. It shapes the human caveat only, so it stays
-	// out of the JSON envelope: the machine contract already carries severity per
-	// finding and the exit code states the verdict.
-	adviceFails bool
 }
 
 type localTestComponent struct {
@@ -336,13 +337,14 @@ func realMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	restoreDefaultAfterCancel(ctx, stop)
+	enableVirtualTerminal()
 	client := &http.Client{Timeout: httpTimeout}
 	apiURL := os.Getenv("TAILSCALE_API_URL")
 	if apiURL == "" {
 		apiURL = tailapi.DefaultBaseURL
 	}
 	err := run(ctx, os.Args[1:], os.Getenv, client, apiURL, os.Stdout, os.Stderr)
-	if err != nil && !errors.Is(err, flag.ErrHelp) {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tail-acl:", err)
 	}
 	return exitCode(err)
@@ -366,11 +368,19 @@ func restoreDefaultAfterCancel(ctx context.Context, stop context.CancelFunc) {
 }
 
 // exitCode maps a run error onto the documented exit-code scheme.
+//
+// --help needs no case of its own: cobra recognizes its own help request
+// before RunE, calls HelpFunc, and returns nil from Execute, so a help
+// invocation reaches here as the nil case. The [flag.ErrHelp] arm this used to
+// carry was a leftover from the stdlib-flag era and could never have fired —
+// cobra aliases its "flag" import to pflag, whose ErrHelp is a distinct value
+// from the standard library's, so the guard named a sentinel this program's
+// stack cannot produce.
 func exitCode(err error) int {
 	var ue usageError
 	outcome := tailapi.ClassifyValidation(err)
 	switch {
-	case err == nil, errors.Is(err, flag.ErrHelp):
+	case err == nil:
 		return exitOK
 	case errors.Is(err, errReachabilityIndeterminate), outcome == tailapi.ValidationIndeterminate:
 		return exitIndeterminate
@@ -430,7 +440,18 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usageError{err}
 	})
+	// cobra resolves a command's help function by walking up to the nearest
+	// ancestor that set one, so an override here answers --help for the entire
+	// tree unless it hands descendants back. Without the dispatch, every
+	// subcommand's --help printed this whole-tool page: "tail-acl lint --help"
+	// listed the full command catalog, every root example, and lint's own
+	// --severity/--wildcard/--config under a "Global flags:" heading that they
+	// are not. Only root gets the hand-written page.
 	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		if cmd != root {
+			commandHelp(cmd)
+			return
+		}
 		usage(cmd.OutOrStdout(), cmd.Flags())
 	})
 	root.InitDefaultHelpFlag()
@@ -448,11 +469,13 @@ func run(
 	var opts options
 	var res *result
 	format := formatHuman
+	colorRaw := colorModeAuto
 	verbose := false
 	showSchema := false
 
 	root := newRootCommand(getenv, &opts)
 	root.PersistentFlags().StringVar(&format, "format", formatHuman, "output format: human|json")
+	root.PersistentFlags().StringVar(&colorRaw, "color", colorModeAuto, "colorize human output: auto|always|never")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "log operational detail to stderr")
 	// Registered but unbound: cobra's Version field intercepts --version before
 	// RunE, so no handler here would ever run. The registration must stay under
@@ -476,6 +499,9 @@ func run(
 		if format != formatHuman && format != formatJSON {
 			return usagef("unknown -format %q; want human or json", format)
 		}
+		if _, ok := parseColorMode(colorRaw); !ok {
+			return usagef("unknown -color %q; want auto, always, or never", colorRaw)
+		}
 		if err := validateRoster(
 			cmd.Name(), opts.roster, root.PersistentFlags().Changed("roster"),
 		); err != nil {
@@ -492,6 +518,8 @@ func run(
 		stdout:     stdout,
 		stderr:     stderr,
 		format:     &format,
+		colorRaw:   &colorRaw,
+		getenv:     getenv,
 		verbose:    &verbose,
 	}
 	addSubcommands(ctx, root, &deps)
@@ -509,7 +537,9 @@ func run(
 		err = usageError{err}
 	}
 	if res != nil {
-		if renderErr := render(stdout, format, res); renderErr != nil {
+		mode, _ := parseColorMode(colorRaw)
+		colorize := colorEnabled(format, mode, stdout, getenv)
+		if renderErr := render(stdout, format, colorize, res); renderErr != nil {
 			return renderErr
 		}
 	}
@@ -609,8 +639,10 @@ func newResult(command, status, message string) *result {
 
 // render writes the result to stdout in the requested format. Human output
 // prints the diff (when present) followed by the summary line; JSON output
-// emits the versioned envelope.
-func render(w io.Writer, format string, res *result) error {
+// emits the versioned envelope. colorize adds ANSI severity color to lint human
+// output; it is always false for JSON (colorEnabled enforces this), so the
+// envelope stays byte-clean regardless.
+func render(w io.Writer, format string, colorize bool, res *result) error {
 	if format == formatJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -633,10 +665,23 @@ func render(w io.Writer, format string, res *result) error {
 			return err
 		}
 	}
+	reportedFindings := []aclpolicy.LintFinding(nil)
 	if res.Findings != nil {
-		if err := renderLintFindings(w, *res.Findings, res.adviceFails); err != nil {
+		reportedFindings = lintFindingsAtLeast(
+			*res.Findings,
+			aclpolicy.LintSeverity(res.LintThreshold),
+		)
+		if err := renderLintFindings(w, reportedFindings, colorize); err != nil {
 			return err
 		}
+	}
+	// The lint summary is the one line where counts carry severity color, so it
+	// is rebuilt from the structured summary rather than reprinting res.Message.
+	// Every other command keeps the plain "tail-acl: <message>" line.
+	if colorize && res.Command == cmdLint && res.LintSummary != nil && res.Findings != nil {
+		return renderLintSummaryLine(
+			w, res.File, *res.LintSummary, len(reportedFindings), aclpolicy.LintSeverity(res.LintThreshold),
+		)
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
 	return err
@@ -683,10 +728,28 @@ func renderCompositeTest(w io.Writer, res *result) error {
 	return err
 }
 
-func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFails bool) error {
+// lintFindingsAtLeast derives the thresholded human view without mutating the
+// complete finding set carried by the JSON envelope.
+func lintFindingsAtLeast(
+	findings []aclpolicy.LintFinding,
+	threshold aclpolicy.LintSeverity,
+) []aclpolicy.LintFinding {
+	reported := slices.Clone(findings)
+	return slices.DeleteFunc(reported, func(finding aclpolicy.LintFinding) bool {
+		return !finding.Severity.AtLeast(threshold)
+	})
+}
+
+// renderLintFindings prints the findings that survived the -severity filter,
+// holding the advisory tier back to a captioned block of its own. Advice ranks
+// below every other tier, so a finding reaching here at all means the threshold
+// was -severity advice — which is also the only threshold at which an advisory
+// sets a non-zero exit. That equivalence is why the caption can state this
+// run's exit behavior outright instead of hedging across thresholds.
+func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, colorize bool) error {
 	for _, finding := range findings {
 		if finding.Severity != aclpolicy.LintAdvice {
-			if err := renderLintFinding(w, finding); err != nil {
+			if err := renderLintFinding(w, finding, colorize); err != nil {
 				return err
 			}
 		}
@@ -698,18 +761,15 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFai
 	if len(advice) == 0 {
 		return nil
 	}
-	// The caveat states this run's exit behavior, not the default one: printing
-	// "does not affect the exit code" directly above the finding that produced
-	// exit 1 is the kind of claim an operator quotes in a postmortem.
-	caveat := "advisory (heuristic; not a defect, and does not affect the exit code at the default severity):"
-	if adviceFails {
-		caveat = "advisory (heuristic; -severity advice makes these fail this run):"
-	}
+	// The caption states this run's exit behavior, not the default one:
+	// printing "does not affect the exit code" directly above the finding that
+	// produced exit 1 is the kind of claim an operator quotes in a postmortem.
+	caveat := "advisory (heuristic; not a defect, but -severity advice makes these fail this run):"
 	if _, err := fmt.Fprintln(w, caveat); err != nil {
 		return err
 	}
 	for _, finding := range advice {
-		if err := renderLintFinding(w, finding); err != nil {
+		if err := renderLintFinding(w, finding, colorize); err != nil {
 			return err
 		}
 		if finding.Suggestion != "" {
@@ -721,15 +781,18 @@ func renderLintFindings(w io.Writer, findings []aclpolicy.LintFinding, adviceFai
 	return nil
 }
 
-func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding) error {
+func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding, colorize bool) error {
 	locator := finding.Rule
 	if finding.Value != "" {
 		locator = finding.Rule + " " + finding.Value
 	}
+	// Only the severity keyword is colored; the id, locator, and evidence stay
+	// default so the line reads as one severity-tagged sentence, not a rainbow.
+	prefix := paint(colorize, severityColor(finding.Severity), strings.ToUpper(string(finding.Severity)))
 	_, err := fmt.Fprintf(
 		w,
 		"%s %s %s: %s\n",
-		strings.ToUpper(string(finding.Severity)),
+		prefix,
 		finding.ID,
 		locator,
 		finding.Evidence,
@@ -741,16 +804,19 @@ func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding) error {
 // turns a single verdict into a sequence, and the two formats need opposite
 // things from that: JSON drops its indentation so each envelope is one
 // independently parseable NDJSON line, while human output gains a blank line
-// between runs so the scroll-back reads as a red-green history. Nothing here
-// writes ANSI — stdout stays parse-clean whether or not it is a terminal.
+// between runs so the scroll-back reads as a red-green history. colorize is
+// carried through to render but only ever affects lint output; watch mode drives
+// test, so the human stream here stays plain in practice — and JSON never
+// colors, so NDJSON is still parse-clean whether or not stdout is a terminal.
 type streamEmitter struct {
-	w      io.Writer
-	format string
-	wrote  bool
+	w        io.Writer
+	format   string
+	colorize bool
+	wrote    bool
 }
 
-func newStreamEmitter(w io.Writer, format string) *streamEmitter {
-	return &streamEmitter{w: w, format: format}
+func newStreamEmitter(w io.Writer, format string, colorize bool) *streamEmitter {
+	return &streamEmitter{w: w, format: format, colorize: colorize}
 }
 
 func (e *streamEmitter) emit(res *result) error {
@@ -766,7 +832,7 @@ func (e *streamEmitter) emit(res *result) error {
 		}
 	}
 	e.wrote = true
-	return render(e.w, e.format, res)
+	return render(e.w, e.format, e.colorize, res)
 }
 
 // commentFromFlags validates a --comment/--overwrite-comment pair once the
@@ -2177,6 +2243,9 @@ func runLint(
 	lintOpts aclpolicy.LintOptions,
 	threshold aclpolicy.LintSeverity,
 	configPath string,
+	online bool,
+	httpClient *http.Client,
+	apiURL string,
 	logger *slog.Logger,
 ) (*result, error) {
 	if configPath != "" {
@@ -2194,6 +2263,19 @@ func runLint(
 	if err != nil {
 		return nil, usagef("could not lint policy: %v", err)
 	}
+
+	// A failed online check must not discard the offline report, which is
+	// already complete: returning a nil result here left stdout empty, so an
+	// operator whose token lacks services-read got exit 2 and no findings at
+	// all, and could not tell a broken policy from a broken token without
+	// re-running. The error is still returned, so exitCode maps the collection
+	// failure to 2 rather than reporting the policy failed on a read that never
+	// happened.
+	var onlineErr error
+	if online {
+		onlineErr = lintOnline(ctx, opts, httpClient, apiURL, &policy.ACL, &report, logger)
+	}
+
 	for _, finding := range report.Findings {
 		for _, decision := range finding.Trace {
 			logger.DebugContext(ctx, "lint decision",
@@ -2201,8 +2283,15 @@ func runLint(
 		}
 	}
 
-	res := newLintResult(opts.file, report)
-	res.adviceFails = aclpolicy.LintAdvice.AtLeast(threshold)
+	res := newLintResult(opts.file, report, threshold)
+	// A collection failure outranks the policy verdict: the report is rendered
+	// either way, but the exit code must say "could not check" rather than
+	// "policy is clean".
+	if onlineErr != nil {
+		return res, onlineErr
+	}
+	// The gate reads the whole report, not the filtered result: the two must
+	// agree, and CountAtLeast applies the same threshold the filter did.
 	if report.CountAtLeast(threshold) > 0 {
 		res.Status = statusFailed
 		return res, errLintFindings
@@ -2210,8 +2299,103 @@ func runLint(
 	return res, nil
 }
 
-// resolveLintOptions validates lint's --severity/--wildcard flags.
-func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
+// lintOnline augments an offline lint report with control-plane checks that a
+// static run cannot make. It builds the API client directly rather than through
+// apiClient, which hard-fails exit 2 on missing credentials: lint's online
+// validation is opt-in and best-effort, so absent credentials degrade to a
+// logged skip (never swallowed silently, per AX convention 5) and the offline
+// findings stand. A control plane that never answered is a collection failure,
+// surfaced so exitCode maps it to exit 2 rather than reporting the policy failed
+// on a read that never happened.
+func lintOnline(
+	ctx context.Context,
+	opts options,
+	httpClient *http.Client,
+	apiURL string,
+	policy *tailscale.ACL,
+	report *aclpolicy.LintReport,
+	logger *slog.Logger,
+) error {
+	if opts.tailnet == "" || opts.apiKey == "" {
+		logger.WarnContext(ctx, "skipping online validation: missing credentials",
+			"tailnet_set", opts.tailnet != "", "api_key_set", opts.apiKey != "")
+		return nil
+	}
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey:  opts.apiKey,
+		Tailnet: opts.tailnet,
+		BaseURL: apiURL,
+		HTTP:    httpClient,
+	})
+	if err != nil {
+		return err
+	}
+	serviceRefs := aclpolicy.ServiceDestinationRefs(policy)
+	serviceExists := make(map[string]bool, len(serviceRefs))
+	for _, ref := range serviceRefs {
+		lookup, lookupErr := tailapi.LookupService(ctx, client, ref.Selector)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		serviceExists[ref.Selector] = lookup.Exists
+	}
+	// Add rather than a local append-and-count: the severity vocabulary belongs
+	// to aclpolicy, and a copy of that switch out here would silently stop
+	// summing to Total the day a severity is added.
+	report.Add(aclpolicy.EvaluateServiceExistence(serviceRefs, serviceExists)...)
+
+	warnings, err := collectSCIMSyncWarnings(ctx, client, opts.file, logger)
+	if err != nil {
+		return err
+	}
+	report.Add(aclpolicy.EvaluateSCIMGroupSync(warnings)...)
+	return nil
+}
+
+// collectSCIMSyncWarnings submits the policy to /acl/validate and returns the
+// flat list of control-plane warning strings. There is no API to list synced
+// groups, so a group referenced but not actually syncing from SCIM surfaces only
+// here, as a validation warning. A control plane that never judged the policy
+// (ValidationUnavailable) is a collection failure and is propagated so exitCode
+// maps it to exit 2; every other validate outcome — including a policy the
+// control plane rejects — is not lint's verdict to render, so it is logged at
+// WARN and whatever warnings were collected (possibly none) are returned.
+func collectSCIMSyncWarnings(
+	ctx context.Context,
+	client *tailscale.Client,
+	path string,
+	logger *slog.Logger,
+) ([]string, error) {
+	result, err := tailapi.ValidateFile(ctx, client, path)
+	if err != nil {
+		// Judged() rather than == ValidationUnavailable: NotAttempted is the
+		// other "the control plane never answered" outcome - an unreadable
+		// policy file or a request that could not be built - and treating it
+		// as a completed check reported the policy clean on a check that never
+		// ran. Rejected and Indeterminate stay on the continue path, since
+		// both carry usable warnings.
+		if !tailapi.ClassifyValidation(err).Judged() {
+			return nil, err
+		}
+		logger.WarnContext(ctx, "control-plane validation did not prove the policy clean; "+
+			"reporting any SCIM-sync warnings it returned and continuing lint",
+			"error", err)
+	}
+	warnings := make([]string, 0)
+	for _, detail := range result.Warnings {
+		warnings = append(warnings, detail.Warnings...)
+	}
+	return warnings, nil
+}
+
+// resolveLintOptions validates lint's --severity/--wildcard flags and folds the
+// SCIM-group exemption controls (--strict-scim-groups, --scim-domains) into the
+// resulting LintOptions.
+func resolveLintOptions(
+	severityRaw, wildcardRaw string,
+	strictSCIMGroups bool,
+	scimDomainsRaw stringListFlag,
+) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
 	threshold, ok := aclpolicy.ParseLintSeverity(severityRaw)
 	if !ok {
 		return aclpolicy.LintOptions{}, "", usagef(
@@ -2223,33 +2407,185 @@ func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions,
 	if !ok {
 		return aclpolicy.LintOptions{}, "", usagef("unknown -wildcard %q; want any-to-any, any, or off", wildcardRaw)
 	}
-	return aclpolicy.LintOptions{Wildcard: wildcardPolicy}, threshold, nil
+	// Both checks below exist because the failure is silent and points the
+	// wrong way: a request to narrow the exemption that quietly widens it, or
+	// a carve-out that quietly does nothing.
+	scimDomains := splitCommaList(scimDomainsRaw)
+	if len(scimDomainsRaw) > 0 {
+		if strictSCIMGroups {
+			return aclpolicy.LintOptions{}, "", usagef(
+				"-scim-domains has no effect with -strict-scim-groups, which errors on every SCIM group; " +
+					"use -scim-domains alone to narrow the exemption",
+			)
+		}
+		if len(scimDomains) == 0 {
+			return aclpolicy.LintOptions{}, "", usagef(
+				"-scim-domains resolved to no domains; an empty list would exempt every SCIM group " +
+					"rather than none, so it is rejected instead of widening the exemption",
+			)
+		}
+	}
+	return aclpolicy.LintOptions{
+		Wildcard:         wildcardPolicy,
+		StrictSCIMGroups: strictSCIMGroups,
+		SCIMDomains:      scimDomains,
+	}, threshold, nil
 }
 
-func newLintResult(path string, report aclpolicy.LintReport) *result {
-	findingNoun := "findings"
-	if report.Summary.Total == 1 {
-		findingNoun = "finding"
-	}
-	message := fmt.Sprintf(
-		"%d %s: %d error, %d warn, %d info",
-		report.Summary.Total,
-		findingNoun,
-		report.Summary.Error,
-		report.Summary.Warn,
-		report.Summary.Info,
-	)
-	if report.Summary.Advice != 0 {
-		message += fmt.Sprintf(", %d advice", report.Summary.Advice)
-	}
-	if report.Summary.Total == 0 {
-		message = fmt.Sprintf("no policy hygiene findings in %s", path)
-	}
-	res := newResult(cmdLint, statusOK, message)
+// newLintResult keeps the complete report for the versioned JSON envelope and
+// applies -severity only to the human-summary count. The renderer derives the
+// thresholded human finding list; the classifier and machine contract retain
+// everything they found (AX conventions 2 and 9).
+func newLintResult(path string, report aclpolicy.LintReport, threshold aclpolicy.LintSeverity) *result {
+	findings := slices.Clone(report.Findings)
+	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, report.CountAtLeast(threshold), threshold))
 	res.File = path
-	res.Findings = &report.Findings
+	res.Findings = &findings
 	res.LintSummary = &report.Summary
+	res.LintThreshold = string(threshold)
 	return res
+}
+
+// lintMessage states what was reported and, whenever the threshold withheld
+// something, what it withheld. The failure mode it exists to prevent is a
+// trailer reading as a clean policy when the policy was not clean and the
+// threshold was merely high, so the whole-policy breakdown stays on the line
+// and names the flag that reveals the rest.
+func lintMessage(
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) string {
+	var b strings.Builder
+	for _, seg := range lintSummarySegments(path, summary, reported, threshold) {
+		b.WriteString(seg.text)
+	}
+	return b.String()
+}
+
+// summarySegment is one span of the lint summary line: its literal text and the
+// ANSI color that span carries (empty for none). Concatenating every segment's
+// text reproduces the plain message byte for byte, which is what lets
+// lintMessage (plain, into res.Message) and renderLintSummaryLine (colored)
+// share one definition of the wording — the "colors match the output" contract.
+type summarySegment struct {
+	text  string
+	color string
+}
+
+// lintSummarySegments splits the summary into colorable spans. Only the count
+// tokens ("0 error", "33 warn", …) carry color; the lead-in, the separators,
+// the withheld-findings clause, and the scim/svc reference tallies stay
+// default. Both the total svc reference count and its online-checkable
+// destination subset are named so the two sets cannot be mistaken for each
+// other. The zero-total case has no counts to color, matching the plain wording
+// exactly.
+func lintSummarySegments(
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) []summarySegment {
+	scim := refNote(summary.SCIMGroupRefs, "scim group reference", "scim group references") +
+		refNote(summary.SvcRefs, "svc reference", "svc references") +
+		refNote(
+			summary.SvcDstRefs,
+			"online-checkable svc destination reference",
+			"online-checkable svc destination references",
+		)
+	if summary.Total == 0 {
+		return []summarySegment{{text: fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)}}
+	}
+	var segs []summarySegment
+	switch reported {
+	case summary.Total:
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf("%d %s: ", summary.Total, findingNoun(summary.Total)),
+		})
+	case 0:
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf("no findings at or above %s; %d total: ", threshold, summary.Total),
+		})
+	default:
+		segs = append(segs, summarySegment{
+			text: fmt.Sprintf(
+				"%d %s at or above %s; %d total: ", reported, findingNoun(reported), threshold, summary.Total,
+			),
+		})
+	}
+	segs = append(segs, breakdownSegments(summary)...)
+	if scim != "" {
+		segs = append(segs, summarySegment{text: scim})
+	}
+	if reported != summary.Total {
+		segs = append(segs, summarySegment{text: " (-severity advice shows all)"})
+	}
+	return segs
+}
+
+// breakdownSegments returns the whole-policy severity counts, each colored by
+// its own severity so the breakdown reads at a glance.
+func breakdownSegments(summary aclpolicy.LintSummary) []summarySegment {
+	segs := []summarySegment{
+		{text: fmt.Sprintf("%d error", summary.Error), color: countColor(aclpolicy.LintError, summary.Error)},
+		{text: ", "},
+		{text: fmt.Sprintf("%d warn", summary.Warn), color: countColor(aclpolicy.LintWarn, summary.Warn)},
+		{text: ", "},
+		{text: fmt.Sprintf("%d info", summary.Info), color: countColor(aclpolicy.LintInfo, summary.Info)},
+	}
+	if summary.Advice != 0 {
+		segs = append(segs,
+			summarySegment{text: ", "},
+			summarySegment{
+				text:  fmt.Sprintf("%d advice", summary.Advice),
+				color: countColor(aclpolicy.LintAdvice, summary.Advice),
+			},
+		)
+	}
+	return segs
+}
+
+// renderLintSummaryLine writes the colored summary line. It is reached only when
+// colorize is true and the result is a lint report; the plain path in render
+// keeps printing res.Message so non-lint commands and no-color runs are
+// untouched.
+func renderLintSummaryLine(
+	w io.Writer,
+	path string,
+	summary aclpolicy.LintSummary,
+	reported int,
+	threshold aclpolicy.LintSeverity,
+) error {
+	var b strings.Builder
+	b.WriteString("tail-acl: ")
+	for _, seg := range lintSummarySegments(path, summary, reported, threshold) {
+		b.WriteString(paint(true, seg.color, seg.text))
+	}
+	b.WriteString("\n")
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// refNote renders a count of references the linter recognized but did not flag.
+// They are not findings, so a semicolon keeps them out of the severity
+// breakdown rather than reading as another bucket that fails to add up.
+func refNote(count int, singular, plural string) string {
+	if count == 0 {
+		return ""
+	}
+	noun := plural
+	if count == 1 {
+		noun = singular
+	}
+	return fmt.Sprintf("; %d %s", count, noun)
+}
+
+func findingNoun(count int) string {
+	if count == 1 {
+		return "finding"
+	}
+	return "findings"
 }
 
 func runPlan(
@@ -2534,7 +2870,8 @@ func commandCatalog() []schemaCommand {
 		{
 			cmdLint,
 			lintSummary,
-			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]",
+			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] " +
+				"[-strict-scim-groups] [-scim-domains a.com,b.com] [-online-validation]",
 		},
 		{cmdJQ, "Query the policy with the embedded jq engine", "jq PROGRAM"},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
@@ -2601,6 +2938,34 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// commandHelp renders one command's own help, which is what every command
+// except root now answers --help with. cobra's default help is the command's
+// Long (or Short) followed by its usage template, and that template is the only
+// rendering that splits a command's local flags from the inherited ones — the
+// distinction the whole-tool page cannot make. Its default help function is
+// unreachable once SetHelpFunc overrides it (Command.helpFunc is unexported and
+// HelpFunc walks up to the override), so those two pieces are reproduced here.
+//
+// UsageString is avoided deliberately: its non-nil-error path funnels through
+// cobra.CheckErr, which calls [os.Exit]. cmd.Usage() renders the same template
+// and returns the error instead.
+func commandHelp(cmd *cobra.Command) {
+	out := cmd.OutOrStdout()
+	// Usage writes to OutOrStderr, and the two resolve to the same writer only
+	// once a caller has wired one; pin it so help lands on stdout either way.
+	cmd.SetOut(out)
+	if text := cmp.Or(cmd.Long, cmd.Short); text != "" {
+		fmt.Fprintf(out, "%s\n\n", strings.TrimRight(text, " \t\n"))
+	}
+	if err := cmd.Usage(); err != nil {
+		cmd.PrintErrln(err)
+	}
+	// The exit-code scheme is a property of the tool, not of one command, and
+	// AX convention 7 requires --help to carry it; point at the page that does
+	// rather than repeating four exit codes under every command.
+	fmt.Fprintf(out, "\nRun \"%s --help\" for the exit-code scheme and the full command list.\n", cmd.Root().Name())
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
@@ -2705,11 +3070,13 @@ Exit codes:
      with no errors and no message is a success - the warnings are logged and
      reported, not fatal.
   1  operation or policy assertion failed; check reports not reachable
-  2  usage, input, or collection error. For pull, validate, and plan this also
-     covers a control plane that never judged the policy (expired credentials, rate
-     limiting, a server fault, an unreadable response body, a redirect that
-     dropped the request, or an unreachable API). No verdict is printed for a
-     request that reached no answer.
+  2  usage, input, or collection error. For pull, validate, plan, and lint
+     --online-validation this also covers a control plane that never judged the
+     policy (expired credentials, rate limiting, a server fault, an unreadable
+     response body, a redirect that dropped the request, or an unreachable API).
+     No verdict is printed for a request that reached no answer, except under
+     lint --online-validation, which still reports the offline findings it had
+     already computed.
   10 indeterminate: a rule would have applied but depends on a fact absent from
      the policy file (device posture, via routing, or a role autogroup such as
      autogroup:admin), or a rule overlapping the query could not be parsed.

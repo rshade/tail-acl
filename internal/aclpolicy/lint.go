@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
@@ -33,17 +34,29 @@ const (
 // Lint finding IDs. Each is a stable, machine-consumable identifier for one
 // class of static policy-hygiene problem.
 const (
-	LintUndefinedReference = "undefined-reference"
-	LintDstTagNoOwner      = "dst-tag-no-owner"
-	LintOverbroadWildcard  = "overbroad-wildcard"
-	LintBroadRuleUntested  = "broad-rule-untested"
-	LintGrantEmpty         = "grant-empty"
-	LintDuplicateGrant     = "duplicate-grant"
-	LintUnusedTag          = "unused-tag"
-	LintUnusedGroup        = "unused-group"
-	LintUnusedHost         = "unused-host"
-	LintUnusedIPSet        = "unused-ipset"
+	LintUndefinedReference    = "undefined-reference"
+	LintDstTagNoOwner         = "dst-tag-no-owner"
+	LintOverbroadWildcard     = "overbroad-wildcard"
+	LintBroadRuleUntested     = "broad-rule-untested"
+	LintGrantEmpty            = "grant-empty"
+	LintDuplicateGrant        = "duplicate-grant"
+	LintUnusedTag             = "unused-tag"
+	LintUnusedGroup           = "unused-group"
+	LintUnusedHost            = "unused-host"
+	LintUnusedIPSet           = "unused-ipset"
+	LintServiceInSource       = "svc-in-source"
+	LintServiceInSSH          = "svc-in-ssh"
+	LintServiceUnknown        = "svc-unknown"
+	LintSCIMGroupShadowsLocal = "scim-group-shadows-local"
+	LintSCIMGroupUnknown      = "scim-group-unsynced"
 )
+
+// scimNotSyncingMarker is the stable substring of the control-plane validation
+// warning emitted when a policy references a group that is not actually syncing
+// from SCIM. The full sentence ("... and will be ignored by rules in the policy
+// file") is matched only on this fragment so a trailing-word tweak upstream does
+// not silence the check.
+const scimNotSyncingMarker = "is not syncing from scim"
 
 // WildcardPolicy controls how strictly the overbroad-wildcard check treats "*".
 type WildcardPolicy string
@@ -145,6 +158,32 @@ type LintSummary struct {
 	// Advice is omitted when zero so reports with no advisories retain their
 	// existing JSON shape byte for byte.
 	Advice int `json:"advice,omitempty"`
+	// SCIMGroupRefs counts distinct SCIM/IdP-synced group selectors
+	// (group:<name>@<domain>) that were exempted from undefined-reference
+	// reporting because they resolve at the control plane rather than in the
+	// local groups map. It is omitted when zero so a policy with no such
+	// references retains its existing JSON shape byte for byte, the same
+	// convention as Advice above.
+	SCIMGroupRefs int `json:"scim_group_refs,omitempty"`
+	// SvcRefs counts distinct svc: (Tailscale Service) selectors that were
+	// exempted from undefined-reference reporting because they resolve at the
+	// control plane (the vip-services API) rather than in the local policy. It
+	// is omitted when zero so a policy with no service references retains its
+	// existing JSON shape byte for byte, the same convention as Advice and
+	// SCIMGroupRefs above.
+	SvcRefs int `json:"svc_refs,omitempty"`
+	// SvcDstRefs counts the distinct svc: selectors in traffic destinations
+	// that --online-validation can check. It excludes illegal positions such as
+	// rule sources and SSH node selectors even though SvcRefs still counts those
+	// references. It is omitted when zero for compatibility with older reports.
+	SvcDstRefs int `json:"svc_dst_refs,omitempty"`
+}
+
+// ServiceRef is one distinct service selector eligible for online existence
+// validation. Rule is the locator of its first occurrence in the policy.
+type ServiceRef struct {
+	Selector string
+	Rule     string
 }
 
 // LintReport is the pure, deterministic result of statically linting a policy.
@@ -154,7 +193,7 @@ type LintReport struct {
 }
 
 // CountAtLeast reports how many findings are at least as severe as threshold.
-func (r LintReport) CountAtLeast(threshold LintSeverity) int {
+func (r *LintReport) CountAtLeast(threshold LintSeverity) int {
 	count := 0
 	for _, finding := range r.Findings {
 		if finding.Severity.AtLeast(threshold) {
@@ -172,6 +211,16 @@ type LintOptions struct {
 	// AllowBroadDestinations excludes destination selectors that are
 	// intentionally reachable from a blanket source on every port.
 	AllowBroadDestinations []string
+	// StrictSCIMGroups restores the pre-exemption behavior: any group:<name>
+	// not present in the local groups map is an undefined-reference error, even
+	// when it is SCIM-shaped (group:<name>@<domain>). Off by default so
+	// IdP/SCIM-synced groups, which resolve at the control plane, are not
+	// false-positived by the static linter.
+	StrictSCIMGroups bool
+	// SCIMDomains narrows the SCIM-group exemption to selectors whose @domain
+	// suffix is listed (ASCII-case-insensitive). Empty means any group:*@*
+	// selector is treated as SCIM-shaped. Ignored when StrictSCIMGroups is set.
+	SCIMDomains []string
 }
 
 // LintCheck describes one class of lint finding for the machine-readable schema.
@@ -189,7 +238,7 @@ func LintCatalog() []LintCheck {
 		{
 			LintUndefinedReference,
 			LintError,
-			"a src/dst names an undefined selector, or a route/exit-node auto-approver is unsupported or undefined",
+			"a selector is undefined or invalid in its policy position",
 		},
 		{LintDstTagNoOwner, LintError, "a destination tag has no tagOwners entry, so no node can carry it"},
 		{LintOverbroadWildcard, LintWarn, "an over-broad * selector (tuned by -wildcard)"},
@@ -204,6 +253,31 @@ func LintCatalog() []LintCheck {
 		{LintUnusedGroup, LintInfo, "a group is defined but referenced by no rule"},
 		{LintUnusedHost, LintInfo, "a host alias is defined but referenced by no rule"},
 		{LintUnusedIPSet, LintInfo, "an ipset is defined but referenced by no rule"},
+		{
+			LintServiceInSource,
+			LintWarn,
+			"a svc: service selector used as a rule source; Tailscale services are destination-only",
+		},
+		{
+			LintServiceInSSH,
+			LintError,
+			"a svc: service selector used as an SSH destination or recorder; those fields require node selectors",
+		},
+		{
+			LintServiceUnknown,
+			LintWarn,
+			"a svc: destination names a service not found in the tailnet (requires --online-validation)",
+		},
+		{
+			LintSCIMGroupShadowsLocal,
+			LintWarn,
+			"a SCIM-shaped group reference has the same name half as a declared local group",
+		},
+		{
+			LintSCIMGroupUnknown,
+			LintWarn,
+			"a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
+		},
 	}
 }
 
@@ -233,6 +307,154 @@ func EvaluatePolicyLint(policy *Policy, opts LintOptions) (LintReport, error) {
 	return evaluateLint(&policy.ACL, policy.sshRules(), policy.SSHTests, opts)
 }
 
+// EvaluateServiceExistence is the pure, network-free classifier behind lint
+// --online-validation. exists contains one explicit control-plane answer per
+// selector that was successfully looked up: true means it exists and false
+// means the API answered not found. A selector absent from the map was not
+// checked and stays silent; collection failures are handled by the caller.
+//
+// A missing service is a warn, not an error, because Tailscale services are
+// late-bound — the control plane itself validates a policy that names one that
+// does not yet exist.
+func EvaluateServiceExistence(refs []ServiceRef, exists map[string]bool) []LintFinding {
+	findings := make([]LintFinding, 0)
+	seen := make(map[string]bool)
+	for _, ref := range refs {
+		selector := strings.TrimSpace(ref.Selector)
+		found, checked := exists[selector]
+		if !looksLikeService(selector) || !checked || found || seen[selector] {
+			continue
+		}
+		seen[selector] = true
+		findings = append(findings, LintFinding{
+			ID:          LintServiceUnknown,
+			Severity:    LintWarn,
+			Rule:        ref.Rule,
+			Value:       selector,
+			Evidence:    selector + " is not a service defined in the tailnet",
+			Remediation: "create the service, or correct the reference; services are late-bound, so this is advisory",
+			Trace: []string{
+				ref.Rule + " references " + selector,
+				"the vip-services lookup for " + selector + " returned not found",
+			},
+		})
+	}
+	return findings
+}
+
+// ServiceDestinationRefs returns the distinct service selectors in policy
+// positions where Tailscale permits a service as a traffic destination. Each
+// ref carries its first locator. Sources, SSH node selectors, recorders, and
+// auto-approver identities are intentionally excluded: those are hard misuse,
+// not candidates for a late-bound existence check.
+func ServiceDestinationRefs(policy *tailscale.ACL) []ServiceRef {
+	if policy == nil {
+		return nil
+	}
+	refs := make([]ServiceRef, 0)
+	seen := make(map[string]bool)
+	add := func(rule, selector string) {
+		selector = strings.TrimSpace(selector)
+		if !looksLikeService(selector) || seen[selector] {
+			return
+		}
+		seen[selector] = true
+		refs = append(refs, ServiceRef{Selector: selector, Rule: rule})
+	}
+	for index, grant := range policy.Grants {
+		for position, destination := range grant.Destination {
+			add(fmt.Sprintf("grants[%d].dst[%d]", index, position), destination)
+		}
+	}
+	for index, entry := range policy.ACLs {
+		field := fieldDst
+		if len(entry.Destination) == 0 {
+			field = fieldPorts
+		}
+		for position, destination := range aclDestinations(entry) {
+			add(fmt.Sprintf("acls[%d]%s[%d]", index, field, position), destinationHost(destination))
+		}
+	}
+	for index, test := range policy.Tests {
+		accept := test.Accept
+		if len(accept) == 0 {
+			accept = test.Allow
+		}
+		for position, destination := range accept {
+			add(fmt.Sprintf("tests[%d].accept[%d]", index, position), destinationHost(destination))
+		}
+		for position, destination := range test.Deny {
+			add(fmt.Sprintf("tests[%d].deny[%d]", index, position), destinationHost(destination))
+		}
+	}
+	return refs
+}
+
+// EvaluateSCIMGroupSync is the pure, network-free classifier behind the SCIM
+// half of lint --online-validation. Because the control plane exposes no API to
+// list IdP/SCIM-synced groups, sync status is discovered indirectly: the policy
+// is submitted to /acl/validate, and a group referenced but not actually syncing
+// comes back as a validation warning. The caller flattens those warning strings
+// (ValidationResult.Warnings[].Warnings) and passes them here, keeping this
+// classifier unit-testable with no network.
+//
+// For each warning that reports a group is not syncing from SCIM it emits one
+// LintWarn scim-group-unsynced finding. It is a warn, not an error, because the
+// policy still validates — the not-syncing rule is simply ignored — so this is
+// advisory, mirroring svc-unknown. Findings are deduplicated by the offending
+// group: selector (or by the whole warning text when no selector can be
+// extracted). This is independent of the offline scim_group_refs count: offline
+// counts SCIM-shaped references it exempted, online reports which of them the
+// control plane says are not actually syncing.
+func EvaluateSCIMGroupSync(warnings []string) []LintFinding {
+	findings := make([]LintFinding, 0)
+	seen := make(map[string]bool)
+	for _, warning := range warnings {
+		if !strings.Contains(strings.ToLower(warning), scimNotSyncingMarker) {
+			continue
+		}
+		selector := extractGroupSelector(warning)
+		key := selector
+		if key == "" {
+			key = warning
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		findings = append(findings, LintFinding{
+			ID:          LintSCIMGroupUnknown,
+			Severity:    LintWarn,
+			Rule:        "scim",
+			Value:       selector,
+			Evidence:    warning,
+			Remediation: "ensure the group is provisioned and syncing in your IdP/SCIM, or remove the reference",
+			Trace:       []string{"control plane reported: " + warning},
+		})
+	}
+	return findings
+}
+
+// extractGroupSelector returns the first group: token in a control-plane warning
+// (from "group:" to the next whitespace or quote), or "" when the warning names
+// no selector. The control plane phrases the warning around the offending
+// selector but the surrounding words are not a stable contract, so only the
+// group: token is lifted out.
+func extractGroupSelector(warning string) string {
+	start := strings.Index(warning, "group:")
+	if start < 0 {
+		return ""
+	}
+	rest := warning[start:]
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '"' || r == '\'' || r == '`'
+	})
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 func evaluateLint(
 	policy *tailscale.ACL,
 	sshRules []tailscale.ACLSSH,
@@ -247,13 +469,22 @@ func evaluateLint(
 		wildcard = WildcardAnyToAny
 	}
 
+	linter := &refLinter{
+		policy:   policy,
+		scim:     scimConfig{strict: opts.StrictSCIMGroups, domains: opts.SCIMDomains},
+		scimRefs: make(map[string]bool),
+		svcRefs:  make(map[string]bool),
+	}
+
 	findings := make([]LintFinding, 0)
-	findings = append(findings, lintGrants(policy, wildcard)...)
+	findings = append(findings, linter.lintGrants(wildcard)...)
 	findings = append(findings, lintBroadRuleUntested(policy, opts.AllowBroadDestinations)...)
-	findings = append(findings, lintACLs(policy, wildcard)...)
-	findings = append(findings, lintSSHRules(policy, sshRules)...)
-	findings = append(findings, lintSSHTests(policy, sshTests)...)
-	findings = append(findings, lintAutoApprovers(policy)...)
+	findings = append(findings, linter.lintACLs(wildcard)...)
+	linter.countTestServiceReferences(policy.Tests)
+	findings = append(findings, linter.lintSSHRules(sshRules)...)
+	findings = append(findings, linter.lintSSHTests(sshTests)...)
+	findings = append(findings, linter.lintAutoApprovers()...)
+	findings = append(findings, linter.sideFindings...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {
 		return LintReport{}, err
@@ -261,36 +492,79 @@ func evaluateLint(
 	findings = append(findings, duplicates...)
 	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
 
-	// Sort into a stable order so the output is deterministic even though the
-	// unused-definition checks iterate over maps.
-	sort.SliceStable(findings, func(i, j int) bool {
-		if findings[i].Rule != findings[j].Rule {
-			return findings[i].Rule < findings[j].Rule
-		}
-		if findings[i].ID != findings[j].ID {
-			return findings[i].ID < findings[j].ID
-		}
-		return findings[i].Value < findings[j].Value
-	})
-
-	report := LintReport{Findings: findings}
-	for _, finding := range findings {
-		report.Summary.Total++
-		switch finding.Severity {
-		case LintAdvice:
-			report.Summary.Advice++
-		case LintError:
-			report.Summary.Error++
-		case LintWarn:
-			report.Summary.Warn++
-		case LintInfo:
-			report.Summary.Info++
-		}
-	}
+	report := LintReport{}
+	report.Summary.SCIMGroupRefs = len(linter.scimRefs)
+	report.Summary.SvcRefs = len(linter.svcRefs)
+	report.Summary.SvcDstRefs = len(ServiceDestinationRefs(policy))
+	report.Add(findings...)
 	return report, nil
 }
 
-func lintGrants(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
+// Add appends findings, updates the severity counters, and restores the stable
+// order. It exists so a caller that discovers findings after the offline pass -
+// lint's --online-validation is the only one today - cannot drift from the
+// counting and ordering this package already does. Duplicating that switch
+// outside aclpolicy meant a newly added severity would silently produce a
+// Summary whose buckets no longer sum to Total, with no compile error and no
+// failing test to catch it.
+func (r *LintReport) Add(findings ...LintFinding) {
+	r.Findings = append(r.Findings, findings...)
+	for _, finding := range findings {
+		r.Summary.Total++
+		switch finding.Severity {
+		case LintAdvice:
+			r.Summary.Advice++
+		case LintError:
+			r.Summary.Error++
+		case LintWarn:
+			r.Summary.Warn++
+		case LintInfo:
+			r.Summary.Info++
+		}
+	}
+	// Sorted on every Add rather than once at the end of the offline pass, so
+	// findings appended later stay interleaved by locator instead of trailing
+	// the sorted block. The unused-definition checks iterate over maps, so this
+	// is what makes the output deterministic at all.
+	sort.SliceStable(r.Findings, func(i, j int) bool {
+		if r.Findings[i].Rule != r.Findings[j].Rule {
+			return r.Findings[i].Rule < r.Findings[j].Rule
+		}
+		if r.Findings[i].ID != r.Findings[j].ID {
+			return r.Findings[i].ID < r.Findings[j].ID
+		}
+		return r.Findings[i].Value < r.Findings[j].Value
+	})
+}
+
+// scimConfig captures how the linter treats SCIM/IdP-synced group selectors.
+// It is threaded through the reference-finding chain (rather than held in a
+// global) so the classifiers stay pure and testable.
+type scimConfig struct {
+	strict  bool
+	domains []string
+}
+
+// refLinter carries the state the reference-finding walk needs: the policy it
+// resolves selectors against, the SCIM-group configuration, and an accumulator
+// of the distinct SCIM-shaped selectors that were exempted so the summary can
+// report their count.
+type refLinter struct {
+	policy   *tailscale.ACL
+	scim     scimConfig
+	scimRefs map[string]bool
+	// sideFindings carries extra findings discovered while resolving a selector.
+	// A SCIM/local collision can coexist with either the configured exemption or
+	// an undefined-reference when a domain filter excludes the selector.
+	sideFindings []LintFinding
+	// svcRefs accumulates the distinct svc: selectors seen in any position, so
+	// the summary can report their count. Services resolve at the control plane,
+	// so a static run only counts them; --online-validation checks existence.
+	svcRefs map[string]bool
+}
+
+func (l *refLinter) lintGrants(wildcard WildcardPolicy) []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	for index, grant := range policy.Grants {
 		locator := fmt.Sprintf("grants[%d]", index)
@@ -309,13 +583,14 @@ func lintGrants(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 		}
 		findings = append(findings, wildcardFindings(
 			locator, grant.Source, grant.Destination, wildcard)...)
-		findings = append(findings, sourceReferenceFindings(policy, locator+fieldSrc, grant.Source)...)
-		findings = append(findings, nodeDestinationReferenceFindings(policy, locator+fieldDst, grant.Destination)...)
+		findings = append(findings, l.sourceReferenceFindings(locator+fieldSrc, grant.Source)...)
+		findings = append(findings, l.nodeDestinationReferenceFindings(locator+fieldDst, grant.Destination)...)
 	}
 	return findings
 }
 
-func lintACLs(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
+func (l *refLinter) lintACLs(wildcard WildcardPolicy) []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	for index, entry := range policy.ACLs {
 		locator := fmt.Sprintf("acls[%d]", index)
@@ -329,38 +604,67 @@ func lintACLs(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 		}
 		findings = append(findings, wildcardFindings(
 			locator, sources, destinationHosts(destinations), wildcard)...)
-		findings = append(findings, sourceReferenceFindings(policy, locator+sourceField, sources)...)
-		findings = append(findings, destinationReferenceFindings(policy, locator+destinationField, destinations)...)
+		findings = append(findings, l.sourceReferenceFindings(locator+sourceField, sources)...)
+		findings = append(findings, l.destinationReferenceFindings(locator+destinationField, destinations)...)
 	}
 	return findings
 }
 
-func lintSSHRules(policy *tailscale.ACL, rules []tailscale.ACLSSH) []LintFinding {
+func (l *refLinter) lintSSHRules(rules []tailscale.ACLSSH) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, rule := range rules {
 		locator := fmt.Sprintf("ssh[%d]", index)
 		findings = append(findings,
-			sourceReferenceFindings(policy, locator+fieldSrc, rule.Source)...)
+			l.sourceReferenceFindings(locator+fieldSrc, rule.Source)...)
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+fieldDst, rule.Destination)...)
+			l.sshNodeReferenceFindings(locator+fieldDst, rule.Destination)...)
 		// Recorder entries are node selectors, just like SSH destinations.
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+".recorder", rule.Recorder)...)
+			l.sshNodeReferenceFindings(locator+".recorder", rule.Recorder)...)
 	}
 	return findings
 }
 
-func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
+func (l *refLinter) lintSSHTests(tests []SSHTest) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, test := range tests {
 		locator := fmt.Sprintf("sshTests[%d]", index)
-		if finding, ok := sourceReferenceFinding(policy, locator+fieldSrc, test.Source); ok {
+		if finding, ok := l.sourceReferenceFinding(locator+fieldSrc, test.Source); ok {
 			findings = append(findings, finding)
 		}
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+fieldDst, test.Destination)...)
+			l.sshNodeReferenceFindings(locator+fieldDst, test.Destination)...)
 	}
 	return findings
+}
+
+// countTestServiceReferences covers policy test assertions, which are legal
+// traffic destinations but are not part of the rule-reference lint walk. The
+// accept and allow fields are aliases; malformed input that sets both is
+// rejected by the test evaluator, so the effective field follows that same
+// normalization here.
+func (l *refLinter) countTestServiceReferences(tests []tailscale.ACLTest) {
+	for _, test := range tests {
+		accept := test.Accept
+		if len(accept) == 0 {
+			accept = test.Allow
+		}
+		for _, destination := range accept {
+			l.countServiceReference(destinationHost(destination))
+		}
+		for _, destination := range test.Deny {
+			l.countServiceReference(destinationHost(destination))
+		}
+	}
+}
+
+func (l *refLinter) countServiceReference(selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if !looksLikeService(selector) {
+		return false
+	}
+	l.svcRefs[selector] = true
+	return true
 }
 
 // lintAutoApprovers validates the narrower selector vocabulary Tailscale
@@ -368,27 +672,27 @@ func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
 // group and tag selectors as references. The route keys are CIDRs, not
 // references, and are not checked here. services has no authoring command and
 // is retained as the source-style reference walk the pinned client exposes.
-func lintAutoApprovers(policy *tailscale.ACL) []LintFinding {
+func (l *refLinter) lintAutoApprovers() []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	autoApprovers := policy.AutoApprovers
 	if autoApprovers == nil {
 		return findings
 	}
 	for route, approvers := range autoApprovers.Routes {
-		findings = append(findings, autoApproverReferenceFindings(
-			policy, fmt.Sprintf("autoApprovers.routes[%s]", route), approvers)...)
+		findings = append(findings, l.autoApproverReferenceFindings(
+			fmt.Sprintf("autoApprovers.routes[%s]", route), approvers)...)
 	}
-	findings = append(findings, autoApproverReferenceFindings(
-		policy, "autoApprovers.exitNode", autoApprovers.ExitNode)...)
+	findings = append(findings, l.autoApproverReferenceFindings(
+		"autoApprovers.exitNode", autoApprovers.ExitNode)...)
 	for service, approvers := range autoApprovers.Services {
-		findings = append(findings, sourceReferenceFindings(
-			policy, fmt.Sprintf("autoApprovers.services[%s]", service), approvers)...)
+		findings = append(findings, l.sourceReferenceFindings(
+			fmt.Sprintf("autoApprovers.services[%s]", service), approvers)...)
 	}
 	return findings
 }
 
-func autoApproverReferenceFindings(
-	policy *tailscale.ACL,
+func (l *refLinter) autoApproverReferenceFindings(
 	locator string,
 	approvers []string,
 ) []LintFinding {
@@ -400,7 +704,7 @@ func autoApproverReferenceFindings(
 			findings = append(findings, invalidAutoApproverSelectorFinding(rule, approver))
 			continue
 		}
-		if reason := undefinedReferenceReason(approver, policy); reason != "" {
+		if reason := l.undefinedReferenceReason(rule, approver); reason != "" {
 			findings = append(findings, undefinedReferenceFinding(rule, approver, reason))
 		}
 	}
@@ -526,48 +830,42 @@ func wildcardSideFinding(locator string) LintFinding {
 	}
 }
 
-func sourceReferenceFindings(policy *tailscale.ACL, locator string, sources []string) []LintFinding {
+func (l *refLinter) sourceReferenceFindings(locator string, sources []string) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, selector := range sources {
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := sourceReferenceFinding(policy, rule, selector); ok {
+		if finding, ok := l.sourceReferenceFinding(rule, selector); ok {
 			findings = append(findings, finding)
 		}
 	}
 	return findings
 }
 
-func sourceReferenceFinding(policy *tailscale.ACL, rule, selector string) (LintFinding, bool) {
+func (l *refLinter) sourceReferenceFinding(rule, selector string) (LintFinding, bool) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" || selector == "*" {
 		return LintFinding{}, false
 	}
-	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+	// A svc: selector on the source side is destination-only: the control plane
+	// rejects it outright ("svc:... not valid on the src side of a rule"). Lint
+	// stays advisory — plan/validate give the authoritative rejection — so this
+	// is a warn, not an error, and it must not also route through
+	// undefinedReferenceReason (which the svc: case there exempts anyway) and
+	// double-report. Count it so svc_refs is position-independent.
+	if l.countServiceReference(selector) {
+		return serviceInSourceFinding(rule, selector), true
+	}
+	if reason := l.undefinedReferenceReason(rule, selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
 	return LintFinding{}, false
 }
 
-func destinationReferenceFindings(policy *tailscale.ACL, locator string, destinations []string) []LintFinding {
-	findings := make([]LintFinding, 0)
-	for index, destination := range destinations {
-		host := destinationHost(destination)
-		if host == "" || host == "*" {
-			continue
-		}
-		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := destinationReferenceFinding(policy, rule, host); ok {
-			findings = append(findings, finding)
-		}
-	}
-	return findings
-}
-
-// nodeDestinationReferenceFindings validates portless grant dst, SSH dst, and
-// recorder selectors. Unlike ACL network destinations, these selectors have no
-// trailing port to strip.
-func nodeDestinationReferenceFindings(
-	policy *tailscale.ACL,
+// sshNodeReferenceFindings validates SSH destinations and recorders without
+// routing services through the generic destination exemption. Those fields
+// accept node selectors, not service traffic destinations, so svc: is a hard
+// misuse and must never become an online lookup candidate.
+func (l *refLinter) sshNodeReferenceFindings(
 	locator string,
 	destinations []string,
 ) []LintFinding {
@@ -578,18 +876,58 @@ func nodeDestinationReferenceFindings(
 			continue
 		}
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := destinationReferenceFinding(policy, rule, selector); ok {
+		if l.countServiceReference(selector) {
+			findings = append(findings, serviceInSSHFinding(rule, selector))
+			continue
+		}
+		if finding, ok := l.destinationReferenceFinding(rule, selector); ok {
 			findings = append(findings, finding)
 		}
 	}
 	return findings
 }
 
-func destinationReferenceFinding(
-	policy *tailscale.ACL,
+func (l *refLinter) destinationReferenceFindings(locator string, destinations []string) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, destination := range destinations {
+		host := destinationHost(destination)
+		if host == "" || host == "*" {
+			continue
+		}
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if finding, ok := l.destinationReferenceFinding(rule, host); ok {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+// nodeDestinationReferenceFindings validates portless grant dst, SSH dst, and
+// recorder selectors. Unlike ACL network destinations, these selectors have no
+// trailing port to strip.
+func (l *refLinter) nodeDestinationReferenceFindings(
+	locator string,
+	destinations []string,
+) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, destination := range destinations {
+		selector := strings.TrimSpace(destination)
+		if selector == "" || selector == "*" {
+			continue
+		}
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if finding, ok := l.destinationReferenceFinding(rule, selector); ok {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+func (l *refLinter) destinationReferenceFinding(
 	rule string,
 	selector string,
 ) (LintFinding, bool) {
+	policy := l.policy
 	if strings.HasPrefix(selector, "tag:") {
 		if _, ok := policy.TagOwners[selector]; !ok {
 			return LintFinding{
@@ -607,10 +945,40 @@ func destinationReferenceFinding(
 		}
 		return LintFinding{}, false
 	}
-	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+	if reason := l.undefinedReferenceReason(rule, selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
 	return LintFinding{}, false
+}
+
+func serviceInSourceFinding(rule, selector string) LintFinding {
+	return LintFinding{
+		ID:          LintServiceInSource,
+		Severity:    LintWarn,
+		Rule:        rule,
+		Value:       selector,
+		Evidence:    selector + " used as a source; Tailscale services are destination-only",
+		Remediation: "move " + selector + " to dst, or correct the reference",
+		Trace: []string{
+			rule + " references " + selector,
+			selector + " is a Tailscale service, which is valid only on the destination side of a rule",
+		},
+	}
+}
+
+func serviceInSSHFinding(rule, selector string) LintFinding {
+	return LintFinding{
+		ID:          LintServiceInSSH,
+		Severity:    LintError,
+		Rule:        rule,
+		Value:       selector,
+		Evidence:    selector + " used as an SSH node selector; services are traffic destinations, not nodes",
+		Remediation: "replace " + selector + " with a node selector such as a user, group, tag, host, or autogroup",
+		Trace: []string{
+			rule + " references " + selector,
+			"SSH destinations and recorders require node selectors; svc: names a Tailscale Service",
+		},
+	}
 }
 
 func undefinedReferenceFinding(rule, value, reason string) LintFinding {
@@ -632,7 +1000,8 @@ func undefinedReferenceFinding(rule, value, reason string) LintFinding {
 // defines, or "" if it resolves. Autogroups are treated as defined by prefix
 // alone: Tailscale extends the autogroup set over time, so flagging an unknown
 // autogroup would false-positive the moment a new one ships.
-func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
+func (l *refLinter) undefinedReferenceReason(rule, selector string) string {
+	policy := l.policy
 	switch {
 	case selector == "" || selector == "*":
 		return ""
@@ -641,10 +1010,32 @@ func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
 	case policycore.LooksLikeUser(selector):
 		return ""
 	case strings.HasPrefix(selector, "group:"):
-		if _, ok := policy.Groups[selector]; !ok {
-			return "is not defined in groups"
+		if _, ok := policy.Groups[selector]; ok {
+			return ""
 		}
-		return ""
+		// No pinned Tailscale dependency exposes the control plane's group-name
+		// validator, so an @-bearing local key cannot be ruled out with a Tier-2
+		// provenance guard. Detect the ambiguity from the policy in hand instead:
+		// if the pre-@ name is declared locally, surface that collision whether or
+		// not the configured domain filter exempts the full selector. Strict mode
+		// disables the exemption entirely and retains its existing single hard
+		// undefined-reference finding.
+		if !l.scim.strict && looksLikeSCIMGroup(selector, nil) {
+			localGroup := scimLocalGroupName(selector)
+			if _, ok := policy.Groups[localGroup]; ok {
+				l.sideFindings = append(l.sideFindings,
+					scimGroupShadowsLocalFinding(rule, selector, localGroup))
+			}
+		}
+		// A group absent from the local map still resolves at the control plane
+		// when it is IdP/SCIM-synced (group:<name>@<domain>). Unless strict mode
+		// is requested, treat a SCIM-shaped selector as resolved and count it,
+		// so the static linter does not false-positive every synced group.
+		if !l.scim.strict && looksLikeSCIMGroup(selector, l.scim.domains) {
+			l.scimRefs[selector] = true
+			return ""
+		}
+		return "is not defined in groups"
 	case strings.HasPrefix(selector, "tag:"):
 		if _, ok := policy.TagOwners[selector]; !ok {
 			return "is not declared in tagOwners"
@@ -655,6 +1046,15 @@ func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
 			return "is not defined in ipsets"
 		}
 		return ""
+	case looksLikeService(selector):
+		// A svc: selector names a Tailscale Service, which resolves at the
+		// control plane (the vip-services API) and never in the policy file, so
+		// it is never an undefined-host reference. Count it and exempt it in
+		// legal traffic-destination positions; callers reject illegal positions
+		// before reaching this exemption. --online-validation checks only the
+		// legal destination subset.
+		l.countServiceReference(selector)
+		return ""
 	}
 	if isLiteralAddress(selector) {
 		return ""
@@ -663,6 +1063,137 @@ func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
 		return ""
 	}
 	return "is not defined in hosts"
+}
+
+func scimGroupShadowsLocalFinding(rule, selector, localGroup string) LintFinding {
+	return LintFinding{
+		ID:       LintSCIMGroupShadowsLocal,
+		Severity: LintWarn,
+		Rule:     rule,
+		Value:    selector,
+		Evidence: selector + " has a SCIM-shaped name whose local name half " +
+			localGroup + " is also declared in groups",
+		Remediation: "verify " + selector + " is a synced SCIM group; otherwise replace it with " +
+			localGroup + " or rename one of the groups; use -scim-domains or -strict-scim-groups to constrain the exemption",
+		Trace: []string{
+			rule + " references " + selector,
+			"the policy also declares local group " + localGroup,
+			"the static linter cannot prove whether " + selector + " exists at the control plane",
+		},
+	}
+}
+
+// looksLikeService reports whether selector names a Tailscale Service
+// (svc:<name>). Services resolve at the control plane (the vip-services API),
+// never in a policy's local definitions, so like autogroups the name is
+// recognized by its prefix alone; a static linter has nothing local to resolve
+// the remainder against. This is a lint-hygiene heuristic (whether to suppress
+// an undefined-reference finding), not selector resolution, so it lives here
+// rather than in policycore.
+// The name must be non-empty, for the same reason looksLikeSCIMGroup requires
+// both halves: recognizing a selector suppresses undefined-reference, so a bare
+// "svc:" would be declared resolvable while naming nothing. A policy rendered
+// from "svc:${SERVICE_NAME}" with the variable unset produces exactly that.
+func looksLikeService(selector string) bool {
+	return len(selector) > len("svc:") && strings.HasPrefix(selector, "svc:")
+}
+
+// looksLikeSCIMGroup reports whether selector names an IdP/SCIM-synced group
+// (group:<name>@<domain>). With no domains, any group:*@* matches; with
+// domains, a selector matches when its @domain equals a listed domain or is a
+// subdomain of one (ASCII-case-insensitive) — so example.com also covers
+// eng.example.com. The group name portion may contain spaces (e.g.
+// group:finance team@example.com); only the substring after the last "@" is
+// treated as the domain.
+//
+// It is a name-shape heuristic, not a membership or legality check: no pinned
+// dependency exposes a group-name validator, and the control plane is the
+// authority. An @-bearing selector can therefore collide with a local group;
+// undefinedReferenceReason detects that policy-local invariant and emits
+// scim-group-shadows-local. Domain narrowing and strict mode cover collisions
+// the local policy cannot reveal. There is no upstream symbol against which a
+// Tier-2 build guard could be written, so the tailscale.com test-only dependency
+// must not be widened chasing one. Like looksLikeService, this is a lint-hygiene
+// heuristic and stays outside policycore's selector-resolution surface.
+func looksLikeSCIMGroup(selector string, domains []string) bool {
+	remainder, ok := strings.CutPrefix(selector, "group:")
+	if !ok {
+		return false
+	}
+	// Both halves must be non-empty. The exemption suppresses an
+	// undefined-reference error, so a selector that is merely "@-shaped" rather
+	// than SCIM-shaped must not qualify: a templated policy that emits
+	// "group:${TEAM}@${DOMAIN}" with one variable unset produces "group:eng@"
+	// or "group:@corp.com", and both are hard undefined references.
+	at := strings.LastIndex(remainder, "@")
+	if at <= 0 || at == len(remainder)-1 {
+		return false
+	}
+	if len(domains) == 0 {
+		return true
+	}
+	domain := remainder[at+1:]
+	for _, candidate := range domains {
+		if domainMatches(domain, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// scimLocalGroupName returns the local key whose name portion precedes the last
+// @ in a selector looksLikeSCIMGroup has already accepted. SCIM names may
+// contain spaces and earlier @ characters, so the split must match that
+// heuristic exactly rather than applying an email-address parser.
+func scimLocalGroupName(selector string) string {
+	remainder := strings.TrimPrefix(selector, "group:")
+	at := strings.LastIndex(remainder, "@")
+	return "group:" + remainder[:at]
+}
+
+// domainMatches reports whether domain equals candidate or is a subdomain of
+// it, matched ASCII-case-insensitively. A leading "." on candidate is
+// tolerated (".example.com" behaves like "example.com"), so an operator who
+// writes the suffix form still gets the exact-domain match too.
+func domainMatches(domain, candidate string) bool {
+	candidate = strings.TrimPrefix(candidate, ".")
+	if candidate == "" {
+		return false
+	}
+	if asciiEqualFold(domain, candidate) {
+		return true
+	}
+	return len(domain) > len(candidate)+1 &&
+		asciiEqualFold(domain[len(domain)-len(candidate):], candidate) &&
+		domain[len(domain)-len(candidate)-1] == '.'
+}
+
+// asciiEqualFold compares two domains case-insensitively over ASCII only.
+// [strings.EqualFold] applies Unicode simple folding, under which U+017F (long s)
+// folds to "s" and U+212A (Kelvin sign) folds to "k" - so "banKexample"
+// would match a "bank.example" narrowing. That widens the exemption, which is
+// the direction this flag exists to prevent, so the fold is kept to ASCII and
+// any non-ASCII byte makes the two domains simply unequal.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		x, y := a[i], b[i]
+		if x >= utf8.RuneSelf || y >= utf8.RuneSelf {
+			return false
+		}
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 func lintDuplicateGrants(policy *tailscale.ACL) ([]LintFinding, error) {

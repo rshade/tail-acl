@@ -36,22 +36,73 @@ from the top:
    a grant that can never match, or a grant duplicated from an earlier one.
 3. **`info`** — a definition nothing references. Usually dead weight left by a
    rename; occasionally deliberate.
-4. **`advice`** — a heuristic suggestion, not a defect. See the authoring loop
-   below.
+4. **`advice`** — a heuristic suggestion, not a defect. Below the default
+   threshold, so `lint` withholds it until you ask with `-severity advice`. See
+   the authoring loop below.
 
-## Choose the failure threshold
+## Choose the threshold
 
-`-severity` sets the lowest severity that makes the run exit `1`:
+`-severity` sets the lowest severity `lint` reports and fails on:
 
 ```sh
-tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage fails
+tail-acl --file acl/acl.hujson lint -severity error   # only hard breakage
 tail-acl --file acl/acl.hujson lint                   # default: warn and above
-tail-acl --file acl/acl.hujson lint -severity advice  # advisories fail too
+tail-acl --file acl/acl.hujson lint -severity advice  # everything, advisories fail too
 ```
 
-Findings below the threshold are still reported — the threshold changes the
-exit code, not the output. That distinction is what lets one run serve both a
-strict gate and a human reading the full picture.
+A finding below the threshold is not printed in the human view and does not
+affect the exit status. The versioned JSON `findings` array and `lint_summary`
+still cover the whole policy at every threshold, and the human trailer names
+what it withheld —
+
+```text
+tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)
+```
+
+A policy with nothing to report reads differently, `no policy hygiene findings
+in acl/acl.hujson`, so a quiet run never leaves you guessing whether the policy
+was clean or the threshold was high.
+
+## Keep IdP-synced groups out of the findings
+
+A SCIM/IdP-synced group is named `group:<name>@<domain>` and resolves at the
+control plane, so it never appears in the policy's local `groups` map. `lint`
+exempts that shape from `undefined-reference` by default and reports the count
+instead:
+
+```sh
+tail-acl --file acl/acl.hujson lint                              # exempt, counted
+tail-acl --file acl/acl.hujson lint -scim-domains corp.example   # only this domain
+tail-acl --file acl/acl.hujson lint -strict-scim-groups          # no exemption
+```
+
+The exemption is a name-shape heuristic, so it cannot tell you whether a synced
+group actually exists or who belongs to it — only `plan` and `validate` consult
+the control plane. Both halves must be non-empty, so a templated
+`group:${TEAM}@${DOMAIN}` with an unset variable still reports as broken.
+
+## Check Tailscale Services
+
+A Service (`svc:<name>`) resolves at the control plane, so like a synced group
+it is never an `undefined-reference` and is counted rather than flagged.
+Services are destination-only — a `svc:` on a rule's source side is a
+`svc-in-source` warning.
+
+```sh
+tail-acl --file acl/acl.hujson lint                     # offline: shape only
+tail-acl --file acl/acl.hujson lint -online-validation  # also: does it exist?
+```
+
+`-online-validation` needs `--tailnet`/`--api-key`. Without them it logs a
+warning to stderr and reports the offline findings alone. With credentials that
+are *rejected*, it exits `2` — a check that never ran must not read as a clean
+policy — while still printing the offline findings.
+
+A service that does not exist yet is a `warn`, not an `error`, because
+Tailscale accepts a policy naming a service you have not created. That matters
+for gating: at the default threshold a `warn` fails the run, so a pipeline that
+creates the policy before the service should pair `-online-validation` with
+`-severity error`.
 
 Tune the wildcard check separately with `-wildcard`:
 
@@ -64,6 +115,15 @@ Tune the wildcard check separately with `-wildcard`:
 `broad-rule-untested` fires when a blanket source reaches a concrete
 destination on every port, with no posture or `via` gate and no deny assertion
 naming that destination. It is a prompt, not a verdict.
+
+Advisories sit below the default threshold, so start by asking for them:
+
+```sh
+tail-acl --file acl/acl.hujson lint -severity advice
+```
+
+That exits `1` while any advisory stands — deliberate, since you are asking to
+be held to them. Run without the flag for a gate that ignores them.
 
 When the policy supplies a concrete port, the advisory includes a compact JSON
 test to paste into `tests`. That gives you a deny-first authoring loop:
@@ -110,7 +170,10 @@ fragments reorder grants.
 tail-acl --file acl/acl.hujson lint -severity warn
 ```
 
-Exit `0` means nothing at or above the threshold; exit `1` means there is.
+Exit `0` means nothing at or above the threshold; exit `1` means there is. The
+log shows only findings at or above it too, but the trailer still counts the
+rest, so a CI run stays honest about what it chose not to gate on.
+
 Exit `2` is a usage or input error and never a policy verdict — fail the build
 loudly on it rather than treating it as "clean". See
 [Exit codes](../reference/exit-codes.md) and
@@ -124,6 +187,11 @@ need the live device inventory, and they belong to `tailnet-audit`.
 
 The discriminator is "does this finding need the live fleet?" If yes, it is
 not a `lint` finding.
+
+The same blindness applies to IdP-synced groups: `lint` recognizes the
+`group:<name>@<domain>` shape but cannot confirm the group exists or that anyone
+is in it. A typo'd synced group inside an exempted domain therefore passes
+`lint` and is caught only by `validate`.
 
 ## Related
 

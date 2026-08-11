@@ -93,7 +93,7 @@
     {
       "name": "lint",
       "summary": "Statically lint policy hygiene and broad-rule test coverage (-config currently supports broad-rule-untested allowBroad exclusions)",
-      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]"
+      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] [-strict-scim-groups] [-scim-domains a.com,b.com] [-online-validation]"
     },
     {
       "name": "jq",
@@ -128,6 +128,11 @@
       "default": "",
       "name": "api-key",
       "usage": "Tailscale API access token (default: TAILSCALE_API_KEY)"
+    },
+    {
+      "default": "auto",
+      "name": "color",
+      "usage": "colorize human output: auto|always|never"
     },
     {
       "default": "acl.json",
@@ -182,7 +187,7 @@
   ],
   "lint_findings": [
     {
-      "description": "a src/dst names an undefined selector, or a route/exit-node auto-approver is unsupported or undefined",
+      "description": "a selector is undefined or invalid in its policy position",
       "id": "undefined-reference",
       "severity": "error"
     },
@@ -230,6 +235,31 @@
       "description": "an ipset is defined but referenced by no rule",
       "id": "unused-ipset",
       "severity": "info"
+    },
+    {
+      "description": "a svc: service selector used as a rule source; Tailscale services are destination-only",
+      "id": "svc-in-source",
+      "severity": "warn"
+    },
+    {
+      "description": "a svc: service selector used as an SSH destination or recorder; those fields require node selectors",
+      "id": "svc-in-ssh",
+      "severity": "error"
+    },
+    {
+      "description": "a svc: destination names a service not found in the tailnet (requires --online-validation)",
+      "id": "svc-unknown",
+      "severity": "warn"
+    },
+    {
+      "description": "a SCIM-shaped group reference has the same name half as a declared local group",
+      "id": "scim-group-shadows-local",
+      "severity": "warn"
+    },
+    {
+      "description": "a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
+      "id": "scim-group-unsynced",
+      "severity": "warn"
     }
   ],
   "name": "tail-acl",

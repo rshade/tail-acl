@@ -2,6 +2,7 @@ package aclpolicy_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tailscale "tailscale.com/client/tailscale/v2"
@@ -116,6 +117,415 @@ func TestEvaluateLintReferenceClassification(t *testing.T) {
 				t.Errorf("undefined-reference findings = %d, want %d (%#v)", got, tc.wantErrors, report.Findings)
 			}
 		})
+	}
+}
+
+// TestEvaluateLintSCIMGroupExemption covers the SCIM/IdP-synced group
+// exemption: a group:<name>@<domain> selector is not present in the local
+// groups map (it resolves at the control plane), so by default it must not
+// produce an undefined-reference finding and must be counted in the summary.
+// Strict mode restores the error, and a domain filter narrows the exemption.
+func TestEvaluateLintSCIMGroupExemption(t *testing.T) {
+	t.Parallel()
+	const scimGroup = "group:contractors@example.com"
+	base := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+	}
+	for _, tc := range []struct {
+		name          string
+		source        string
+		opts          aclpolicy.LintOptions
+		wantErrors    int
+		wantSCIMCount int
+	}{
+		{
+			name:          "default exempts scim group and counts it",
+			source:        scimGroup,
+			wantErrors:    0,
+			wantSCIMCount: 1,
+		},
+		{
+			name:          "strict errors on scim group and does not count it",
+			source:        scimGroup,
+			opts:          aclpolicy.LintOptions{StrictSCIMGroups: true},
+			wantErrors:    1,
+			wantSCIMCount: 0,
+		},
+		{
+			name:          "listed domain is exempt",
+			source:        scimGroup,
+			opts:          aclpolicy.LintOptions{SCIMDomains: []string{"example.com"}},
+			wantErrors:    0,
+			wantSCIMCount: 1,
+		},
+		{
+			name:          "unlisted domain still errors",
+			source:        "group:contractors@other.io",
+			opts:          aclpolicy.LintOptions{SCIMDomains: []string{"example.com"}},
+			wantErrors:    1,
+			wantSCIMCount: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := *base
+			p.Grants = []tailscale.Grant{
+				{Source: []string{tc.source}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+			}
+			report, err := aclpolicy.EvaluateLint(&p, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := countByID(report, aclpolicy.LintUndefinedReference); got != tc.wantErrors {
+				t.Errorf("undefined-reference findings = %d, want %d (%#v)", got, tc.wantErrors, report.Findings)
+			}
+			if report.Summary.SCIMGroupRefs != tc.wantSCIMCount {
+				t.Errorf("Summary.SCIMGroupRefs = %d, want %d", report.Summary.SCIMGroupRefs, tc.wantSCIMCount)
+			}
+		})
+	}
+}
+
+// TestEvaluateLintSCIMGroupCountsDistinct confirms the summary tallies distinct
+// SCIM-shaped selectors, not every occurrence, and that a locally declared
+// group:<name>@<domain> behaves exactly as before (no exemption, no count).
+func TestEvaluateLintSCIMGroupCountsDistinct(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Groups:    map[string][]string{"group:local@example.com": {"alice@example.com"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"group:a@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:a@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:80"}},
+			{Source: []string{"group:b@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:22"}},
+			// Declared locally: resolves the ordinary way, not a SCIM exemption.
+			{Source: []string{"group:local@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+		t.Errorf("undefined-reference findings = %d, want 0 (%#v)", got, report.Findings)
+	}
+	if report.Summary.SCIMGroupRefs != 2 {
+		t.Errorf("Summary.SCIMGroupRefs = %d, want 2 (distinct group:a@ and group:b@)", report.Summary.SCIMGroupRefs)
+	}
+}
+
+// TestEvaluateLintServiceInSource asserts the svc: source case on its own: a
+// service is destination-only, so a svc: source must warn (svc-in-source), never
+// error (undefined-reference), and still be counted.
+func TestEvaluateLintServiceInSource(t *testing.T) {
+	t.Parallel()
+	p := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:server": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"svc:my-service"}, Destination: []string{"tag:server"}, IP: []string{"tcp:443"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(p, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintServiceInSource); got != 1 {
+		t.Errorf("svc-in-source findings = %d, want 1 (%#v)", got, report.Findings)
+	}
+	if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+		t.Errorf("undefined-reference findings = %d, want 0 (svc must not double-report)", got)
+	}
+	for _, finding := range findingsByID(report, aclpolicy.LintServiceInSource) {
+		if finding.Severity != aclpolicy.LintWarn {
+			t.Errorf("svc-in-source severity = %q, want warn", finding.Severity)
+		}
+	}
+	if report.Summary.SvcRefs != 1 {
+		t.Errorf("Summary.SvcRefs = %d, want 1", report.Summary.SvcRefs)
+	}
+}
+
+// TestEvaluateLintServiceInDestination asserts a svc: destination is exempt (no
+// undefined-reference) and that the summary tallies distinct services.
+func TestEvaluateLintServiceInDestination(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		destinations [][]string
+		wantSvcRefs  int
+	}{
+		{name: "single dst exempt and counted", destinations: [][]string{{"svc:my-service"}}, wantSvcRefs: 1},
+		{name: "distinct services counted", destinations: [][]string{{"svc:a"}, {"svc:b"}}, wantSvcRefs: 2},
+		{name: "same service twice counts once", destinations: [][]string{{"svc:a"}, {"svc:a"}}, wantSvcRefs: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			grants := make([]tailscale.Grant, 0, len(tc.destinations))
+			for _, destination := range tc.destinations {
+				grants = append(grants, tailscale.Grant{
+					Source: []string{"autogroup:member"}, Destination: destination, IP: []string{"tcp:443"},
+				})
+			}
+			report, err := aclpolicy.EvaluateLint(&tailscale.ACL{Grants: grants}, aclpolicy.LintOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+				t.Errorf("undefined-reference findings = %d, want 0 (%#v)", got, report.Findings)
+			}
+			if report.Summary.SvcRefs != tc.wantSvcRefs {
+				t.Errorf("Summary.SvcRefs = %d, want %d", report.Summary.SvcRefs, tc.wantSvcRefs)
+			}
+		})
+	}
+}
+
+// TestEvaluateServiceExistence covers the pure online-validation classifier with
+// a collected per-selector answer set and no network. A service the control
+// plane confirmed is clean; one it answered "does not exist" for is a
+// svc-unknown warn; and a selector with no answer at all was never looked up, so
+// it must stay silent — "could not check" is a collection failure the runner
+// exits 2 on, never absence.
+func TestEvaluateServiceExistence(t *testing.T) {
+	t.Parallel()
+	refs := []aclpolicy.ServiceRef{
+		{Selector: "svc:known", Rule: "grants[0].dst[0]"},
+		{Selector: "svc:ghost", Rule: "grants[1].dst[0]"},
+		{Selector: "svc:unchecked", Rule: "grants[2].dst[0]"},
+	}
+	findings := aclpolicy.EvaluateServiceExistence(refs, map[string]bool{
+		"svc:known": true,
+		"svc:ghost": false,
+	})
+	if len(findings) != 1 {
+		t.Fatalf("findings = %#v, want exactly one svc-unknown", findings)
+	}
+	finding := findings[0]
+	if finding.ID != aclpolicy.LintServiceUnknown {
+		t.Errorf("finding ID = %q, want %q", finding.ID, aclpolicy.LintServiceUnknown)
+	}
+	if finding.Severity != aclpolicy.LintWarn {
+		t.Errorf("finding severity = %q, want warn", finding.Severity)
+	}
+	if finding.Value != "svc:ghost" {
+		t.Errorf("finding value = %q, want svc:ghost", finding.Value)
+	}
+	if finding.Rule != "grants[1].dst[0]" {
+		t.Errorf("finding rule = %q, want the locator of the reference", finding.Rule)
+	}
+}
+
+// TestServiceDestinationRefsAreDistinctAndLocated pins the one definition of the
+// set --online-validation looks up: distinct svc: selectors in a traffic
+// destination, in first-occurrence order, each carrying that first locator. A
+// svc: source, SSH destination, or recorder is deliberately absent — svc: is
+// illegal there, so looking it up would answer a late-bound advisory question
+// about a hard misuse the reference checks already report.
+func TestServiceDestinationRefsAreDistinctAndLocated(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:a"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:a"}, IP: []string{"tcp:80"}},
+			{Source: []string{"svc:source-only"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
+		},
+		ACLs: []tailscale.ACLEntry{
+			{Action: "accept", Source: []string{"autogroup:member"}, Destination: []string{"svc:b:443"}},
+			{Action: "accept", Users: []string{"autogroup:member"}, Ports: []string{"svc:c:8080"}},
+		},
+		Tests: []tailscale.ACLTest{
+			{Source: "alice@example.com", Accept: []string{"svc:d:443"}, Deny: []string{"svc:e:22"}},
+			{User: "bob@example.com", Allow: []string{"svc:f:443"}},
+		},
+		SSH: []tailscale.ACLSSH{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ssh-dst"},
+				Users: []string{"root"}, Recorder: []string{"svc:recorder"}},
+		},
+	}
+	want := []aclpolicy.ServiceRef{
+		{Selector: "svc:a", Rule: "grants[0].dst[0]"},
+		{Selector: "svc:b", Rule: "acls[0].dst[0]"},
+		{Selector: "svc:c", Rule: "acls[1].ports[0]"},
+		{Selector: "svc:d", Rule: "tests[0].accept[0]"},
+		{Selector: "svc:e", Rule: "tests[0].deny[0]"},
+		{Selector: "svc:f", Rule: "tests[1].accept[0]"},
+	}
+	got := aclpolicy.ServiceDestinationRefs(policy)
+	if len(got) != len(want) {
+		t.Fatalf("ServiceDestinationRefs = %#v, want %#v", got, want)
+	}
+	for index, ref := range want {
+		if got[index] != ref {
+			t.Errorf("ref[%d] = %#v, want %#v", index, got[index], ref)
+		}
+	}
+}
+
+// TestEvaluateLintCountsServicesNamedOnlyByPolicyTests is the defect-1
+// regression guard: a service named only by a test assertion was looked up by
+// --online-validation yet never counted in svc_refs, so the count silently
+// under-reported exactly the references the online pass checks.
+func TestEvaluateLintCountsServicesNamedOnlyByPolicyTests(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+		},
+		Tests: []tailscale.ACLTest{
+			{Source: "alice@example.com", Accept: []string{"svc:accepted:443"}, Deny: []string{"svc:denied:22"}},
+			{User: "bob@example.com", Allow: []string{"svc:allowed:443"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.SvcRefs != 3 {
+		t.Errorf("Summary.SvcRefs = %d, want 3 (accept, deny, and allow assertions)", report.Summary.SvcRefs)
+	}
+	if report.Summary.SvcDstRefs != 3 {
+		t.Errorf("Summary.SvcDstRefs = %d, want 3; every test assertion is an online-checkable position",
+			report.Summary.SvcDstRefs)
+	}
+}
+
+// TestLintSummarySeparatesReferencedFromCheckableServices is the defect-2
+// regression guard: svc_refs counts every distinct service the policy names,
+// including positions where svc: is illegal and no lookup is made, so reading it
+// as online coverage over-states what was verified. svc_dst_refs reports the
+// online-checkable subset, and the two must not be the same number here. The
+// autoApprovers.services map key is a container key rather than a selector the
+// linter resolves, so it is in neither count — five, not six.
+func TestLintSummarySeparatesReferencedFromCheckableServices(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:checked"}, IP: []string{"tcp:443"}},
+			{Source: []string{"svc:in-source"}, Destination: []string{"tag:web"}, IP: []string{"tcp:80"}},
+		},
+		SSH: []tailscale.ACLSSH{
+			{Action: "accept", Source: []string{"autogroup:member"}, Destination: []string{"svc:ssh-dst"},
+				Users: []string{"root"}, Recorder: []string{"svc:recorder"}},
+		},
+		AutoApprovers: &tailscale.ACLAutoApprovers{
+			Services: map[string][]string{"svc:web": {"svc:approver"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.SvcRefs != 5 {
+		t.Errorf("Summary.SvcRefs = %d, want 5 (dst, src, ssh dst, recorder, approver value); findings %#v",
+			report.Summary.SvcRefs, report.Findings)
+	}
+	if report.Summary.SvcDstRefs != 1 {
+		t.Errorf("Summary.SvcDstRefs = %d, want 1 (only the grant destination is online-checkable)",
+			report.Summary.SvcDstRefs)
+	}
+	if report.Summary.SvcDstRefs > report.Summary.SvcRefs {
+		t.Errorf("online-checkable subset %d exceeds the referenced count %d",
+			report.Summary.SvcDstRefs, report.Summary.SvcRefs)
+	}
+	invalidSSH := findingsByID(report, aclpolicy.LintServiceInSSH)
+	if len(invalidSSH) != 2 {
+		t.Fatalf("invalid SSH service findings = %#v, want dst and recorder findings", invalidSSH)
+	}
+	wantRules := map[string]bool{
+		"ssh[0].dst[0]":      false,
+		"ssh[0].recorder[0]": false,
+	}
+	for _, finding := range invalidSSH {
+		if _, ok := wantRules[finding.Rule]; ok {
+			wantRules[finding.Rule] = true
+		}
+	}
+	for rule, found := range wantRules {
+		if !found {
+			t.Errorf("missing invalid SSH service finding at %s in %#v", rule, invalidSSH)
+		}
+	}
+}
+
+// TestEvaluateSCIMGroupSync covers the pure classifier behind the SCIM half of
+// lint --online-validation, fed captured control-plane warning strings with no
+// network.
+func TestEvaluateSCIMGroupSync(t *testing.T) {
+	t.Parallel()
+	const notSyncing = " is not syncing from SCIM and will be ignored by rules in the policy file"
+	tests := []struct {
+		name                 string
+		warnings             []string
+		wantCount            int
+		wantValue            string
+		wantEvidenceContains string
+	}{
+		{
+			name:      "warning names the group selector",
+			warnings:  []string{"group:contractors@example.com" + notSyncing},
+			wantCount: 1,
+			wantValue: "group:contractors@example.com",
+		},
+		{
+			name: "same group twice is deduplicated",
+			warnings: []string{
+				"group:contractors@example.com" + notSyncing,
+				"group:contractors@example.com" + notSyncing,
+			},
+			wantCount: 1,
+			wantValue: "group:contractors@example.com",
+		},
+		{
+			name:                 "warning without a group token still reports",
+			warnings:             []string{"a referenced entity is not syncing from SCIM and will be ignored"},
+			wantCount:            1,
+			wantValue:            "",
+			wantEvidenceContains: "not syncing from SCIM",
+		},
+		{
+			name:      "unrelated warning is ignored",
+			warnings:  []string{"some other warning"},
+			wantCount: 0,
+		},
+		{
+			name:      "empty input",
+			warnings:  nil,
+			wantCount: 0,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			findings := aclpolicy.EvaluateSCIMGroupSync(testCase.warnings)
+			if findings == nil {
+				t.Fatal("findings = nil, want non-nil slice")
+			}
+			if len(findings) != testCase.wantCount {
+				t.Fatalf("findings = %#v, want %d", findings, testCase.wantCount)
+			}
+			if testCase.wantCount == 0 {
+				return
+			}
+			assertSCIMFinding(t, findings[0], testCase.wantValue, testCase.wantEvidenceContains)
+		})
+	}
+}
+
+func assertSCIMFinding(t *testing.T, finding aclpolicy.LintFinding, wantValue, wantEvidenceContains string) {
+	t.Helper()
+	if finding.ID != aclpolicy.LintSCIMGroupUnknown {
+		t.Errorf("finding ID = %q, want %q", finding.ID, aclpolicy.LintSCIMGroupUnknown)
+	}
+	if finding.Severity != aclpolicy.LintWarn {
+		t.Errorf("finding severity = %q, want warn", finding.Severity)
+	}
+	if finding.Value != wantValue {
+		t.Errorf("finding value = %q, want %q", finding.Value, wantValue)
+	}
+	if wantEvidenceContains != "" && !strings.Contains(finding.Evidence, wantEvidenceContains) {
+		t.Errorf("finding evidence = %q, want it to contain %q", finding.Evidence, wantEvidenceContains)
 	}
 }
 

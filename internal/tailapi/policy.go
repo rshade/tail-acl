@@ -3,6 +3,7 @@ package tailapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,6 +40,13 @@ type Plan struct {
 type FetchedPolicy struct {
 	HuJSON []byte
 	ETag   string
+}
+
+// ServiceLookup records whether the control plane found a service and the
+// exact name spelling it accepted. Name is empty when Exists is false.
+type ServiceLookup struct {
+	Name   string
+	Exists bool
 }
 
 // UploadedPolicy is the exact HuJSON sent to the control plane and the new
@@ -128,6 +136,39 @@ func FetchPolicy(ctx context.Context, client *tailscale.Client) (FetchedPolicy, 
 		return FetchedPolicy{}, fmt.Errorf("fetching deployed policy: %w", err)
 	}
 	return FetchedPolicy{HuJSON: []byte(raw.HuJSON), ETag: raw.ETag}, nil
+}
+
+// LookupService asks the control plane about one service rather than assuming
+// how names returned by the collection endpoint correspond to svc: selectors.
+// It sends the policy selector verbatim: the pinned client's service contract
+// uses the full svc:<name> spelling for Get paths.
+//
+// A readable 404 is a clean Exists=false verdict. Any other failure is wrapped
+// as a [ValidationUnavailableError], because an unreadable response cannot
+// prove that the service is absent.
+func LookupService(
+	ctx context.Context,
+	client *tailscale.Client,
+	name string,
+) (ServiceLookup, error) {
+	_, err := client.Services().Get(ctx, name)
+	if err == nil {
+		return ServiceLookup{Name: name, Exists: true}, nil
+	}
+	if tailscale.IsNotFound(err) {
+		return ServiceLookup{}, nil
+	}
+
+	status := 0
+	var apiErr tailscale.APIError
+	if errors.As(err, &apiErr) {
+		status = apiErr.Status
+	}
+	return ServiceLookup{}, &ValidationUnavailableError{
+		Status:  status,
+		Message: fmt.Sprintf("looking up tailnet service %q: %v", name, err),
+		Err:     err,
+	}
 }
 
 // ValidateFile asks Tailscale to validate the policy and run its policy tests.

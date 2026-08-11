@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,10 +24,20 @@ type commandDeps struct {
 	stdout     io.Writer
 	stderr     io.Writer
 	format     *string
+	colorRaw   *string
+	getenv     func(string) string
 	verbose    *bool
 }
 
 func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
+
+// colorize resolves whether human output on stdout should carry ANSI color.
+// It reads the flag pointers after cobra has parsed them, so watch mode (which
+// builds its streamEmitter inside a command's RunE) sees the resolved values.
+func (d *commandDeps) colorize() bool {
+	mode, _ := parseColorMode(*d.colorRaw)
+	return colorEnabled(*d.format, mode, d.stdout, d.getenv)
+}
 
 // addSubcommands registers the leaf commands, grouping the five that share
 // a noun (grant, tag-owner, host, posture, auto-approver) under a parent command.
@@ -80,6 +90,22 @@ func newNormalizeCommand(deps *commandDeps) *cobra.Command {
 	}
 }
 
+// splitCommaList flattens a repeatable stringListFlag into a single list,
+// splitting each value on commas and dropping empties, so --scim-domains accepts
+// both "--scim-domains a.com,b.com" and repeated "--scim-domains a.com
+// --scim-domains b.com".
+func splitCommaList(values stringListFlag) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		for part := range strings.SplitSeq(value, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	}
+	return out
+}
+
 func newInitCommand(deps *commandDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:   cmdInit,
@@ -103,29 +129,14 @@ func newInitCommand(deps *commandDeps) *cobra.Command {
 // exit 0: printing help and exiting 0 for a bare parent is what git remote,
 // gh repo, and docker network all do, and is more useful than an error for a
 // caller who is legitimately exploring the command tree.
+// A bare parent prints the same page its own --help does, rather than a
+// second hand-written rendering of the same facts.
 func runParentCommand(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		parentUsage(cmd.OutOrStdout(), cmd)
+		commandHelp(cmd)
 		return nil
 	}
 	return usagef("unknown %s command %q", cmd.Name(), args[0])
-}
-
-// parentUsage prints cmd's own short description and child verbs. cmd.Usage()
-// would work too (nothing here overrides UsageFunc, so it resolves cobra's
-// own per-command default correctly scoped to cmd rather than root's), but
-// UsageString's non-nil-error path funnels through cobra.CheckErr, which
-// calls [os.Exit] — not a risk worth taking for a [bytes.Buffer] write that in
-// practice cannot fail. This keeps the same [io.Writer]-based style as usage()
-// and stays entirely in code this package controls.
-func parentUsage(w io.Writer, cmd *cobra.Command) {
-	fmt.Fprintf(w, "%s\n\n", cmd.Short)
-	fmt.Fprintf(w, "Usage:\n  %s [command]\n\n", cmd.CommandPath())
-	fmt.Fprintln(w, "Available commands:")
-	for _, sub := range cmd.Commands() {
-		fmt.Fprintf(w, "  %-8s %s\n", sub.Name(), sub.Short)
-	}
-	fmt.Fprintf(w, "\nUse \"%s [command] --help\" for more information.\n", cmd.CommandPath())
 }
 
 func newGrantAddCommand(deps *commandDeps) *cobra.Command {
@@ -356,7 +367,7 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			}
 			out, err := runTest(
 				ctx, *deps.opts, testOptions{watch: watch, validate: validate, interval: interval}, deps.logger(),
-				newStreamEmitter(deps.stdout, *deps.format), deps.httpClient, deps.apiURL,
+				newStreamEmitter(deps.stdout, *deps.format, deps.colorize()), deps.httpClient, deps.apiURL,
 			)
 			*deps.result = out
 			return err
@@ -438,26 +449,42 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 
 func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	var severity, wildcard, configPath string
+	var strictSCIMGroups bool
+	var online bool
+	var scimDomains stringListFlag
 	cmd := &cobra.Command{
 		Use:   cmdLint,
 		Short: lintSummary,
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			lintOpts, threshold, err := resolveLintOptions(severity, wildcard)
+			lintOpts, threshold, err := resolveLintOptions(
+				severity, wildcard, strictSCIMGroups, scimDomains,
+			)
 			if err != nil {
 				return err
 			}
-			out, err := runLint(ctx, *deps.opts, lintOpts, threshold, configPath, deps.logger())
+			out, err := runLint(
+				ctx, *deps.opts, lintOpts, threshold, configPath,
+				online, deps.httpClient, deps.apiURL, deps.logger(),
+			)
 			*deps.result = out
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&severity, "severity", string(aclpolicy.LintWarn),
-		"minimum finding severity that sets a non-zero exit: advice|info|warn|error")
+		"lowest finding severity to report and fail on: advice|info|warn|error")
 	cmd.Flags().StringVar(&wildcard, "wildcard", string(aclpolicy.WildcardAnyToAny),
 		"over-broad wildcard policy: any-to-any|any|off")
 	cmd.Flags().StringVar(&configPath, "config", "",
 		"HuJSON lint config path (currently broad-rule-untested allowBroad exclusions)")
+	cmd.Flags().BoolVar(&strictSCIMGroups, "strict-scim-groups", false,
+		"error on undeclared SCIM/IdP-synced groups (group:<name>@<domain>) instead of exempting them")
+	cmd.Flags().Var(&scimDomains, "scim-domains",
+		"narrow the SCIM-group exemption to these @domains and their subdomains "+
+			"(comma-separated; may be repeated)")
+	cmd.Flags().BoolVar(&online, "online-validation", false,
+		"check svc: destinations and SCIM group sync against the control plane, read-only "+
+			"(looks up each service, then submits the policy to /acl/validate); requires --tailnet/--api-key")
 	return cmd
 }
 

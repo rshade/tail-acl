@@ -9,6 +9,8 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	tailscale.com v1.102.2
 	tailscale.com/client/tailscale/v2 v2.10.1
 )
