@@ -187,7 +187,7 @@
   ],
   "lint_findings": [
     {
-      "description": "a src/dst names an undefined selector, or a route/exit-node auto-approver is unsupported or undefined",
+      "description": "a selector is undefined or invalid in its policy position",
       "id": "undefined-reference",
       "severity": "error"
     },
@@ -242,8 +242,18 @@
       "severity": "warn"
     },
     {
+      "description": "a svc: service selector used as an SSH destination or recorder; those fields require node selectors",
+      "id": "svc-in-ssh",
+      "severity": "error"
+    },
+    {
       "description": "a svc: destination names a service not found in the tailnet (requires --online-validation)",
       "id": "svc-unknown",
+      "severity": "warn"
+    },
+    {
+      "description": "a SCIM-shaped group reference has the same name half as a declared local group",
+      "id": "scim-group-shadows-local",
       "severity": "warn"
     },
     {

@@ -281,22 +281,22 @@ func TestEvaluateLintServiceInDestination(t *testing.T) {
 }
 
 // TestEvaluateServiceExistence covers the pure online-validation classifier with
-// a fabricated known-service set and no network. A destination service present
-// in the set is clean; one absent is a svc-unknown warn; a svc: source is not a
-// destination and is never reported by this check; and distinct unknown services
-// are each reported once.
+// a collected per-selector answer set and no network. A service the control
+// plane confirmed is clean; one it answered "does not exist" for is a
+// svc-unknown warn; and a selector with no answer at all was never looked up, so
+// it must stay silent — "could not check" is a collection failure the runner
+// exits 2 on, never absence.
 func TestEvaluateServiceExistence(t *testing.T) {
 	t.Parallel()
-	policy := &tailscale.ACL{
-		Grants: []tailscale.Grant{
-			{Source: []string{"autogroup:member"}, Destination: []string{"svc:known"}, IP: []string{"tcp:443"}},
-			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ghost"}, IP: []string{"tcp:80"}},
-			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ghost"}, IP: []string{"tcp:22"}},
-			// A svc: source is not a destination, so this check never flags it.
-			{Source: []string{"svc:sourceonly"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
-		},
+	refs := []aclpolicy.ServiceRef{
+		{Selector: "svc:known", Rule: "grants[0].dst[0]"},
+		{Selector: "svc:ghost", Rule: "grants[1].dst[0]"},
+		{Selector: "svc:unchecked", Rule: "grants[2].dst[0]"},
 	}
-	findings := aclpolicy.EvaluateServiceExistence(policy, []string{"svc:known"})
+	findings := aclpolicy.EvaluateServiceExistence(refs, map[string]bool{
+		"svc:known": true,
+		"svc:ghost": false,
+	})
 	if len(findings) != 1 {
 		t.Fatalf("findings = %#v, want exactly one svc-unknown", findings)
 	}
@@ -309,6 +309,143 @@ func TestEvaluateServiceExistence(t *testing.T) {
 	}
 	if finding.Value != "svc:ghost" {
 		t.Errorf("finding value = %q, want svc:ghost", finding.Value)
+	}
+	if finding.Rule != "grants[1].dst[0]" {
+		t.Errorf("finding rule = %q, want the locator of the reference", finding.Rule)
+	}
+}
+
+// TestServiceDestinationRefsAreDistinctAndLocated pins the one definition of the
+// set --online-validation looks up: distinct svc: selectors in a traffic
+// destination, in first-occurrence order, each carrying that first locator. A
+// svc: source, SSH destination, or recorder is deliberately absent — svc: is
+// illegal there, so looking it up would answer a late-bound advisory question
+// about a hard misuse the reference checks already report.
+func TestServiceDestinationRefsAreDistinctAndLocated(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:a"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:a"}, IP: []string{"tcp:80"}},
+			{Source: []string{"svc:source-only"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
+		},
+		ACLs: []tailscale.ACLEntry{
+			{Action: "accept", Source: []string{"autogroup:member"}, Destination: []string{"svc:b:443"}},
+			{Action: "accept", Users: []string{"autogroup:member"}, Ports: []string{"svc:c:8080"}},
+		},
+		Tests: []tailscale.ACLTest{
+			{Source: "alice@example.com", Accept: []string{"svc:d:443"}, Deny: []string{"svc:e:22"}},
+			{User: "bob@example.com", Allow: []string{"svc:f:443"}},
+		},
+		SSH: []tailscale.ACLSSH{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ssh-dst"},
+				Users: []string{"root"}, Recorder: []string{"svc:recorder"}},
+		},
+	}
+	want := []aclpolicy.ServiceRef{
+		{Selector: "svc:a", Rule: "grants[0].dst[0]"},
+		{Selector: "svc:b", Rule: "acls[0].dst[0]"},
+		{Selector: "svc:c", Rule: "acls[1].ports[0]"},
+		{Selector: "svc:d", Rule: "tests[0].accept[0]"},
+		{Selector: "svc:e", Rule: "tests[0].deny[0]"},
+		{Selector: "svc:f", Rule: "tests[1].accept[0]"},
+	}
+	got := aclpolicy.ServiceDestinationRefs(policy)
+	if len(got) != len(want) {
+		t.Fatalf("ServiceDestinationRefs = %#v, want %#v", got, want)
+	}
+	for index, ref := range want {
+		if got[index] != ref {
+			t.Errorf("ref[%d] = %#v, want %#v", index, got[index], ref)
+		}
+	}
+}
+
+// TestEvaluateLintCountsServicesNamedOnlyByPolicyTests is the defect-1
+// regression guard: a service named only by a test assertion was looked up by
+// --online-validation yet never counted in svc_refs, so the count silently
+// under-reported exactly the references the online pass checks.
+func TestEvaluateLintCountsServicesNamedOnlyByPolicyTests(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+		},
+		Tests: []tailscale.ACLTest{
+			{Source: "alice@example.com", Accept: []string{"svc:accepted:443"}, Deny: []string{"svc:denied:22"}},
+			{User: "bob@example.com", Allow: []string{"svc:allowed:443"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.SvcRefs != 3 {
+		t.Errorf("Summary.SvcRefs = %d, want 3 (accept, deny, and allow assertions)", report.Summary.SvcRefs)
+	}
+	if report.Summary.SvcDstRefs != 3 {
+		t.Errorf("Summary.SvcDstRefs = %d, want 3; every test assertion is an online-checkable position",
+			report.Summary.SvcDstRefs)
+	}
+}
+
+// TestLintSummarySeparatesReferencedFromCheckableServices is the defect-2
+// regression guard: svc_refs counts every distinct service the policy names,
+// including positions where svc: is illegal and no lookup is made, so reading it
+// as online coverage over-states what was verified. svc_dst_refs reports the
+// online-checkable subset, and the two must not be the same number here. The
+// autoApprovers.services map key is a container key rather than a selector the
+// linter resolves, so it is in neither count — five, not six.
+func TestLintSummarySeparatesReferencedFromCheckableServices(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:checked"}, IP: []string{"tcp:443"}},
+			{Source: []string{"svc:in-source"}, Destination: []string{"tag:web"}, IP: []string{"tcp:80"}},
+		},
+		SSH: []tailscale.ACLSSH{
+			{Action: "accept", Source: []string{"autogroup:member"}, Destination: []string{"svc:ssh-dst"},
+				Users: []string{"root"}, Recorder: []string{"svc:recorder"}},
+		},
+		AutoApprovers: &tailscale.ACLAutoApprovers{
+			Services: map[string][]string{"svc:web": {"svc:approver"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.SvcRefs != 5 {
+		t.Errorf("Summary.SvcRefs = %d, want 5 (dst, src, ssh dst, recorder, approver value); findings %#v",
+			report.Summary.SvcRefs, report.Findings)
+	}
+	if report.Summary.SvcDstRefs != 1 {
+		t.Errorf("Summary.SvcDstRefs = %d, want 1 (only the grant destination is online-checkable)",
+			report.Summary.SvcDstRefs)
+	}
+	if report.Summary.SvcDstRefs > report.Summary.SvcRefs {
+		t.Errorf("online-checkable subset %d exceeds the referenced count %d",
+			report.Summary.SvcDstRefs, report.Summary.SvcRefs)
+	}
+	invalidSSH := findingsByID(report, aclpolicy.LintServiceInSSH)
+	if len(invalidSSH) != 2 {
+		t.Fatalf("invalid SSH service findings = %#v, want dst and recorder findings", invalidSSH)
+	}
+	wantRules := map[string]bool{
+		"ssh[0].dst[0]":      false,
+		"ssh[0].recorder[0]": false,
+	}
+	for _, finding := range invalidSSH {
+		if _, ok := wantRules[finding.Rule]; ok {
+			wantRules[finding.Rule] = true
+		}
+	}
+	for rule, found := range wantRules {
+		if !found {
+			t.Errorf("missing invalid SSH service finding at %s in %#v", rule, invalidSSH)
+		}
 	}
 }
 

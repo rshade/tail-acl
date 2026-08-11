@@ -32,6 +32,7 @@
 
 ### Bug Fixes
 
+* **tail-acl:** align service-reference counting and online lookup coverage, reject services in SSH node-selector fields, guard SCIM/local group-name collisions, and clarify online warning severity gating
 * **ci:** keep release branches current
 * **cli:** enforce ASCII-safe stdout and print the audit verdict
 * **deps:** update github.com/tailscale/hujson digest to b80ff77

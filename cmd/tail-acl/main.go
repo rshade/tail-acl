@@ -267,20 +267,16 @@ type result struct {
 	SSHTestsSkipped int                    `json:"ssh_tests_skipped,omitempty"`
 	TestSummary     *aclpolicy.TestSummary `json:"test_summary,omitempty"`
 	Policy          json.RawMessage        `json:"policy,omitempty"`
-	// Findings is a pointer for the same reason as Assertions: a lint run with a
-	// clean policy still emits "findings": [] rather than dropping the key, while
-	// every other command omits it.
+	// Findings is the complete lint report. The -severity threshold controls the
+	// human view and exit status, but the versioned JSON envelope keeps every
+	// finding so existing machine consumers do not silently lose lower tiers.
+	// The pointer preserves "findings": [] for a clean lint run while every other
+	// command omits the field.
 	Findings *[]aclpolicy.LintFinding `json:"findings,omitempty"`
-	// LintSummary counts the whole policy, not the filtered Findings above it.
-	// Keeping it whole is what stops -severity from hiding anything silently:
-	// a consumer can always see that findings were suppressed, and
-	// LintThreshold says by what.
+	// LintSummary counts the whole policy, matching Findings above it.
 	LintSummary *aclpolicy.LintSummary `json:"lint_summary,omitempty"`
-	// LintThreshold is the resolved -severity. It belongs in the envelope
-	// because Findings is filtered by it: without the threshold a consumer
-	// cannot tell a clean policy from a filtered report, and the summary's
-	// larger counts would read as a contradiction rather than as the rest of
-	// the policy.
+	// LintThreshold is the resolved -severity used for the human view and exit
+	// status. It is informational in JSON; Findings remains the complete report.
 	LintThreshold string `json:"lint_severity_threshold,omitempty"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
@@ -669,8 +665,13 @@ func render(w io.Writer, format string, colorize bool, res *result) error {
 			return err
 		}
 	}
+	reportedFindings := []aclpolicy.LintFinding(nil)
 	if res.Findings != nil {
-		if err := renderLintFindings(w, *res.Findings, colorize); err != nil {
+		reportedFindings = lintFindingsAtLeast(
+			*res.Findings,
+			aclpolicy.LintSeverity(res.LintThreshold),
+		)
+		if err := renderLintFindings(w, reportedFindings, colorize); err != nil {
 			return err
 		}
 	}
@@ -679,7 +680,7 @@ func render(w io.Writer, format string, colorize bool, res *result) error {
 	// Every other command keeps the plain "tail-acl: <message>" line.
 	if colorize && res.Command == cmdLint && res.LintSummary != nil && res.Findings != nil {
 		return renderLintSummaryLine(
-			w, res.File, *res.LintSummary, len(*res.Findings), aclpolicy.LintSeverity(res.LintThreshold),
+			w, res.File, *res.LintSummary, len(reportedFindings), aclpolicy.LintSeverity(res.LintThreshold),
 		)
 	}
 	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
@@ -725,6 +726,18 @@ func renderCompositeTest(w io.Writer, res *result) error {
 		w, "SERVER %s: %s\nAGREEMENT %s\n", res.Server.Status, res.Server.Message, res.Agreement,
 	)
 	return err
+}
+
+// lintFindingsAtLeast derives the thresholded human view without mutating the
+// complete finding set carried by the JSON envelope.
+func lintFindingsAtLeast(
+	findings []aclpolicy.LintFinding,
+	threshold aclpolicy.LintSeverity,
+) []aclpolicy.LintFinding {
+	reported := slices.Clone(findings)
+	return slices.DeleteFunc(reported, func(finding aclpolicy.LintFinding) bool {
+		return !finding.Severity.AtLeast(threshold)
+	})
 }
 
 // renderLintFindings prints the findings that survived the -severity filter,
@@ -2317,18 +2330,19 @@ func lintOnline(
 	if err != nil {
 		return err
 	}
-	services, err := tailapi.FetchServices(ctx, client)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(services))
-	for _, service := range services {
-		names = append(names, service.Name)
+	serviceRefs := aclpolicy.ServiceDestinationRefs(policy)
+	serviceExists := make(map[string]bool, len(serviceRefs))
+	for _, ref := range serviceRefs {
+		lookup, lookupErr := tailapi.LookupService(ctx, client, ref.Selector)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		serviceExists[ref.Selector] = lookup.Exists
 	}
 	// Add rather than a local append-and-count: the severity vocabulary belongs
 	// to aclpolicy, and a copy of that switch out here would silently stop
 	// summing to Total the day a severity is added.
-	report.Add(aclpolicy.EvaluateServiceExistence(policy, names)...)
+	report.Add(aclpolicy.EvaluateServiceExistence(serviceRefs, serviceExists)...)
 
 	warnings, err := collectSCIMSyncWarnings(ctx, client, opts.file, logger)
 	if err != nil {
@@ -2418,18 +2432,15 @@ func resolveLintOptions(
 	}, threshold, nil
 }
 
-// newLintResult applies the -severity threshold to the report. The filter lives
-// here rather than in EvaluatePolicyLint because the classifier's job is to
-// return everything it found (AX convention 9); which tiers an operator wants
-// to act on is a presentation decision, and keeping the whole report in hand is
-// what lets the trailer report what it withheld.
+// newLintResult keeps the complete report for the versioned JSON envelope and
+// applies -severity only to the human-summary count. The renderer derives the
+// thresholded human finding list; the classifier and machine contract retain
+// everything they found (AX conventions 2 and 9).
 func newLintResult(path string, report aclpolicy.LintReport, threshold aclpolicy.LintSeverity) *result {
-	reported := slices.DeleteFunc(slices.Clone(report.Findings), func(finding aclpolicy.LintFinding) bool {
-		return !finding.Severity.AtLeast(threshold)
-	})
-	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, len(reported), threshold))
+	findings := slices.Clone(report.Findings)
+	res := newResult(cmdLint, statusOK, lintMessage(path, report.Summary, report.CountAtLeast(threshold), threshold))
 	res.File = path
-	res.Findings = &reported
+	res.Findings = &findings
 	res.LintSummary = &report.Summary
 	res.LintThreshold = string(threshold)
 	return res
@@ -2466,8 +2477,10 @@ type summarySegment struct {
 // lintSummarySegments splits the summary into colorable spans. Only the count
 // tokens ("0 error", "33 warn", …) carry color; the lead-in, the separators,
 // the withheld-findings clause, and the scim/svc reference tallies stay
-// default. The zero-total case has no counts to color, matching the plain
-// wording exactly.
+// default. Both the total svc reference count and its online-checkable
+// destination subset are named so the two sets cannot be mistaken for each
+// other. The zero-total case has no counts to color, matching the plain wording
+// exactly.
 func lintSummarySegments(
 	path string,
 	summary aclpolicy.LintSummary,
@@ -2475,7 +2488,12 @@ func lintSummarySegments(
 	threshold aclpolicy.LintSeverity,
 ) []summarySegment {
 	scim := refNote(summary.SCIMGroupRefs, "scim group reference", "scim group references") +
-		refNote(summary.SvcRefs, "svc reference", "svc references")
+		refNote(summary.SvcRefs, "svc reference", "svc references") +
+		refNote(
+			summary.SvcDstRefs,
+			"online-checkable svc destination reference",
+			"online-checkable svc destination references",
+		)
 	if summary.Total == 0 {
 		return []summarySegment{{text: fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)}}
 	}

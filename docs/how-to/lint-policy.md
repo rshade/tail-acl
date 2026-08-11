@@ -50,9 +50,10 @@ tail-acl --file acl/acl.hujson lint                   # default: warn and above
 tail-acl --file acl/acl.hujson lint -severity advice  # everything, advisories fail too
 ```
 
-A finding below the threshold is neither printed nor carried in the JSON
-`findings` array. The counts survive it, though: `lint_summary` covers the whole
-policy at every threshold, and the trailer names what it withheld —
+A finding below the threshold is not printed in the human view and does not
+affect the exit status. The versioned JSON `findings` array and `lint_summary`
+still cover the whole policy at every threshold, and the human trailer names
+what it withheld —
 
 ```text
 tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)

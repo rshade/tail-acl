@@ -659,19 +659,22 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
 | `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
+| `svc-in-ssh` | error | a `svc:` service selector is used as an SSH destination or recorder, where a node selector is required |
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |
+| `scim-group-shadows-local` | warn | a SCIM-shaped `group:<name>@<domain>` reference has the same name half as a declared local `group:<name>` |
 | `scim-group-unsynced` | warn | a `group:` reference the control plane reports is not syncing from SCIM (requires `-online-validation`) |
 
 `-severity advice|info|warn|error` (default `warn`) sets the lowest severity
-`lint` reports and fails on. A finding below the threshold is neither printed
-nor carried in the JSON `findings` array, and the run exits `0`. Severities rank
-`advice` < `info` < `warn` < `error`, so the default reports `warn` and `error`
-and withholds `info` and `advice` — pass `-severity advice` to see everything,
-which also makes advisories fail the run.
+`lint` prints in human output and fails on. A finding below the threshold is not
+printed in the human view and does not affect the exit status, but the versioned
+JSON `findings` array always carries the complete report. Severities rank
+`advice` < `info` < `warn` < `error`, so the default human view reports `warn`
+and `error` and withholds `info` and `advice` — pass `-severity advice` to print
+everything, which also makes advisories fail the run.
 
-Nothing is withheld silently. `lint_summary` counts the whole policy whatever
-the threshold, `lint_severity_threshold` records the threshold that filtered the
-array, and the human trailer names both — `no findings at or above warn; 2
+Nothing is withheld silently. `lint_summary` and JSON `findings` cover the whole
+policy whatever the threshold, `lint_severity_threshold` records the human and
+exit gate, and the human trailer names both — `no findings at or above warn; 2
 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows all)`. A clean
 policy is the distinct message `no policy hygiene findings in <file>`, so a
 quiet run is never ambiguous between "clean" and "filtered".
@@ -681,16 +684,24 @@ quiet run is never ambiguous between "clean" and "filtered".
 Autogroups are treated as defined by their `autogroup:` prefix alone, so a new
 autogroup Tailscale ships never false-positives as an undefined reference.
 
-IdP/SCIM-synced groups are exempted the same way. A synced group is named
-`group:<name>@<domain>` and resolves at the control plane, so it is never
-present in the policy's local `groups` map; by default `lint` therefore does not
-report `undefined-reference` for a `group:*@*` selector, and instead counts it
-in the summary as `scim_group_refs` (surfaced in the human line as `N scim group
-references`). This is purely a **name-shape heuristic** — the `@` after the
-`group:` prefix, which is illegal in a local group name — so it cannot verify
-that the synced group actually exists or that a device is a member; only the
-credentialed `plan`/`validate` commands consult the control plane. Two flags
-tune it:
+IdP/SCIM-synced groups are exempted by name shape. A synced group is named
+`group:<name>@<domain>` and resolves at the control plane. When that selector is
+absent from the policy's local `groups` map, `lint` does not report
+`undefined-reference` for it by default and instead counts it in the summary as
+`scim_group_refs` (surfaced in the human line as `N scim group references`).
+Real policies use selectors such as `group:i am a group@example.com`, including
+spaces in the name half, but neither pinned Tailscale dependency exposes a
+group-name validator; the control plane remains authoritative for whether a
+group is legal, synced, and populated.
+
+Because an `@`-bearing selector can coexist with a local group key,
+`scim-group-shadows-local` warns when the selector's pre-`@` name is also
+declared locally: for example, `group:i am a group@example.com` alongside
+`group:i am a group`. This is a collision signal, not proof that either group
+is wrong; verify the synced group, replace a stale reference with the local
+group, or rename one of them. A typo with no same-named local declaration cannot
+be detected offline. Use the domain and strict flags below to narrow or disable
+the heuristic when that residue matters:
 
 - `-scim-domains a.com,b.com` (comma-separated, repeatable) narrows the
   exemption to groups whose `@domain` equals a listed domain or is a subdomain
@@ -721,15 +732,25 @@ never an `undefined-reference`, and each distinct one is counted in the summary
 as `svc_refs` (surfaced in the human line as `N svc references`). Services are
 **destination-only**: the control plane rejects a `svc:` on a rule's source
 side, so a `svc:` used as a source is flagged `svc-in-source` (warn) while the
-authoritative rejection still comes from `plan`/`validate`. The offline linter
-cannot verify that a referenced service actually exists — that needs
-credentials. Pass `-online-validation` (with `--tailnet`/`--api-key`) to have
-`lint` list the tailnet's services read-only and emit `svc-unknown` (warn) for
-each `svc:` destination not found. A missing service is a **warning, not an
-error**, because services are late-bound: Tailscale itself validates a policy
-that names a service that does not yet exist. Without credentials,
-`-online-validation` logs a warning to stderr and continues with the offline
-findings only rather than failing.
+authoritative rejection still comes from `plan`/`validate`. SSH destinations
+and recorders require node selectors, so a service in either position is the
+hard `svc-in-ssh` error. `svc_dst_refs` separately counts the distinct service
+selectors in traffic destinations and policy tests that online validation can
+check; it excludes source, SSH, recorder, and auto-approver identity positions
+even though `svc_refs` counts every service selector.
+
+The offline linter cannot verify that a traffic-destination service actually
+exists — that needs credentials. Pass `-online-validation` (with
+`--tailnet`/`--api-key`) to have `lint` look up each distinct eligible selector
+read-only through the `vip-services` Get endpoint and emit `svc-unknown` (warn)
+when that exact policy selector returns not found. A missing service is a
+**warning, not an error**, because services are late-bound: Tailscale itself
+validates a policy that names a service that does not yet exist. Like every
+warn-tier finding, it is printed and makes the run fail at the default
+`-severity warn`. Set `-severity error` when online warnings should remain
+visible in the whole-policy summary but should not appear as reported findings
+or fail the run. Without credentials, `-online-validation` logs a warning to
+stderr and continues with the offline findings only rather than failing.
 
 `-online-validation` **also** cross-checks SCIM group references. There is no API
 to list IdP/SCIM-synced groups, so sync status is discovered indirectly: `lint`
@@ -739,18 +760,20 @@ returns as a `scim-group-unsynced` (warn) finding. This is the online complement
 to the offline `scim_group_refs` count: offline counts SCIM-shaped references it
 exempted, online reports which of them the control plane says are not actually
 syncing — a distinction the offline linter, which only inspects name shape,
-cannot make. A control plane that never judged the policy is a collection failure
-(exit `2`); a policy the control plane merely rejects is not `lint`'s verdict, so
-that outcome is logged to stderr and lint continues with any warnings collected.
-This path cannot be exercised against a live SCIM-backed tailnet in this
-project's test environment (no org-IdP-backed tailnet is available), so it is
-covered by unit tests against captured warning payloads rather than a live SCIM
-sync.
+cannot make. It follows the same threshold rule as `svc-unknown`: the default
+warn threshold gates on it, while `-severity error` retains its whole-policy
+summary count without failing the run. A control plane that never judged the
+policy is a collection failure (exit `2`); a policy the control plane merely
+rejects is not `lint`'s verdict, so that outcome is logged to stderr and lint
+continues with any warnings collected. This path cannot be exercised against a
+live SCIM-backed tailnet in this project's test environment (no org-IdP-backed
+tailnet is available), so it is covered by unit tests against captured warning
+payloads rather than a live SCIM sync.
 
-`-online-validation` makes two read-only calls: it lists the tailnet's services,
-then submits the policy to `/acl/validate`, whose warnings are the only place a
+`-online-validation` makes read-only per-reference service Get calls, then
+submits the policy to `/acl/validate`, whose warnings are the only place a
 referenced-but-not-syncing group surfaces. The token therefore needs the scope
-for both, not services-read alone.
+for both endpoint families, not services-read alone.
 
 Credentials that are present but *rejected* are a different case: a token that
 cannot complete either call exits `2`, because a check that never ran must not

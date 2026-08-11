@@ -3427,12 +3427,11 @@ func TestLintSeverityFiltersFindings(t *testing.T) {
 	}
 }
 
-// TestLintJSONFilteringKeepsWholePolicyCounts pins the machine half of the same
-// contract. findings carries only what passed the threshold, lint_summary still
-// counts the whole policy, and lint_severity_threshold names the threshold that
-// explains the gap between them — without that field a consumer cannot tell a
-// clean policy from a filtered report.
-func TestLintJSONFilteringKeepsWholePolicyCounts(t *testing.T) {
+// TestLintJSONKeepsAllFindingsBelowThreshold pins the version-1 machine
+// contract: -severity controls the exit status and human presentation, but it
+// must not remove lower-tier findings from the JSON envelope. Consumers that
+// predate the flag still receive the complete report.
+func TestLintJSONKeepsAllFindingsBelowThreshold(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, mixedLintPolicy)
@@ -3453,8 +3452,16 @@ func TestLintJSONFilteringKeepsWholePolicyCounts(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(stdout.String()), &envelope); decodeErr != nil {
 		t.Fatalf("decode: %v\n%s", decodeErr, stdout.String())
 	}
-	if len(envelope.Findings) != 0 {
-		t.Errorf("findings = %+v, want empty at the default warn threshold", envelope.Findings)
+	if len(envelope.Findings) != 2 {
+		t.Fatalf("findings = %+v, want both findings below the default warn threshold", envelope.Findings)
+	}
+	severities := []aclpolicy.LintSeverity{
+		envelope.Findings[0].Severity,
+		envelope.Findings[1].Severity,
+	}
+	if !slices.Contains(severities, aclpolicy.LintInfo) ||
+		!slices.Contains(severities, aclpolicy.LintAdvice) {
+		t.Errorf("finding severities = %v, want one info and one advice", severities)
 	}
 	if envelope.LintSummary.Total != 2 || envelope.LintSummary.Info != 1 || envelope.LintSummary.Advice != 1 {
 		t.Errorf("lint_summary = %+v, want the whole-policy counts (2 total, 1 info, 1 advice)", envelope.LintSummary)
@@ -3479,11 +3486,10 @@ func TestNewLintResultUsesSingularFinding(t *testing.T) {
 	}
 }
 
-// TestNewLintResultSingularCountsWhatItReported guards the other half of the
-// noun agreement: once -severity filters, the headline count is the reported
-// one, so a run that withheld two of three findings must still read "1
-// finding" rather than agreeing with the whole-policy total beside it.
-func TestNewLintResultSingularCountsWhatItReported(t *testing.T) {
+// TestNewLintResultKeepsAllFindingsButCountsTheHumanView guards both sides of
+// the split contract: the headline count follows -severity, while the result
+// retained for JSON still carries the complete report.
+func TestNewLintResultKeepsAllFindingsButCountsTheHumanView(t *testing.T) {
 	t.Parallel()
 
 	res := newLintResult("acl.hujson", aclpolicy.LintReport{
@@ -3498,11 +3504,77 @@ func TestNewLintResultSingularCountsWhatItReported(t *testing.T) {
 	if res.Message != want {
 		t.Errorf("Message = %q, want %q", res.Message, want)
 	}
-	if len(*res.Findings) != 1 {
-		t.Errorf("Findings = %+v, want only the warn finding", *res.Findings)
+	if len(*res.Findings) != 3 {
+		t.Errorf("Findings = %+v, want the complete three-finding report", *res.Findings)
 	}
 	if res.LintSummary.Total != 3 {
 		t.Errorf("LintSummary.Total = %d, want the whole-policy 3", res.LintSummary.Total)
+	}
+}
+
+// TestLintMessageDistinguishesAllSvcRefsFromOnlineDestinations makes the
+// service-reference sets legible in human output: svc_refs counts every svc:
+// use, while svc_dst_refs is the destination-only subset the online pass can
+// look up. Singular and plural wording are both part of that contract.
+func TestLintMessageDistinguishesAllSvcRefsFromOnlineDestinations(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		summary  aclpolicy.LintSummary
+		reported int
+		want     string
+	}{
+		{
+			name: "plural clean summary",
+			summary: aclpolicy.LintSummary{
+				SvcRefs: 3, SvcDstRefs: 2,
+			},
+			want: "no policy hygiene findings in acl.hujson; 3 svc references; " +
+				"2 online-checkable svc destination references",
+		},
+		{
+			name: "singular finding summary",
+			summary: aclpolicy.LintSummary{
+				Total: 1, Warn: 1, SvcRefs: 1, SvcDstRefs: 1,
+			},
+			reported: 1,
+			want: "1 finding: 0 error, 1 warn, 0 info; 1 svc reference; " +
+				"1 online-checkable svc destination reference",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := lintMessage("acl.hujson", testCase.summary, testCase.reported, aclpolicy.LintWarn)
+			if got != testCase.want {
+				t.Errorf("lintMessage = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestLintHumanSummaryRendersBothSvcReferenceSets(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [{"src": ["svc:source"], "dst": ["svc:destination"], "ip": ["tcp:443"]}]
+	}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdLint},
+		func(string) string { return "" }, nil, "", &stdout, &stderr,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+	want := "tail-acl: 1 finding: 0 error, 1 warn, 0 info; 2 svc references; " +
+		"1 online-checkable svc destination reference"
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want quiet", stderr.String())
 	}
 }
 
@@ -3580,7 +3652,7 @@ func TestLintVerboseTraceGoesToStderr(t *testing.T) {
 // TestLintOnlineFailureKeepsOfflineFindings pins the rule that a failed
 // control-plane check narrows the report rather than emptying it. Returning a
 // nil result on the collection error left stdout completely blank, so an
-// operator whose token cannot list services got exit 2 and no findings at all
+// operator whose token cannot read a service got exit 2 and no findings at all
 // and could not tell a broken policy from a broken token. The exit code still
 // has to say "could not check" rather than "policy is clean", so both halves
 // are asserted together.
@@ -3592,11 +3664,11 @@ func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
 	defer server.Close()
 
 	path := filepath.Join(t.TempDir(), "acl.hujson")
-	// svc: on the source side is an offline finding, so the report is
-	// non-empty before the online check is ever attempted.
+	// svc: on the source side is an offline finding, while the destination
+	// forces a service lookup, so the report is non-empty before that lookup
+	// returns unavailable.
 	writeTestPolicy(t, path, `{
-		"tagOwners": {"tag:web": ["autogroup:admin"]},
-		"grants": [{"src": ["svc:bad"], "dst": ["tag:web"], "ip": ["tcp:443"]}]
+		"grants": [{"src": ["svc:bad"], "dst": ["svc:unreadable"], "ip": ["tcp:443"]}]
 	}`)
 
 	var stdout, stderr strings.Builder
@@ -3614,6 +3686,80 @@ func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "svc-in-source") {
 		t.Errorf("stdout lost the offline findings:\n%s", stdout.String())
+	}
+}
+
+// TestLintOnlineLooksUpEachDistinctService pins the command-layer contract
+// between reference discovery, the per-service API lookup, and the pure
+// classifier. Repeated destinations cost one LookupService call, a service
+// named only by a policy test is still checked, and a readable 404 for the
+// exact selector produces svc-unknown.
+func TestLintOnlineLooksUpEachDistinctService(t *testing.T) {
+	t.Parallel()
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v2/tailnet/example.com/vip-services/svc:known":
+			fmt.Fprint(w, `{"name":"svc:known"}`)
+		case "/api/v2/tailnet/example.com/vip-services/svc:test-only":
+			fmt.Fprint(w, `{"name":"svc:test-only"}`)
+		case "/api/v2/tailnet/example.com/vip-services/svc:ghost":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"service not found"}`)
+		case "/api/v2/tailnet/example.com/acl/validate":
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"unexpected test request"}`)
+		}
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [
+			{"src": ["autogroup:member"], "dst": ["svc:known"], "ip": ["tcp:443"]},
+			{"src": ["autogroup:member"], "dst": ["svc:known"], "ip": ["tcp:80"]},
+			{"src": ["autogroup:member"], "dst": ["svc:ghost"], "ip": ["tcp:443"]}
+		],
+		"tests": [{"src": "alice@example.com", "accept": ["svc:test-only:443"]}]
+	}`)
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, cmdLint, "--online-validation"},
+		credentialedEnv, server.Client(), server.URL, &stdout, io.Discard,
+	)
+	if code := exitCode(err); code != exitFailed {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
+	}
+
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.Findings == nil {
+		t.Fatal("Findings = nil, want svc-unknown")
+	}
+	var unknown []aclpolicy.LintFinding
+	for _, finding := range *res.Findings {
+		if finding.ID == aclpolicy.LintServiceUnknown {
+			unknown = append(unknown, finding)
+		}
+	}
+	if len(unknown) != 1 || unknown[0].Value != "svc:ghost" || unknown[0].Rule != "grants[2].dst[0]" {
+		t.Errorf("svc-unknown findings = %#v, want only svc:ghost at grants[2].dst[0]", unknown)
+	}
+	wantRequests := []string{
+		"GET /api/v2/tailnet/example.com/vip-services/svc:known",
+		"GET /api/v2/tailnet/example.com/vip-services/svc:ghost",
+		"GET /api/v2/tailnet/example.com/vip-services/svc:test-only",
+		"POST /api/v2/tailnet/example.com/acl/validate",
+	}
+	if !slices.Equal(requests, wantRequests) {
+		t.Errorf("requests = %q, want %q", requests, wantRequests)
 	}
 }
 
@@ -3636,10 +3782,8 @@ func credentialedEnv(key string) string {
 // warning; nothing else in the suite exercises that path, so deleting the
 // EvaluateSCIMGroupSync call left every test green.
 //
-// The second subtest pins the same invariant the services call already has: a
-// later failure must narrow the report, not empty it. That matters more here
-// because the failure arrives after the first call has already populated the
-// report.
+// The second subtest pins the same partial-report invariant for validation: a
+// failure must narrow the report, not empty it.
 func TestLintOnlineSCIMSyncCheck(t *testing.T) {
 	t.Parallel()
 	const syncWarning = "group:contractors@example.com is not syncing from SCIM and will be ignored"
@@ -3656,8 +3800,8 @@ func TestLintOnlineSCIMSyncCheck(t *testing.T) {
 			want:         []string{"scim-group-unsynced"},
 		},
 		{
-			// The services call has already succeeded and svc-in-source is an
-			// offline finding, so both must still reach stdout.
+			// svc-in-source is an offline finding, so it must still reach stdout
+			// when validation is unavailable.
 			name:         "validate failure keeps what was already found",
 			validateCode: http.StatusForbidden,
 			wantExit:     exitUsage,
@@ -3674,7 +3818,7 @@ func TestLintOnlineSCIMSyncCheck(t *testing.T) {
 					}
 					return
 				}
-				fmt.Fprint(w, `{"vipServices":[]}`)
+				fmt.Fprint(w, `{"message":"unexpected test request"}`)
 			}))
 			defer server.Close()
 
