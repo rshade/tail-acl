@@ -64,6 +64,11 @@ func authoringTargets() []commentTarget {
 			[]string{"posture", "set", "posture:lab", "custom:labCompliant == true"},
 			[]string{"postures", "posture:lab"},
 		},
+		{
+			commandAutoApproverAdd,
+			[]string{"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:platform"},
+			[]string{"autoApprovers", "routes", "10.0.0.0/8"},
+		},
 	}
 }
 

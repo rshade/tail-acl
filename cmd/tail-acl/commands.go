@@ -29,8 +29,8 @@ type commandDeps struct {
 
 func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
 
-// addSubcommands registers the leaf commands, grouping the four that share
-// a noun (grant, tag-owner, host, posture) under a parent command.
+// addSubcommands registers the leaf commands, grouping the five that share
+// a noun (grant, tag-owner, host, posture, auto-approver) under a parent command.
 func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps) {
 	grant := &cobra.Command{Use: cmdGrant, Short: "Manage grants", RunE: runParentCommand}
 	grant.AddCommand(newGrantAddCommand(deps), newGrantRemoveCommand(deps))
@@ -44,8 +44,15 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 	posture := &cobra.Command{Use: cmdPosture, Short: "Manage posture definitions", RunE: runParentCommand}
 	posture.AddCommand(newPostureSetCommand(deps), newPostureRemoveCommand(deps))
 
+	autoApprover := &cobra.Command{
+		Use:   cmdAutoApprover,
+		Short: "Manage route and exit-node auto-approvers",
+		RunE:  runParentCommand,
+	}
+	autoApprover.AddCommand(newAutoApproverAddCommand(deps), newAutoApproverRemoveCommand(deps))
+
 	root.AddCommand(
-		grant, tagOwner, host, posture,
+		grant, tagOwner, host, posture, autoApprover,
 		newInitCommand(deps),
 		newMergeCommand(deps),
 		newNormalizeCommand(deps),
@@ -86,8 +93,8 @@ func newInitCommand(deps *commandDeps) *cobra.Command {
 	}
 }
 
-// runParentCommand is RunE for the four grouping commands (grant, tag-owner,
-// host, posture). Without an explicit RunE, cobra treats a command with only
+// runParentCommand is RunE for the five grouping commands (grant, tag-owner,
+// host, posture, auto-approver). Without an explicit RunE, cobra treats a command with only
 // subcommands as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
 // PersistentPreRunE ever run — for *any* leftover args, not just none — so
 // "tail-acl grant bogus" printed help and exited 0 exactly like a bare
@@ -244,6 +251,60 @@ func newPostureRemoveCommand(deps *commandDeps) *cobra.Command {
 			return err
 		},
 	}
+}
+
+// newAutoApproverAddCommand takes the section as flags rather than as
+// positionals the way tag-owner add does because exitNode has no key: one
+// positional grammar cannot name both "the 10.0.0.0/8 entry" and "the flat
+// list" without a sentinel value.
+func newAutoApproverAddCommand(deps *commandDeps) *cobra.Command {
+	var route string
+	var exitNode bool
+	var approvers stringListFlag
+	var comment string
+	var overwriteComment bool
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add auto-approvers for a route or the exit-node list",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runAutoApproverAdd(
+				deps.opts.file, route, exitNode, []string(approvers),
+				comment, cmd.Flags().Changed(commentFlagName), overwriteComment,
+			)
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&route, "route", "", "CIDR whose approver list to edit (autoApprovers.routes)")
+	cmd.Flags().BoolVar(&exitNode, "exit-node", false,
+		"edit the exit-node approver list instead (autoApprovers.exitNode)")
+	cmd.Flags().Var(&approvers, "approver",
+		"approver selector (user, group, tag, or autogroup); may be repeated")
+	registerCommentFlags(cmd.Flags(), &comment, &overwriteComment)
+	return cmd
+}
+
+func newAutoApproverRemoveCommand(deps *commandDeps) *cobra.Command {
+	var route string
+	var exitNode bool
+	var approvers stringListFlag
+	cmd := &cobra.Command{
+		Use:   subRemove,
+		Short: "Remove auto-approvers, pruning an emptied route key",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runAutoApproverRemove(deps.opts.file, route, exitNode, []string(approvers))
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&route, "route", "", "CIDR whose approver list to edit (autoApprovers.routes)")
+	cmd.Flags().BoolVar(&exitNode, "exit-node", false,
+		"edit the exit-node approver list instead (autoApprovers.exitNode)")
+	cmd.Flags().Var(&approvers, "approver",
+		"approver selector (user, group, tag, or autogroup); may be repeated")
+	return cmd
 }
 
 func newMergeCommand(deps *commandDeps) *cobra.Command {

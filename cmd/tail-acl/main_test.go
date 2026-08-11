@@ -2319,11 +2319,13 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error = %v, want nil", err)
 	}
+	// Per-command name and summary rendering is asserted for the whole catalog
+	// by TestHelpCommandColumnIsAligned, and the summary text itself is pinned
+	// byte-for-byte by testdata/schema.golden.json. Restating four of them here
+	// pinned neither beyond that — only the column padding, and only for names
+	// short enough to fit it. What remains is the help text that no catalog
+	// entry covers.
 	for _, want := range []string{
-		"check          Answer one reachability question locally",
-		"test add       Add deny or accept policy assertions without evaluating them",
-		"test remove    Remove deny or accept policy assertions; removing may renumber later assertion IDs",
-		"posture set    Add or replace a posture's expression list",
 		"typed edits preserve comments in JSON and HuJSON",
 		"tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
 		"check --src alice@example.com --dst tag:web:443",
@@ -2346,6 +2348,51 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	for _, value := range []byte(stdout.String()) {
 		if value >= 0x80 {
 			t.Fatalf("help contains non-ASCII bytes: %q", stdout.String())
+		}
+	}
+}
+
+// TestHelpCommandColumnIsAligned pins the invariant a literal padding width
+// cannot: every catalog entry's summary starts at the same column. A hardcoded
+// width silently breaks the moment a command name outgrows it — "auto-approver
+// remove" against a width set by "posture remove" — and no assertion that
+// embeds the padding for a short name can see it.
+func TestHelpCommandColumnIsAligned(t *testing.T) {
+	t.Parallel()
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--help"},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		&stdout,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	help := stdout.String()
+	column := -1
+	for _, command := range commandCatalog() {
+		line := "  " + command.Name
+		index := strings.Index(help, line)
+		if index < 0 {
+			t.Errorf("help is missing command %q:\n%s", command.Name, help)
+			continue
+		}
+		at := strings.Index(help[index:], command.Summary)
+		if at < 0 {
+			t.Errorf("help line for %q is missing its summary:\n%s", command.Name, help)
+			continue
+		}
+		if column == -1 {
+			column = at
+			continue
+		}
+		if at != column {
+			t.Errorf("summary for %q starts at column %d, want %d (column is misaligned)",
+				command.Name, at, column)
 		}
 	}
 }
@@ -2431,7 +2478,9 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	}
 	// Comment authoring is expressed once as a capability, but an agent reading
 	// the catalog still has to see the flag on every command that accepts it.
-	for _, name := range []string{commandGrantAdd, commandTagOwnerAdd, commandHostSet, commandPostureSet} {
+	for _, name := range []string{
+		commandGrantAdd, commandTagOwnerAdd, commandHostSet, commandPostureSet, commandAutoApproverAdd,
+	} {
 		if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool {
 			return command.Name == name && strings.Contains(command.Usage, "[--comment TEXT]")
 		}) {

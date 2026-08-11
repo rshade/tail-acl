@@ -106,21 +106,22 @@ const (
 const (
 	toolName = "tail-acl"
 
-	cmdGrant     = "grant"
-	cmdTagOwner  = "tag-owner"
-	cmdHost      = "host"
-	cmdPosture   = "posture"
-	cmdInit      = "init"
-	cmdMerge     = "merge"
-	cmdNormalize = "normalize"
-	cmdValidate  = "validate"
-	cmdTest      = "test"
-	cmdCheck     = "check"
-	cmdLint      = "lint"
-	cmdJQ        = "jq"
-	cmdPull      = "pull"
-	cmdPlan      = "plan"
-	cmdUpload    = "upload"
+	cmdGrant        = "grant"
+	cmdTagOwner     = "tag-owner"
+	cmdHost         = "host"
+	cmdPosture      = "posture"
+	cmdAutoApprover = "auto-approver"
+	cmdInit         = "init"
+	cmdMerge        = "merge"
+	cmdNormalize    = "normalize"
+	cmdValidate     = "validate"
+	cmdTest         = "test"
+	cmdCheck        = "check"
+	cmdLint         = "lint"
+	cmdJQ           = "jq"
+	cmdPull         = "pull"
+	cmdPlan         = "plan"
+	cmdUpload       = "upload"
 
 	subAdd    = "add"
 	subRemove = "remove"
@@ -133,14 +134,16 @@ const (
 	indeterminateWarn   = "warn"
 	indeterminateIgnore = "ignore"
 
-	commandGrantAdd      = "grant add"
-	commandGrantRemove   = "grant remove"
-	commandTagOwnerAdd   = "tag-owner add"
-	commandHostSet       = "host set"
-	commandPostureSet    = "posture set"
-	commandPostureRemove = "posture remove"
-	commandTestAdd       = "test add"
-	commandTestRemove    = "test remove"
+	commandGrantAdd           = "grant add"
+	commandGrantRemove        = "grant remove"
+	commandTagOwnerAdd        = "tag-owner add"
+	commandHostSet            = "host set"
+	commandPostureSet         = "posture set"
+	commandPostureRemove      = "posture remove"
+	commandAutoApproverAdd    = "auto-approver add"
+	commandAutoApproverRemove = "auto-approver remove"
+	commandTestAdd            = "test add"
+	commandTestRemove         = "test remove"
 
 	// lintSummary is shared by commandCatalog and newLintCommand's Short text
 	// so the two descriptions of "lint" cannot drift.
@@ -1109,6 +1112,138 @@ func runPostureRemove(path string, args []string) (*result, error) {
 	}
 	res := newResult(commandPostureRemove, statusOK,
 		fmt.Sprintf("removed posture %s from %s", canonical, path))
+	res.File = path
+	return res, nil
+}
+
+// resolveAutoApproverTarget enforces the exactly-one-section rule shared by
+// auto-approver add and remove and returns the canonical route, or "" when
+// the edit targets the exit-node list.
+func resolveAutoApproverTarget(command, route string, exitNode bool) (string, error) {
+	switch {
+	case exitNode && strings.TrimSpace(route) != "":
+		return "", usagef("%s takes either --route or --exit-node, not both", command)
+	case exitNode:
+		return "", nil
+	case strings.TrimSpace(route) == "":
+		return "", usagef("%s requires --route CIDR or --exit-node", command)
+	default:
+		canonical, err := aclpolicy.NormalizeAutoApproverRoute(route)
+		if err != nil {
+			return "", usageError{err}
+		}
+		return canonical, nil
+	}
+}
+
+// autoApproverTargetName phrases the edited section for result messages.
+func autoApproverTargetName(route string) string {
+	if route == "" {
+		return "exitNode"
+	}
+	return "route " + route
+}
+
+// runAutoApproverAdd implements "auto-approver add". The approver list merges
+// into an existing route entry rather than replacing it, and a repeat is a
+// no-op — see aclpolicy.AddRouteApprovers.
+func runAutoApproverAdd(
+	path, route string,
+	exitNode bool,
+	approvers []string,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	target, err := resolveAutoApproverTarget(commandAutoApproverAdd, route, exitNode)
+	if err != nil {
+		return nil, err
+	}
+	comment, overwriteComment, err = commentFromFlags(commentSet, comment, overwriteComment)
+	if err != nil {
+		return nil, err
+	}
+	if len(approvers) == 0 {
+		return nil, usagef("auto-approver add requires at least one --approver")
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	var edit aclpolicy.AutoApproverEdit
+	if target == "" {
+		edit, err = aclpolicy.AddExitNodeApprovers(policy, approvers)
+	} else {
+		edit, err = aclpolicy.AddRouteApprovers(policy, target, approvers)
+	}
+	if err != nil {
+		return nil, usageError{err}
+	}
+	operations := slices.Clone(edit.Operations)
+	// edit.Route, not target: a policy that spells the key unmasked keeps that
+	// spelling, and the comment has to name the member the patch actually
+	// touched.
+	commentOps, err := commentOperations(
+		path, comment, overwriteComment, aclpolicy.AutoApproverSegments(edit.Route)...)
+	if err != nil {
+		return nil, err
+	}
+	operations = append(operations, commentOps...)
+
+	name := autoApproverTargetName(edit.Route)
+	res := newResult(commandAutoApproverAdd, statusNoChanges,
+		fmt.Sprintf("approvers already present for %s in %s", name, path))
+	if len(operations) > 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		// An approver the list already carries produces no edit operation, so a
+		// --comment on that repeat is the whole change. Reporting it as "added
+		// approvers" would claim an addition the file does not contain — the
+		// distinction commentExistingOwner draws for "tag-owner add".
+		message := fmt.Sprintf("added approvers to %s in %s", name, path)
+		if !edit.Changed() {
+			message = fmt.Sprintf("added comment to %s in %s", name, path)
+		}
+		res = newResult(commandAutoApproverAdd, statusOK, message)
+	}
+	res.File = path
+	return res, nil
+}
+
+// runAutoApproverRemove implements "auto-approver remove". Removing the last
+// approver of a route prunes the route key rather than leaving an empty list
+// behind — see aclpolicy.RemoveRouteApprovers.
+func runAutoApproverRemove(path, route string, exitNode bool, approvers []string) (*result, error) {
+	target, err := resolveAutoApproverTarget(commandAutoApproverRemove, route, exitNode)
+	if err != nil {
+		return nil, err
+	}
+	if len(approvers) == 0 {
+		return nil, usagef("auto-approver remove requires at least one --approver")
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	var edit aclpolicy.AutoApproverEdit
+	if target == "" {
+		edit, err = aclpolicy.RemoveExitNodeApprovers(policy, approvers)
+	} else {
+		edit, err = aclpolicy.RemoveRouteApprovers(policy, target, approvers)
+	}
+	if err != nil {
+		return nil, usageError{err}
+	}
+	name := autoApproverTargetName(edit.Route)
+	res := newResult(commandAutoApproverRemove, statusNoChanges,
+		fmt.Sprintf("approvers not present for %s in %s", name, path))
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		res = newResult(commandAutoApproverRemove, statusOK,
+			fmt.Sprintf("removed approvers from %s in %s", name, path))
+	}
 	res.File = path
 	return res, nil
 }
@@ -2362,6 +2497,17 @@ func commandCatalog() []schemaCommand {
 			"posture set NAME EXPR [EXPR ...] [--comment TEXT]",
 		},
 		{commandPostureRemove, "Remove a posture definition", "posture remove NAME"},
+		{
+			commandAutoApproverAdd,
+			"Add auto-approvers for a route or the exit-node list; idempotent and merges into an existing route",
+			"auto-approver add (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...] [--comment TEXT]",
+		},
+		{
+			commandAutoApproverRemove,
+			"Remove auto-approvers; an emptied route key or exitNode member is pruned rather than " +
+				"left as an empty list",
+			"auto-approver remove (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...]",
+		},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdNormalize, "Emit the policy as standard JSON for general-purpose JSON tools", cmdNormalize},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
@@ -2465,8 +2611,16 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "with -format json); logs and errors go to stderr.")
 	fmt.Fprintf(w, "\nUsage:\n  %s [global flags] COMMAND [command flags]\n", filepath.Base(os.Args[0]))
 	fmt.Fprintln(w, "\nCommands:")
-	for _, c := range commandCatalog() {
-		fmt.Fprintf(w, "  %-14s %s\n", c.Name, c.Summary)
+	// The name column follows the longest catalog entry rather than a literal
+	// width, so a command longer than the one that set it — "auto-approver
+	// remove" against a hardcoded 14 — cannot silently break the alignment.
+	catalog := commandCatalog()
+	nameWidth := 0
+	for _, c := range catalog {
+		nameWidth = max(nameWidth, len(c.Name))
+	}
+	for _, c := range catalog {
+		fmt.Fprintf(w, "  %-*s %s\n", nameWidth, c.Name, c.Summary)
 	}
 	fmt.Fprintln(w, "\nGlobal flags:")
 	// PrintDefaults writes to the FlagSet's own configured output (stderr by
@@ -2475,41 +2629,50 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fs.PrintDefaults()
 	fmt.Fprint(w, usageRosterNote)
 	fmt.Fprint(w, usageUploadNote)
-	fmt.Fprintln(w, "\nExamples:")
-	fmt.Fprintln(w, "  tail-acl --file acl.json init")
-	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443")
-	fmt.Fprintln(w, "  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved")
-	fmt.Fprintln(w, "  tail-acl --file acl.json posture set posture:labCompliant \"custom:labCompliant == true\"")
-	fmt.Fprintln(w, "  tail-acl --file acl.json host set web 100.64.0.10 --comment \"Legacy monitoring endpoint\"")
-	//nolint:golines // example line needs to be intact
-	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json normalize | jq -r 'paths | join(\".\")'")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
-	fmt.Fprintln(w, "  tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432")
-	fmt.Fprintln(w, "  tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443")
-	fmt.Fprintln(w, "  tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432")
-	//nolint:golines // example line needs to be intact
-	fmt.Fprintln(w, "  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save")
-	fmt.Fprintln(w, "  tail-acl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line")
-	fmt.Fprintln(w, "  tail-acl --file acl.hujson test --watch --validate # local plus read-only server verdict")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
-	fmt.Fprintln(w, "  tail-acl --file acl.hujson jq '.grants[] | .src'    # NDJSON query results")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson")
-	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json upload      # use plan's recorded ETag")
-	//nolint:golines // example line needs to be intact
-	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json upload --accept-remote-changes # explicit no-If-Match opt-out")
-	fmt.Fprintln(w, "  tail-acl -schema                                   # machine-readable schema")
+	fmt.Fprint(w, usageExamples)
 	fmt.Fprint(w, usageExitCodes)
 }
+
+// usageExamples is one block rather than a run of Fprintln calls, for the same
+// reason as usageExitCodes below. It also keeps usage() off the funlen limit:
+// every new command adds an example, and a run of Fprintln calls made that a
+// statement each, so two branches adding a command apiece broke the build on
+// merge without either one exceeding the limit alone.
+const usageExamples = `
+Examples:
+  tail-acl --file acl.json init
+  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
+  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
+  tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
+  tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng --comment "Lab subnet routers"
+  tail-acl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
+  tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
+  tail-acl --file acl.json host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
+  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
+  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
+  tail-acl --file acl/acl.generated.json normalize | jq -r 'paths | join(".")'
+  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet
+  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally
+  tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
+  tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
+  tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
+  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion
+  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save
+  tail-acl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line
+  tail-acl --file acl.hujson test --watch --validate # local plus read-only server verdict
+  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
+  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
+  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
+  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp
+  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings
+  tail-acl --file acl.hujson jq '.grants[] | .src'    # NDJSON query results
+  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
+  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable
+  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet
+  tail-acl --file acl/acl.generated.json upload      # use plan's recorded ETag
+  tail-acl --file acl/acl.generated.json upload --accept-remote-changes # explicit no-If-Match opt-out
+  tail-acl -schema                                   # machine-readable schema
+`
 
 // usageRosterNote elaborates --roster beyond its one-line flag summary: the
 // difference between "unknown" and "does not hold that role" is exactly what

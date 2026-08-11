@@ -186,7 +186,11 @@ type LintCheck struct {
 // checks — an agent reads it to learn what lint can report.
 func LintCatalog() []LintCheck {
 	return []LintCheck{
-		{LintUndefinedReference, LintError, "a src/dst names a group/tag/ipset/host alias that is not defined"},
+		{
+			LintUndefinedReference,
+			LintError,
+			"a src/dst names an undefined selector, or a route/exit-node auto-approver is unsupported or undefined",
+		},
 		{LintDstTagNoOwner, LintError, "a destination tag has no tagOwners entry, so no node can carry it"},
 		{LintOverbroadWildcard, LintWarn, "an over-broad * selector (tuned by -wildcard)"},
 		{
@@ -249,6 +253,7 @@ func evaluateLint(
 	findings = append(findings, lintACLs(policy, wildcard)...)
 	findings = append(findings, lintSSHRules(policy, sshRules)...)
 	findings = append(findings, lintSSHTests(policy, sshTests)...)
+	findings = append(findings, lintAutoApprovers(policy)...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {
 		return LintReport{}, err
@@ -356,6 +361,67 @@ func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
 			nodeDestinationReferenceFindings(policy, locator+fieldDst, test.Destination)...)
 	}
 	return findings
+}
+
+// lintAutoApprovers validates the narrower selector vocabulary Tailscale
+// permits in autoApprovers.routes and autoApprovers.exitNode, then checks legal
+// group and tag selectors as references. The route keys are CIDRs, not
+// references, and are not checked here. services has no authoring command and
+// is retained as the source-style reference walk the pinned client exposes.
+func lintAutoApprovers(policy *tailscale.ACL) []LintFinding {
+	findings := make([]LintFinding, 0)
+	autoApprovers := policy.AutoApprovers
+	if autoApprovers == nil {
+		return findings
+	}
+	for route, approvers := range autoApprovers.Routes {
+		findings = append(findings, autoApproverReferenceFindings(
+			policy, fmt.Sprintf("autoApprovers.routes[%s]", route), approvers)...)
+	}
+	findings = append(findings, autoApproverReferenceFindings(
+		policy, "autoApprovers.exitNode", autoApprovers.ExitNode)...)
+	for service, approvers := range autoApprovers.Services {
+		findings = append(findings, sourceReferenceFindings(
+			policy, fmt.Sprintf("autoApprovers.services[%s]", service), approvers)...)
+	}
+	return findings
+}
+
+func autoApproverReferenceFindings(
+	policy *tailscale.ACL,
+	locator string,
+	approvers []string,
+) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, approver := range approvers {
+		approver = strings.TrimSpace(approver)
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if !isAutoApproverSelector(approver) {
+			findings = append(findings, invalidAutoApproverSelectorFinding(rule, approver))
+			continue
+		}
+		if reason := undefinedReferenceReason(approver, policy); reason != "" {
+			findings = append(findings, undefinedReferenceFinding(rule, approver, reason))
+		}
+	}
+	return findings
+}
+
+func invalidAutoApproverSelectorFinding(rule, selector string) LintFinding {
+	return LintFinding{
+		ID:       LintUndefinedReference,
+		Severity: LintError,
+		Rule:     rule,
+		Value:    selector,
+		Evidence: fmt.Sprintf(
+			"auto-approver selector %q is not a login email, group:, autogroup:, or tag: selector",
+			selector),
+		Remediation: "replace it with a login email, group:, autogroup:, or tag: selector",
+		Trace: []string{
+			fmt.Sprintf("%s uses %q as an auto-approver", rule, selector),
+			"route and exit-node auto-approvers allow only login emails, groups, autogroups, and tags",
+		},
+	}
 }
 
 // emptyGrantReason reports why a grant can never match, or "" if it can. A grant
@@ -643,7 +709,7 @@ func lintUnusedDefinitions(
 			Remediation: "reference " + name + ", or remove the definition",
 			Trace: []string{
 				fmt.Sprintf("%s %s is defined in %s", kind, name, container),
-				"no grant, acl, ssh, group, tagOwner, test, or sshTest references " + name,
+				"no grant, acl, ssh, group, tagOwner, autoApprovers, test, or sshTest references " + name,
 			},
 		})
 	}
@@ -694,10 +760,32 @@ func collectReferences(
 	for _, owners := range policy.TagOwners {
 		addReferences(referenced, owners)
 	}
+	// A legal approver references its group or tag exactly the way a grant
+	// source does, so a definition named only by autoApprovers is used, not
+	// unused. Illegal host and ipset selectors do not count as references merely
+	// because a hand-authored policy placed them in an approver list.
+	if autoApprovers := policy.AutoApprovers; autoApprovers != nil {
+		for _, approvers := range autoApprovers.Routes {
+			addAutoApproverReferences(referenced, approvers)
+		}
+		addAutoApproverReferences(referenced, autoApprovers.ExitNode)
+		for _, approvers := range autoApprovers.Services {
+			addReferences(referenced, approvers)
+		}
+	}
 	addTestReferences(referenced, policy.Tests)
 	addSSHRuleReferences(referenced, sshRules)
 	addSSHTestReferences(referenced, sshTests)
 	return referenced
+}
+
+func addAutoApproverReferences(referenced map[string]bool, approvers []string) {
+	for _, approver := range approvers {
+		approver = strings.TrimSpace(approver)
+		if isAutoApproverSelector(approver) {
+			addReference(referenced, approver)
+		}
+	}
 }
 
 func addReference(referenced map[string]bool, value string) {

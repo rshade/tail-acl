@@ -505,6 +505,84 @@ func countByID(report aclpolicy.LintReport, id string) int {
 	return len(findingsByID(report, id))
 }
 
+// TestEvaluateLintAutoApproverReferences pins the autoApprovers walk of
+// undefined-reference: an approver naming an undefined group/tag or an illegal
+// selector kind silently approves nothing, so it must be reported exactly like
+// a grant's dangling selector. Users, autogroups, and defined groups/tags must
+// not. The reverse coherence matters too — legal definitions referenced only
+// by an approver are used, while an illegal host/ipset does not suppress the
+// corresponding unused-definition finding.
+func TestEvaluateLintAutoApproverReferences(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Groups:    map[string][]string{"group:known": {"alice@example.com"}},
+		Hosts:     map[string]string{"web": "100.64.0.8"},
+		IPSets:    map[string][]string{"ipset:corp": {"10.0.0.0/8"}},
+		TagOwners: map[string][]string{"tag:known": {"group:known"}},
+		AutoApprovers: &tailscale.ACLAutoApprovers{
+			Routes: map[string][]string{
+				"10.0.0.0/8": {
+					"group:known",
+					"group:ghost",
+					"web",
+					"ipset:corp",
+					"100.64.0.1",
+				},
+				"192.168.0.0/24": {"tag:ghost"},
+			},
+			ExitNode: []string{
+				"tag:known",
+				"autogroup:admin",
+				"alice@example.com",
+				"10.0.0.0/8",
+			},
+			Services: map[string][]string{"svc:web": {"group:ghostsvc"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := findingsByID(report, aclpolicy.LintUndefinedReference)
+	got := make(map[string]string, len(findings))
+	for _, finding := range findings {
+		got[finding.Rule] = finding.Value
+	}
+	want := map[string]string{
+		"autoApprovers.routes[10.0.0.0/8][1]":     "group:ghost",
+		"autoApprovers.routes[10.0.0.0/8][2]":     "web",
+		"autoApprovers.routes[10.0.0.0/8][3]":     "ipset:corp",
+		"autoApprovers.routes[10.0.0.0/8][4]":     "100.64.0.1",
+		"autoApprovers.routes[192.168.0.0/24][0]": "tag:ghost",
+		"autoApprovers.exitNode[3]":               "10.0.0.0/8",
+		"autoApprovers.services[svc:web][0]":      "group:ghostsvc",
+	}
+	if len(got) != len(want) {
+		t.Errorf("undefined-reference findings = %v, want %v", got, want)
+	}
+	for rule, value := range want {
+		if got[rule] != value {
+			t.Errorf("finding at %q = %q, want %q (all: %v)", rule, got[rule], value, got)
+		}
+	}
+	if got := countByID(report, aclpolicy.LintUnusedGroup); got != 0 {
+		t.Errorf("group referenced only by an approver reported unused: %#v",
+			findingsByID(report, aclpolicy.LintUnusedGroup))
+	}
+	if got := countByID(report, aclpolicy.LintUnusedTag); got != 0 {
+		t.Errorf("tag referenced only by an approver reported unused: %#v",
+			findingsByID(report, aclpolicy.LintUnusedTag))
+	}
+	if got := countByID(report, aclpolicy.LintUnusedHost); got != 1 {
+		t.Errorf("illegal auto-approver host suppressed unused-host: %#v",
+			findingsByID(report, aclpolicy.LintUnusedHost))
+	}
+	if got := countByID(report, aclpolicy.LintUnusedIPSet); got != 1 {
+		t.Errorf("illegal auto-approver ipset suppressed unused-ipset: %#v",
+			findingsByID(report, aclpolicy.LintUnusedIPSet))
+	}
+}
+
 func findingsByID(report aclpolicy.LintReport, id string) []aclpolicy.LintFinding {
 	var matched []aclpolicy.LintFinding
 	for _, finding := range report.Findings {

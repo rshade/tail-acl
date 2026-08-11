@@ -47,6 +47,9 @@ tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments pre
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
 tail-acl --file acl.json posture remove posture:labCompliant
+tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng
+tail-acl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
+tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
 tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
 tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
 tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
@@ -165,6 +168,8 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `host set` | Set a host alias to an address (`--comment`) |
 | `posture set` | Add or replace a posture's expression list (`--comment`) |
 | `posture remove` | Remove a posture definition |
+| `auto-approver add` | Add an `--approver` to a `--route CIDR` approver list or the `--exit-node` list (repeatable, idempotent, merges into an existing route; `--comment`) |
+| `auto-approver remove` | Remove approvers; an emptied route key or `exitNode` member is pruned rather than left as an empty list |
 | `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`; merges by source and never renumbers existing assertion IDs |
 | `test remove` | Remove matching assertions for `--src`, pruning empty keys and entries; may renumber later assertion IDs |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
@@ -320,12 +325,18 @@ Typed edits apply an RFC 6902 patch to either `.json` or `.hujson` input.
 **Comments, key order, and the key's own spelling survive** — a policy authored
 in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
 the last entry from a block empties it rather than deleting the key, so a
-comment attached to that block is not carried out with it.
+comment attached to that block is not carried out with it. One member-level
+exception sharpens that rule for `auto-approver remove`: an approver list that
+empties takes its member with it (the route key under `routes`, or the
+`exitNode` member itself), because `"10.0.0.0/8": []` reads as a
+configured-but-empty approval rather than an absent one — the same rule
+`test remove` applies to emptied assertion keys.
 
-Four of the authoring commands can also **write** a comment. `--comment TEXT`
+Five of the authoring commands can also **write** a comment. `--comment TEXT`
 attaches `// TEXT` to the exact node the command authored: the new `grants`
-element for `grant add`, the added owner element for `tag-owner add`, and the
-`hosts` or `postures` member for `host set` and `posture set`. `TEXT` is one
+element for `grant add`, the added owner element for `tag-owner add`, the
+`hosts` or `postures` member for `host set` and `posture set`, and the route
+or `exitNode` member for `auto-approver add`. `TEXT` is one
 non-empty line — a carriage return or newline is rejected with exit `2` and the
 file is left byte-identical — and the `//` marker is supplied by the CLI.
 
@@ -628,13 +639,13 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 
 | Finding | Severity | Fires when |
 | --- | --- | --- |
-| `undefined-reference` | error | a `src`/`dst` names a `group:`/`tag:`/`ipset:`/host alias that is not defined |
+| `undefined-reference` | error | a `src`/`dst` names an undefined selector, or a route/exit-node auto-approver is unsupported or names an undefined `group:`/`tag:` |
 | `dst-tag-no-owner` | error | a destination `tag:` has no `tagOwners` entry, so no node can carry it |
 | `overbroad-wildcard` | warn | an over-broad `*` (see `-wildcard`) |
 | `broad-rule-untested` | advice | a blanket source reaches a concrete destination on every port, with no posture/via gate and no deny assertion naming that destination |
 | `grant-empty` | warn | a grant has an empty required selector list and can never match |
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
-| `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule |
+| `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
 
 `-severity advice|info|warn|error` (default `warn`) sets the lowest severity that makes
 the run exit `1`; below it the finding is still reported but the run exits `0`.

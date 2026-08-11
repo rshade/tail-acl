@@ -46,6 +46,16 @@
       "usage": "posture remove NAME"
     },
     {
+      "name": "auto-approver add",
+      "summary": "Add auto-approvers for a route or the exit-node list; idempotent and merges into an existing route",
+      "usage": "auto-approver add (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...] [--comment TEXT]"
+    },
+    {
+      "name": "auto-approver remove",
+      "summary": "Remove auto-approvers; an emptied route key or exitNode member is pruned rather than left as an empty list",
+      "usage": "auto-approver remove (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...]"
+    },
+    {
       "name": "merge",
       "summary": "Compile ACL sources in directories into one policy",
       "usage": "merge --dir DIR [--dir DIR ...]"
@@ -172,7 +182,7 @@
   ],
   "lint_findings": [
     {
-      "description": "a src/dst names a group/tag/ipset/host alias that is not defined",
+      "description": "a src/dst names an undefined selector, or a route/exit-node auto-approver is unsupported or undefined",
       "id": "undefined-reference",
       "severity": "error"
     },
