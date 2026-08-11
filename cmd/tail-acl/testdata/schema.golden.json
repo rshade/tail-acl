@@ -93,7 +93,7 @@
     {
       "name": "lint",
       "summary": "Statically lint policy hygiene and broad-rule test coverage (-config currently supports broad-rule-untested allowBroad exclusions)",
-      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]"
+      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] [-strict-scim-groups] [-scim-domains a.com,b.com]"
     },
     {
       "name": "jq",

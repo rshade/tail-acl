@@ -3709,6 +3709,16 @@ func TestLintUsageErrorsAreExitTwo(t *testing.T) {
 		{"-severity", "bogus"},
 		{"-wildcard", "bogus"},
 		{"unexpected-arg"},
+		// -strict-scim-groups errors on every SCIM group, so narrowing the
+		// exemption alongside it expresses no reachable intent. Resolving it
+		// silently would let a CI carve-out added to an existing strict
+		// invocation never take effect.
+		{"-strict-scim-groups", "-scim-domains", "example.com"},
+		// A -scim-domains value that trims to nothing must not fall through to
+		// the empty-list default, which means "exempt every SCIM group" - the
+		// exact opposite of the narrowing that was asked for.
+		{"-scim-domains", ","},
+		{"-scim-domains", "  "},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			t.Parallel()

@@ -177,7 +177,7 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
-| `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`) |
+| `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`, `-scim-domains`, `-strict-scim-groups`) |
 | `jq` | Query the policy with the embedded gojq engine; read-only, NDJSON under `-format human` and enveloped under `-format json` (see [Query a policy](#query-a-policy)) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
@@ -665,6 +665,36 @@ quiet run is never ambiguous between "clean" and "filtered".
 `*` is common and allowed), `any` flags every `*`, and `off` disables it.
 Autogroups are treated as defined by their `autogroup:` prefix alone, so a new
 autogroup Tailscale ships never false-positives as an undefined reference.
+
+IdP/SCIM-synced groups are exempted the same way. A synced group is named
+`group:<name>@<domain>` and resolves at the control plane, so it is never
+present in the policy's local `groups` map; by default `lint` therefore does not
+report `undefined-reference` for a `group:*@*` selector, and instead counts it
+in the summary as `scim_group_refs` (surfaced in the human line as `N scim group
+references`). This is purely a **name-shape heuristic** — the `@` after the
+`group:` prefix, which is illegal in a local group name — so it cannot verify
+that the synced group actually exists or that a device is a member; only the
+credentialed `plan`/`validate` commands consult the control plane. Two flags
+tune it:
+
+- `-scim-domains a.com,b.com` (comma-separated, repeatable) narrows the
+  exemption to groups whose `@domain` suffix is listed (case-insensitive); a
+  SCIM-shaped group in any other domain still reports `undefined-reference`.
+- `-strict-scim-groups` restores the pre-exemption behavior: every group not in
+  the local `groups` map is an `undefined-reference` error, SCIM-shaped or not.
+
+Both halves of the name must be non-empty: `group:eng@` and `group:@corp.com`
+are *not* SCIM-shaped and still report `undefined-reference`. A templated policy
+that emits `group:${TEAM}@${DOMAIN}` with one variable unset produces exactly
+those, and they are hard broken references rather than synced groups.
+
+Two combinations are rejected as usage errors (exit `2`) rather than resolved
+silently, because each fails in the opposite direction to the one intended:
+`-scim-domains` together with `-strict-scim-groups`, which errors on every SCIM
+group and so leaves the narrowing with nothing to do; and a `-scim-domains`
+value that trims to no domains at all, which would fall through to the default
+meaning "exempt every SCIM group" — the widest setting, from a request to
+narrow.
 
 The `broad-rule-untested` advice tier is heuristic, not a declaration that the
 policy is defective. It closes a deny-first authoring loop: lint identifies an

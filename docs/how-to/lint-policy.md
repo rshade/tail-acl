@@ -62,6 +62,24 @@ A policy with nothing to report reads differently, `no policy hygiene findings
 in acl/acl.hujson`, so a quiet run never leaves you guessing whether the policy
 was clean or the threshold was high.
 
+## Keep IdP-synced groups out of the findings
+
+A SCIM/IdP-synced group is named `group:<name>@<domain>` and resolves at the
+control plane, so it never appears in the policy's local `groups` map. `lint`
+exempts that shape from `undefined-reference` by default and reports the count
+instead:
+
+```sh
+tail-acl --file acl/acl.hujson lint                              # exempt, counted
+tail-acl --file acl/acl.hujson lint -scim-domains corp.example   # only this domain
+tail-acl --file acl/acl.hujson lint -strict-scim-groups          # no exemption
+```
+
+The exemption is a name-shape heuristic, so it cannot tell you whether a synced
+group actually exists or who belongs to it — only `plan` and `validate` consult
+the control plane. Both halves must be non-empty, so a templated
+`group:${TEAM}@${DOMAIN}` with an unset variable still reports as broken.
+
 Tune the wildcard check separately with `-wildcard`:
 
 - `any-to-any` (default) flags only a grant whose `src` and `dst` are both `*`
@@ -145,6 +163,11 @@ need the live device inventory, and they belong to `tailnet-audit`.
 
 The discriminator is "does this finding need the live fleet?" If yes, it is
 not a `lint` finding.
+
+The same blindness applies to IdP-synced groups: `lint` recognizes the
+`group:<name>@<domain>` shape but cannot confirm the group exists or that anyone
+is in it. A typo'd synced group inside an exempted domain therefore passes
+`lint` and is caught only by `validate`.
 
 ## Related
 

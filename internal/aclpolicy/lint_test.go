@@ -119,6 +119,100 @@ func TestEvaluateLintReferenceClassification(t *testing.T) {
 	}
 }
 
+// TestEvaluateLintSCIMGroupExemption covers the SCIM/IdP-synced group
+// exemption: a group:<name>@<domain> selector is not present in the local
+// groups map (it resolves at the control plane), so by default it must not
+// produce an undefined-reference finding and must be counted in the summary.
+// Strict mode restores the error, and a domain filter narrows the exemption.
+func TestEvaluateLintSCIMGroupExemption(t *testing.T) {
+	t.Parallel()
+	const scimGroup = "group:contractors@example.com"
+	base := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+	}
+	for _, tc := range []struct {
+		name          string
+		source        string
+		opts          aclpolicy.LintOptions
+		wantErrors    int
+		wantSCIMCount int
+	}{
+		{
+			name:          "default exempts scim group and counts it",
+			source:        scimGroup,
+			wantErrors:    0,
+			wantSCIMCount: 1,
+		},
+		{
+			name:          "strict errors on scim group and does not count it",
+			source:        scimGroup,
+			opts:          aclpolicy.LintOptions{StrictSCIMGroups: true},
+			wantErrors:    1,
+			wantSCIMCount: 0,
+		},
+		{
+			name:          "listed domain is exempt",
+			source:        scimGroup,
+			opts:          aclpolicy.LintOptions{SCIMDomains: []string{"example.com"}},
+			wantErrors:    0,
+			wantSCIMCount: 1,
+		},
+		{
+			name:          "unlisted domain still errors",
+			source:        "group:contractors@other.io",
+			opts:          aclpolicy.LintOptions{SCIMDomains: []string{"example.com"}},
+			wantErrors:    1,
+			wantSCIMCount: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := *base
+			p.Grants = []tailscale.Grant{
+				{Source: []string{tc.source}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+			}
+			report, err := aclpolicy.EvaluateLint(&p, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := countByID(report, aclpolicy.LintUndefinedReference); got != tc.wantErrors {
+				t.Errorf("undefined-reference findings = %d, want %d (%#v)", got, tc.wantErrors, report.Findings)
+			}
+			if report.Summary.SCIMGroupRefs != tc.wantSCIMCount {
+				t.Errorf("Summary.SCIMGroupRefs = %d, want %d", report.Summary.SCIMGroupRefs, tc.wantSCIMCount)
+			}
+		})
+	}
+}
+
+// TestEvaluateLintSCIMGroupCountsDistinct confirms the summary tallies distinct
+// SCIM-shaped selectors, not every occurrence, and that a locally declared
+// group:<name>@<domain> behaves exactly as before (no exemption, no count).
+func TestEvaluateLintSCIMGroupCountsDistinct(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"autogroup:admin"}},
+		Groups:    map[string][]string{"group:local@example.com": {"alice@example.com"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"group:a@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:443"}},
+			{Source: []string{"group:a@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:80"}},
+			{Source: []string{"group:b@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:22"}},
+			// Declared locally: resolves the ordinary way, not a SCIM exemption.
+			{Source: []string{"group:local@example.com"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+		t.Errorf("undefined-reference findings = %d, want 0 (%#v)", got, report.Findings)
+	}
+	if report.Summary.SCIMGroupRefs != 2 {
+		t.Errorf("Summary.SCIMGroupRefs = %d, want 2 (distinct group:a@ and group:b@)", report.Summary.SCIMGroupRefs)
+	}
+}
+
 func TestEvaluateLintPortlessGrantDestinationsResolve(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{

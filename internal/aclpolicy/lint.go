@@ -145,6 +145,13 @@ type LintSummary struct {
 	// Advice is omitted when zero so reports with no advisories retain their
 	// existing JSON shape byte for byte.
 	Advice int `json:"advice,omitempty"`
+	// SCIMGroupRefs counts distinct SCIM/IdP-synced group selectors
+	// (group:<name>@<domain>) that were exempted from undefined-reference
+	// reporting because they resolve at the control plane rather than in the
+	// local groups map. It is omitted when zero so a policy with no such
+	// references retains its existing JSON shape byte for byte, the same
+	// convention as Advice above.
+	SCIMGroupRefs int `json:"scim_group_refs,omitempty"`
 }
 
 // LintReport is the pure, deterministic result of statically linting a policy.
@@ -172,6 +179,16 @@ type LintOptions struct {
 	// AllowBroadDestinations excludes destination selectors that are
 	// intentionally reachable from a blanket source on every port.
 	AllowBroadDestinations []string
+	// StrictSCIMGroups restores the pre-exemption behavior: any group:<name>
+	// not present in the local groups map is an undefined-reference error, even
+	// when it is SCIM-shaped (group:<name>@<domain>). Off by default so
+	// IdP/SCIM-synced groups, which resolve at the control plane, are not
+	// false-positived by the static linter.
+	StrictSCIMGroups bool
+	// SCIMDomains narrows the SCIM-group exemption to selectors whose @domain
+	// suffix is listed (ASCII-case-insensitive). Empty means any group:*@*
+	// selector is treated as SCIM-shaped. Ignored when StrictSCIMGroups is set.
+	SCIMDomains []string
 }
 
 // LintCheck describes one class of lint finding for the machine-readable schema.
@@ -247,13 +264,19 @@ func evaluateLint(
 		wildcard = WildcardAnyToAny
 	}
 
+	linter := &refLinter{
+		policy:   policy,
+		scim:     scimConfig{strict: opts.StrictSCIMGroups, domains: opts.SCIMDomains},
+		scimRefs: make(map[string]bool),
+	}
+
 	findings := make([]LintFinding, 0)
-	findings = append(findings, lintGrants(policy, wildcard)...)
+	findings = append(findings, linter.lintGrants(wildcard)...)
 	findings = append(findings, lintBroadRuleUntested(policy, opts.AllowBroadDestinations)...)
-	findings = append(findings, lintACLs(policy, wildcard)...)
-	findings = append(findings, lintSSHRules(policy, sshRules)...)
-	findings = append(findings, lintSSHTests(policy, sshTests)...)
-	findings = append(findings, lintAutoApprovers(policy)...)
+	findings = append(findings, linter.lintACLs(wildcard)...)
+	findings = append(findings, linter.lintSSHRules(sshRules)...)
+	findings = append(findings, linter.lintSSHTests(sshTests)...)
+	findings = append(findings, linter.lintAutoApprovers()...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {
 		return LintReport{}, err
@@ -274,6 +297,7 @@ func evaluateLint(
 	})
 
 	report := LintReport{Findings: findings}
+	report.Summary.SCIMGroupRefs = len(linter.scimRefs)
 	for _, finding := range findings {
 		report.Summary.Total++
 		switch finding.Severity {
@@ -290,7 +314,26 @@ func evaluateLint(
 	return report, nil
 }
 
-func lintGrants(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
+// scimConfig captures how the linter treats SCIM/IdP-synced group selectors.
+// It is threaded through the reference-finding chain (rather than held in a
+// global) so the classifiers stay pure and testable.
+type scimConfig struct {
+	strict  bool
+	domains []string
+}
+
+// refLinter carries the state the reference-finding walk needs: the policy it
+// resolves selectors against, the SCIM-group configuration, and an accumulator
+// of the distinct SCIM-shaped selectors that were exempted so the summary can
+// report their count.
+type refLinter struct {
+	policy   *tailscale.ACL
+	scim     scimConfig
+	scimRefs map[string]bool
+}
+
+func (l *refLinter) lintGrants(wildcard WildcardPolicy) []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	for index, grant := range policy.Grants {
 		locator := fmt.Sprintf("grants[%d]", index)
@@ -309,13 +352,14 @@ func lintGrants(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 		}
 		findings = append(findings, wildcardFindings(
 			locator, grant.Source, grant.Destination, wildcard)...)
-		findings = append(findings, sourceReferenceFindings(policy, locator+fieldSrc, grant.Source)...)
-		findings = append(findings, nodeDestinationReferenceFindings(policy, locator+fieldDst, grant.Destination)...)
+		findings = append(findings, l.sourceReferenceFindings(locator+fieldSrc, grant.Source)...)
+		findings = append(findings, l.nodeDestinationReferenceFindings(locator+fieldDst, grant.Destination)...)
 	}
 	return findings
 }
 
-func lintACLs(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
+func (l *refLinter) lintACLs(wildcard WildcardPolicy) []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	for index, entry := range policy.ACLs {
 		locator := fmt.Sprintf("acls[%d]", index)
@@ -329,36 +373,36 @@ func lintACLs(policy *tailscale.ACL, wildcard WildcardPolicy) []LintFinding {
 		}
 		findings = append(findings, wildcardFindings(
 			locator, sources, destinationHosts(destinations), wildcard)...)
-		findings = append(findings, sourceReferenceFindings(policy, locator+sourceField, sources)...)
-		findings = append(findings, destinationReferenceFindings(policy, locator+destinationField, destinations)...)
+		findings = append(findings, l.sourceReferenceFindings(locator+sourceField, sources)...)
+		findings = append(findings, l.destinationReferenceFindings(locator+destinationField, destinations)...)
 	}
 	return findings
 }
 
-func lintSSHRules(policy *tailscale.ACL, rules []tailscale.ACLSSH) []LintFinding {
+func (l *refLinter) lintSSHRules(rules []tailscale.ACLSSH) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, rule := range rules {
 		locator := fmt.Sprintf("ssh[%d]", index)
 		findings = append(findings,
-			sourceReferenceFindings(policy, locator+fieldSrc, rule.Source)...)
+			l.sourceReferenceFindings(locator+fieldSrc, rule.Source)...)
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+fieldDst, rule.Destination)...)
+			l.nodeDestinationReferenceFindings(locator+fieldDst, rule.Destination)...)
 		// Recorder entries are node selectors, just like SSH destinations.
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+".recorder", rule.Recorder)...)
+			l.nodeDestinationReferenceFindings(locator+".recorder", rule.Recorder)...)
 	}
 	return findings
 }
 
-func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
+func (l *refLinter) lintSSHTests(tests []SSHTest) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, test := range tests {
 		locator := fmt.Sprintf("sshTests[%d]", index)
-		if finding, ok := sourceReferenceFinding(policy, locator+fieldSrc, test.Source); ok {
+		if finding, ok := l.sourceReferenceFinding(locator+fieldSrc, test.Source); ok {
 			findings = append(findings, finding)
 		}
 		findings = append(findings,
-			nodeDestinationReferenceFindings(policy, locator+fieldDst, test.Destination)...)
+			l.nodeDestinationReferenceFindings(locator+fieldDst, test.Destination)...)
 	}
 	return findings
 }
@@ -368,27 +412,27 @@ func lintSSHTests(policy *tailscale.ACL, tests []SSHTest) []LintFinding {
 // group and tag selectors as references. The route keys are CIDRs, not
 // references, and are not checked here. services has no authoring command and
 // is retained as the source-style reference walk the pinned client exposes.
-func lintAutoApprovers(policy *tailscale.ACL) []LintFinding {
+func (l *refLinter) lintAutoApprovers() []LintFinding {
+	policy := l.policy
 	findings := make([]LintFinding, 0)
 	autoApprovers := policy.AutoApprovers
 	if autoApprovers == nil {
 		return findings
 	}
 	for route, approvers := range autoApprovers.Routes {
-		findings = append(findings, autoApproverReferenceFindings(
-			policy, fmt.Sprintf("autoApprovers.routes[%s]", route), approvers)...)
+		findings = append(findings, l.autoApproverReferenceFindings(
+			fmt.Sprintf("autoApprovers.routes[%s]", route), approvers)...)
 	}
-	findings = append(findings, autoApproverReferenceFindings(
-		policy, "autoApprovers.exitNode", autoApprovers.ExitNode)...)
+	findings = append(findings, l.autoApproverReferenceFindings(
+		"autoApprovers.exitNode", autoApprovers.ExitNode)...)
 	for service, approvers := range autoApprovers.Services {
-		findings = append(findings, sourceReferenceFindings(
-			policy, fmt.Sprintf("autoApprovers.services[%s]", service), approvers)...)
+		findings = append(findings, l.sourceReferenceFindings(
+			fmt.Sprintf("autoApprovers.services[%s]", service), approvers)...)
 	}
 	return findings
 }
 
-func autoApproverReferenceFindings(
-	policy *tailscale.ACL,
+func (l *refLinter) autoApproverReferenceFindings(
 	locator string,
 	approvers []string,
 ) []LintFinding {
@@ -400,7 +444,7 @@ func autoApproverReferenceFindings(
 			findings = append(findings, invalidAutoApproverSelectorFinding(rule, approver))
 			continue
 		}
-		if reason := undefinedReferenceReason(approver, policy); reason != "" {
+		if reason := l.undefinedReferenceReason(approver); reason != "" {
 			findings = append(findings, undefinedReferenceFinding(rule, approver, reason))
 		}
 	}
@@ -526,29 +570,29 @@ func wildcardSideFinding(locator string) LintFinding {
 	}
 }
 
-func sourceReferenceFindings(policy *tailscale.ACL, locator string, sources []string) []LintFinding {
+func (l *refLinter) sourceReferenceFindings(locator string, sources []string) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, selector := range sources {
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := sourceReferenceFinding(policy, rule, selector); ok {
+		if finding, ok := l.sourceReferenceFinding(rule, selector); ok {
 			findings = append(findings, finding)
 		}
 	}
 	return findings
 }
 
-func sourceReferenceFinding(policy *tailscale.ACL, rule, selector string) (LintFinding, bool) {
+func (l *refLinter) sourceReferenceFinding(rule, selector string) (LintFinding, bool) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" || selector == "*" {
 		return LintFinding{}, false
 	}
-	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+	if reason := l.undefinedReferenceReason(selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
 	return LintFinding{}, false
 }
 
-func destinationReferenceFindings(policy *tailscale.ACL, locator string, destinations []string) []LintFinding {
+func (l *refLinter) destinationReferenceFindings(locator string, destinations []string) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, destination := range destinations {
 		host := destinationHost(destination)
@@ -556,7 +600,7 @@ func destinationReferenceFindings(policy *tailscale.ACL, locator string, destina
 			continue
 		}
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := destinationReferenceFinding(policy, rule, host); ok {
+		if finding, ok := l.destinationReferenceFinding(rule, host); ok {
 			findings = append(findings, finding)
 		}
 	}
@@ -566,8 +610,7 @@ func destinationReferenceFindings(policy *tailscale.ACL, locator string, destina
 // nodeDestinationReferenceFindings validates portless grant dst, SSH dst, and
 // recorder selectors. Unlike ACL network destinations, these selectors have no
 // trailing port to strip.
-func nodeDestinationReferenceFindings(
-	policy *tailscale.ACL,
+func (l *refLinter) nodeDestinationReferenceFindings(
 	locator string,
 	destinations []string,
 ) []LintFinding {
@@ -578,18 +621,18 @@ func nodeDestinationReferenceFindings(
 			continue
 		}
 		rule := fmt.Sprintf("%s[%d]", locator, index)
-		if finding, ok := destinationReferenceFinding(policy, rule, selector); ok {
+		if finding, ok := l.destinationReferenceFinding(rule, selector); ok {
 			findings = append(findings, finding)
 		}
 	}
 	return findings
 }
 
-func destinationReferenceFinding(
-	policy *tailscale.ACL,
+func (l *refLinter) destinationReferenceFinding(
 	rule string,
 	selector string,
 ) (LintFinding, bool) {
+	policy := l.policy
 	if strings.HasPrefix(selector, "tag:") {
 		if _, ok := policy.TagOwners[selector]; !ok {
 			return LintFinding{
@@ -607,7 +650,7 @@ func destinationReferenceFinding(
 		}
 		return LintFinding{}, false
 	}
-	if reason := undefinedReferenceReason(selector, policy); reason != "" {
+	if reason := l.undefinedReferenceReason(selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
 	return LintFinding{}, false
@@ -632,7 +675,8 @@ func undefinedReferenceFinding(rule, value, reason string) LintFinding {
 // defines, or "" if it resolves. Autogroups are treated as defined by prefix
 // alone: Tailscale extends the autogroup set over time, so flagging an unknown
 // autogroup would false-positive the moment a new one ships.
-func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
+func (l *refLinter) undefinedReferenceReason(selector string) string {
+	policy := l.policy
 	switch {
 	case selector == "" || selector == "*":
 		return ""
@@ -641,10 +685,18 @@ func undefinedReferenceReason(selector string, policy *tailscale.ACL) string {
 	case policycore.LooksLikeUser(selector):
 		return ""
 	case strings.HasPrefix(selector, "group:"):
-		if _, ok := policy.Groups[selector]; !ok {
-			return "is not defined in groups"
+		if _, ok := policy.Groups[selector]; ok {
+			return ""
 		}
-		return ""
+		// A group absent from the local map still resolves at the control plane
+		// when it is IdP/SCIM-synced (group:<name>@<domain>). Unless strict mode
+		// is requested, treat a SCIM-shaped selector as resolved and count it,
+		// so the static linter does not false-positive every synced group.
+		if !l.scim.strict && policycore.LooksLikeSCIMGroup(selector, l.scim.domains) {
+			l.scimRefs[selector] = true
+			return ""
+		}
+		return "is not defined in groups"
 	case strings.HasPrefix(selector, "tag:"):
 		if _, ok := policy.TagOwners[selector]; !ok {
 			return "is not declared in tagOwners"

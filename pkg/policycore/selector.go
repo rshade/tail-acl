@@ -226,3 +226,39 @@ func IsRoleAutogroup(selector string) bool {
 func LooksLikeUser(selector string) bool {
 	return strings.Contains(selector, "@") && !strings.HasPrefix(selector, "group:")
 }
+
+// LooksLikeSCIMGroup reports whether selector names an IdP/SCIM-synced group
+// (group:<name>@<domain>). With no domains, any group:*@* matches; with
+// domains, only those whose @suffix is listed (ASCII-case-insensitive).
+//
+// It is a name-shape heuristic, not a membership check: a SCIM group resolves
+// at the control plane and never appears in a policy's local groups map, so an
+// "@" in the name after the group: prefix is the only local signal available.
+// The "@" is illegal in a local group name, so the two vocabularies cannot
+// collide.
+func LooksLikeSCIMGroup(selector string, domains []string) bool {
+	remainder, ok := strings.CutPrefix(selector, "group:")
+	if !ok {
+		return false
+	}
+	// Both halves must be non-empty. The exemption suppresses an
+	// undefined-reference error, so a selector that is merely "@-shaped" rather
+	// than SCIM-shaped must not qualify: a templated policy that emits
+	// "group:${TEAM}@${DOMAIN}" with one variable unset produces "group:eng@"
+	// or "group:@corp.com", and both are hard undefined references that the
+	// looser test reported as a clean policy.
+	at := strings.LastIndex(remainder, "@")
+	if at <= 0 || at == len(remainder)-1 {
+		return false
+	}
+	if len(domains) == 0 {
+		return true
+	}
+	domain := remainder[at+1:]
+	for _, candidate := range domains {
+		if strings.EqualFold(domain, candidate) {
+			return true
+		}
+	}
+	return false
+}

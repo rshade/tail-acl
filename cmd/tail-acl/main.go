@@ -2238,8 +2238,14 @@ func runLint(
 	return res, nil
 }
 
-// resolveLintOptions validates lint's --severity/--wildcard flags.
-func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
+// resolveLintOptions validates lint's --severity/--wildcard flags and folds the
+// SCIM-group exemption controls (--strict-scim-groups, --scim-domains) into the
+// resulting LintOptions.
+func resolveLintOptions(
+	severityRaw, wildcardRaw string,
+	strictSCIMGroups bool,
+	scimDomainsRaw stringListFlag,
+) (aclpolicy.LintOptions, aclpolicy.LintSeverity, error) {
 	threshold, ok := aclpolicy.ParseLintSeverity(severityRaw)
 	if !ok {
 		return aclpolicy.LintOptions{}, "", usagef(
@@ -2251,7 +2257,29 @@ func resolveLintOptions(severityRaw, wildcardRaw string) (aclpolicy.LintOptions,
 	if !ok {
 		return aclpolicy.LintOptions{}, "", usagef("unknown -wildcard %q; want any-to-any, any, or off", wildcardRaw)
 	}
-	return aclpolicy.LintOptions{Wildcard: wildcardPolicy}, threshold, nil
+	// Both checks below exist because the failure is silent and points the
+	// wrong way: a request to narrow the exemption that quietly widens it, or
+	// a carve-out that quietly does nothing.
+	scimDomains := splitCommaList(scimDomainsRaw)
+	if len(scimDomainsRaw) > 0 {
+		if strictSCIMGroups {
+			return aclpolicy.LintOptions{}, "", usagef(
+				"-scim-domains has no effect with -strict-scim-groups, which errors on every SCIM group; " +
+					"use -scim-domains alone to narrow the exemption",
+			)
+		}
+		if len(scimDomains) == 0 {
+			return aclpolicy.LintOptions{}, "", usagef(
+				"-scim-domains resolved to no domains; an empty list would exempt every SCIM group " +
+					"rather than none, so it is rejected instead of widening the exemption",
+			)
+		}
+	}
+	return aclpolicy.LintOptions{
+		Wildcard:         wildcardPolicy,
+		StrictSCIMGroups: strictSCIMGroups,
+		SCIMDomains:      scimDomains,
+	}, threshold, nil
 }
 
 // newLintResult applies the -severity threshold to the report. The filter lives
@@ -2286,20 +2314,28 @@ func lintMessage(
 	if summary.Advice != 0 {
 		breakdown += fmt.Sprintf(", %d advice", summary.Advice)
 	}
+	scim := ""
+	if summary.SCIMGroupRefs != 0 {
+		noun := "scim group references"
+		if summary.SCIMGroupRefs == 1 {
+			noun = "scim group reference"
+		}
+		scim = fmt.Sprintf("; %d %s", summary.SCIMGroupRefs, noun)
+	}
 	switch {
 	case summary.Total == 0:
-		return fmt.Sprintf("no policy hygiene findings in %s", path)
+		return fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)
 	case reported == summary.Total:
-		return fmt.Sprintf("%d %s: %s", summary.Total, findingNoun(summary.Total), breakdown)
+		return fmt.Sprintf("%d %s: %s%s", summary.Total, findingNoun(summary.Total), breakdown, scim)
 	case reported == 0:
 		return fmt.Sprintf(
-			"no findings at or above %s; %d total: %s (-severity advice shows all)",
-			threshold, summary.Total, breakdown,
+			"no findings at or above %s; %d total: %s%s (-severity advice shows all)",
+			threshold, summary.Total, breakdown, scim,
 		)
 	default:
 		return fmt.Sprintf(
-			"%d %s at or above %s; %d total: %s (-severity advice shows all)",
-			reported, findingNoun(reported), threshold, summary.Total, breakdown,
+			"%d %s at or above %s; %d total: %s%s (-severity advice shows all)",
+			reported, findingNoun(reported), threshold, summary.Total, breakdown, scim,
 		)
 	}
 }
@@ -2593,7 +2629,8 @@ func commandCatalog() []schemaCommand {
 		{
 			cmdLint,
 			lintSummary,
-			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]",
+			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] " +
+				"[-strict-scim-groups] [-scim-domains a.com,b.com]",
 		},
 		{cmdJQ, "Query the policy with the embedded jq engine", "jq PROGRAM"},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},

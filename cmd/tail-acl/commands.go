@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -77,6 +78,22 @@ func newNormalizeCommand(deps *commandDeps) *cobra.Command {
 			return err
 		},
 	}
+}
+
+// splitCommaList flattens a repeatable stringListFlag into a single list,
+// splitting each value on commas and dropping empties, so --scim-domains accepts
+// both "--scim-domains a.com,b.com" and repeated "--scim-domains a.com
+// --scim-domains b.com".
+func splitCommaList(values stringListFlag) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		for part := range strings.SplitSeq(value, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	}
+	return out
 }
 
 func newInitCommand(deps *commandDeps) *cobra.Command {
@@ -422,12 +439,16 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 
 func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	var severity, wildcard, configPath string
+	var strictSCIMGroups bool
+	var scimDomains stringListFlag
 	cmd := &cobra.Command{
 		Use:   cmdLint,
 		Short: lintSummary,
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			lintOpts, threshold, err := resolveLintOptions(severity, wildcard)
+			lintOpts, threshold, err := resolveLintOptions(
+				severity, wildcard, strictSCIMGroups, scimDomains,
+			)
 			if err != nil {
 				return err
 			}
@@ -442,6 +463,10 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 		"over-broad wildcard policy: any-to-any|any|off")
 	cmd.Flags().StringVar(&configPath, "config", "",
 		"HuJSON lint config path (currently broad-rule-untested allowBroad exclusions)")
+	cmd.Flags().BoolVar(&strictSCIMGroups, "strict-scim-groups", false,
+		"error on undeclared SCIM/IdP-synced groups (group:<name>@<domain>) instead of exempting them")
+	cmd.Flags().Var(&scimDomains, "scim-domains",
+		"narrow the SCIM-group exemption to these @domains (comma-separated; may be repeated)")
 	return cmd
 }
 
