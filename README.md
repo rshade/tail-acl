@@ -177,7 +177,7 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
-| `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`, `-scim-domains`, `-strict-scim-groups`) |
+| `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`, `-scim-domains`, `-strict-scim-groups`, `-online-validation`) |
 | `jq` | Query the policy with the embedded gojq engine; read-only, NDJSON under `-format human` and enveloped under `-format json` (see [Query a policy](#query-a-policy)) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
@@ -646,6 +646,8 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `grant-empty` | warn | a grant has an empty required selector list and can never match |
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
+| `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
+| `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |
 
 `-severity advice|info|warn|error` (default `warn`) sets the lowest severity
 `lint` reports and fails on. A finding below the threshold is neither printed
@@ -695,6 +697,33 @@ group and so leaves the narrowing with nothing to do; and a `-scim-domains`
 value that trims to no domains at all, which would fall through to the default
 meaning "exempt every SCIM group" — the widest setting, from a request to
 narrow.
+
+Tailscale Services (`svc:<name>`) are recognized by their `svc:` prefix alone,
+the same way autogroups are. A service is not defined in the policy file — it
+resolves at the control plane (the `vip-services` API) — so a `svc:` selector is
+never an `undefined-reference`, and each distinct one is counted in the summary
+as `svc_refs` (surfaced in the human line as `N svc references`). Services are
+**destination-only**: the control plane rejects a `svc:` on a rule's source
+side, so a `svc:` used as a source is flagged `svc-in-source` (warn) while the
+authoritative rejection still comes from `plan`/`validate`. The offline linter
+cannot verify that a referenced service actually exists — that needs
+credentials. Pass `-online-validation` (with `--tailnet`/`--api-key`) to have
+`lint` list the tailnet's services read-only and emit `svc-unknown` (warn) for
+each `svc:` destination not found. A missing service is a **warning, not an
+error**, because services are late-bound: Tailscale itself validates a policy
+that names a service that does not yet exist. Without credentials,
+`-online-validation` logs a warning to stderr and continues with the offline
+findings only rather than failing. When later extended, the same flag will
+verify group references (already counted as `scim_group_refs`).
+
+Credentials that are present but *rejected* are a different case: a token that
+cannot list services exits `2`, because a check that never ran must not report
+the policy clean. The offline findings are still printed, so a failed online
+check narrows the report rather than emptying it. Note also that
+`-online-validation` only verifies `svc:` selectors in grant and ACL
+destinations and in `tests`; a `svc:` counted in `svc_refs` from an
+`autoApprovers` or `ssh` position is not checked against the tailnet, so the
+count and the coverage are not the same number.
 
 The `broad-rule-untested` advice tier is heuristic, not a declaration that the
 policy is defective. It closes a deny-first authoring loop: lint identifies an

@@ -440,6 +440,7 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	var severity, wildcard, configPath string
 	var strictSCIMGroups bool
+	var online bool
 	var scimDomains stringListFlag
 	cmd := &cobra.Command{
 		Use:   cmdLint,
@@ -452,7 +453,10 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := runLint(ctx, *deps.opts, lintOpts, threshold, configPath, deps.logger())
+			out, err := runLint(
+				ctx, *deps.opts, lintOpts, threshold, configPath,
+				online, deps.httpClient, deps.apiURL, deps.logger(),
+			)
 			*deps.result = out
 			return err
 		},
@@ -467,6 +471,9 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 		"error on undeclared SCIM/IdP-synced groups (group:<name>@<domain>) instead of exempting them")
 	cmd.Flags().Var(&scimDomains, "scim-domains",
 		"narrow the SCIM-group exemption to these @domains (comma-separated; may be repeated)")
+	cmd.Flags().BoolVar(&online, "online-validation", false,
+		"verify svc: (and later group) references exist in the tailnet via the control plane; "+
+			"requires --tailnet/--api-key")
 	return cmd
 }
 

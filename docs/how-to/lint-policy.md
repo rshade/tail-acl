@@ -80,6 +80,29 @@ group actually exists or who belongs to it — only `plan` and `validate` consul
 the control plane. Both halves must be non-empty, so a templated
 `group:${TEAM}@${DOMAIN}` with an unset variable still reports as broken.
 
+## Check Tailscale Services
+
+A Service (`svc:<name>`) resolves at the control plane, so like a synced group
+it is never an `undefined-reference` and is counted rather than flagged.
+Services are destination-only — a `svc:` on a rule's source side is a
+`svc-in-source` warning.
+
+```sh
+tail-acl --file acl/acl.hujson lint                     # offline: shape only
+tail-acl --file acl/acl.hujson lint -online-validation  # also: does it exist?
+```
+
+`-online-validation` needs `--tailnet`/`--api-key`. Without them it logs a
+warning to stderr and reports the offline findings alone. With credentials that
+are *rejected*, it exits `2` — a check that never ran must not read as a clean
+policy — while still printing the offline findings.
+
+A service that does not exist yet is a `warn`, not an `error`, because
+Tailscale accepts a policy naming a service you have not created. That matters
+for gating: at the default threshold a `warn` fails the run, so a pipeline that
+creates the policy before the service should pair `-online-validation` with
+`-severity error`.
+
 Tune the wildcard check separately with `-wildcard`:
 
 - `any-to-any` (default) flags only a grant whose `src` and `dst` are both `*`

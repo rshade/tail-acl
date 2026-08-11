@@ -227,6 +227,20 @@ func LooksLikeUser(selector string) bool {
 	return strings.Contains(selector, "@") && !strings.HasPrefix(selector, "group:")
 }
 
+// LooksLikeService reports whether selector names a Tailscale Service
+// (svc:<name>). Services resolve at the control plane (the vip-services API),
+// never in a policy's local definitions, so the name is recognized by its
+// prefix; a static tool has nothing local to resolve the remainder against.
+//
+// The name must be non-empty, for the same reason LooksLikeSCIMGroup requires
+// both halves: recognizing a selector suppresses undefined-reference, so a bare
+// "svc:" would be declared resolvable while naming nothing. A policy rendered
+// from "svc:${SERVICE_NAME}" with the variable unset produces exactly that, and
+// it is a broken destination rather than a service.
+func LooksLikeService(selector string) bool {
+	return len(selector) > len("svc:") && strings.HasPrefix(selector, "svc:")
+}
+
 // LooksLikeSCIMGroup reports whether selector names an IdP/SCIM-synced group
 // (group:<name>@<domain>). With no domains, any group:*@* matches; with
 // domains, only those whose @suffix is listed (ASCII-case-insensitive).

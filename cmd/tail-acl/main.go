@@ -2204,6 +2204,9 @@ func runLint(
 	lintOpts aclpolicy.LintOptions,
 	threshold aclpolicy.LintSeverity,
 	configPath string,
+	online bool,
+	httpClient *http.Client,
+	apiURL string,
 	logger *slog.Logger,
 ) (*result, error) {
 	if configPath != "" {
@@ -2221,6 +2224,19 @@ func runLint(
 	if err != nil {
 		return nil, usagef("could not lint policy: %v", err)
 	}
+
+	// A failed online check must not discard the offline report, which is
+	// already complete: returning a nil result here left stdout empty, so an
+	// operator whose token lacks services-read got exit 2 and no findings at
+	// all, and could not tell a broken policy from a broken token without
+	// re-running. The error is still returned, so exitCode maps the collection
+	// failure to 2 rather than reporting the policy failed on a read that never
+	// happened.
+	var onlineErr error
+	if online {
+		onlineErr = lintOnline(ctx, opts, httpClient, apiURL, &policy.ACL, &report, logger)
+	}
+
 	for _, finding := range report.Findings {
 		for _, decision := range finding.Trace {
 			logger.DebugContext(ctx, "lint decision",
@@ -2229,6 +2245,12 @@ func runLint(
 	}
 
 	res := newLintResult(opts.file, report, threshold)
+	// A collection failure outranks the policy verdict: the report is rendered
+	// either way, but the exit code must say "could not check" rather than
+	// "policy is clean".
+	if onlineErr != nil {
+		return res, onlineErr
+	}
 	// The gate reads the whole report, not the filtered result: the two must
 	// agree, and CountAtLeast applies the same threshold the filter did.
 	if report.CountAtLeast(threshold) > 0 {
@@ -2236,6 +2258,52 @@ func runLint(
 		return res, errLintFindings
 	}
 	return res, nil
+}
+
+// lintOnline augments an offline lint report with control-plane checks that a
+// static run cannot make. It builds the API client directly rather than through
+// apiClient, which hard-fails exit 2 on missing credentials: lint's online
+// validation is opt-in and best-effort, so absent credentials degrade to a
+// logged skip (never swallowed silently, per AX convention 5) and the offline
+// findings stand. A control plane that never answered is a collection failure,
+// surfaced so exitCode maps it to exit 2 rather than reporting the policy failed
+// on a read that never happened.
+func lintOnline(
+	ctx context.Context,
+	opts options,
+	httpClient *http.Client,
+	apiURL string,
+	policy *tailscale.ACL,
+	report *aclpolicy.LintReport,
+	logger *slog.Logger,
+) error {
+	if opts.tailnet == "" || opts.apiKey == "" {
+		logger.WarnContext(ctx, "skipping online validation: missing credentials",
+			"tailnet_set", opts.tailnet != "", "api_key_set", opts.apiKey != "")
+		return nil
+	}
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey:  opts.apiKey,
+		Tailnet: opts.tailnet,
+		BaseURL: apiURL,
+		HTTP:    httpClient,
+	})
+	if err != nil {
+		return err
+	}
+	services, err := tailapi.FetchServices(ctx, client)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(services))
+	for _, service := range services {
+		names = append(names, service.Name)
+	}
+	// Add rather than a local append-and-count: the severity vocabulary belongs
+	// to aclpolicy, and a copy of that switch out here would silently stop
+	// summing to Total the day a severity is added.
+	report.Add(aclpolicy.EvaluateServiceExistence(policy, names)...)
+	return nil
 }
 
 // resolveLintOptions validates lint's --severity/--wildcard flags and folds the
@@ -2314,14 +2382,8 @@ func lintMessage(
 	if summary.Advice != 0 {
 		breakdown += fmt.Sprintf(", %d advice", summary.Advice)
 	}
-	scim := ""
-	if summary.SCIMGroupRefs != 0 {
-		noun := "scim group references"
-		if summary.SCIMGroupRefs == 1 {
-			noun = "scim group reference"
-		}
-		scim = fmt.Sprintf("; %d %s", summary.SCIMGroupRefs, noun)
-	}
+	scim := refNote(summary.SCIMGroupRefs, "scim group reference", "scim group references") +
+		refNote(summary.SvcRefs, "svc reference", "svc references")
 	switch {
 	case summary.Total == 0:
 		return fmt.Sprintf("no policy hygiene findings in %s%s", path, scim)
@@ -2338,6 +2400,20 @@ func lintMessage(
 			reported, findingNoun(reported), threshold, summary.Total, breakdown, scim,
 		)
 	}
+}
+
+// refNote renders a count of references the linter recognized but did not flag.
+// They are not findings, so a semicolon keeps them out of the severity
+// breakdown rather than reading as another bucket that fails to add up.
+func refNote(count int, singular, plural string) string {
+	if count == 0 {
+		return ""
+	}
+	noun := plural
+	if count == 1 {
+		noun = singular
+	}
+	return fmt.Sprintf("; %d %s", count, noun)
 }
 
 func findingNoun(count int) string {
@@ -2630,7 +2706,7 @@ func commandCatalog() []schemaCommand {
 			cmdLint,
 			lintSummary,
 			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] " +
-				"[-strict-scim-groups] [-scim-domains a.com,b.com]",
+				"[-strict-scim-groups] [-scim-domains a.com,b.com] [-online-validation]",
 		},
 		{cmdJQ, "Query the policy with the embedded jq engine", "jq PROGRAM"},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
@@ -2829,11 +2905,13 @@ Exit codes:
      with no errors and no message is a success - the warnings are logged and
      reported, not fatal.
   1  operation or policy assertion failed; check reports not reachable
-  2  usage, input, or collection error. For pull, validate, and plan this also
-     covers a control plane that never judged the policy (expired credentials, rate
-     limiting, a server fault, an unreadable response body, a redirect that
-     dropped the request, or an unreachable API). No verdict is printed for a
-     request that reached no answer.
+  2  usage, input, or collection error. For pull, validate, plan, and lint
+     --online-validation this also covers a control plane that never judged the
+     policy (expired credentials, rate limiting, a server fault, an unreadable
+     response body, a redirect that dropped the request, or an unreachable API).
+     No verdict is printed for a request that reached no answer, except under
+     lint --online-validation, which still reports the offline findings it had
+     already computed.
   10 indeterminate: a rule would have applied but depends on a fact absent from
      the policy file (device posture, via routing, or a role autogroup such as
      autogroup:admin), or a rule overlapping the query could not be parsed.

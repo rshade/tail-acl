@@ -93,7 +93,7 @@
     {
       "name": "lint",
       "summary": "Statically lint policy hygiene and broad-rule test coverage (-config currently supports broad-rule-untested allowBroad exclusions)",
-      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] [-strict-scim-groups] [-scim-domains a.com,b.com]"
+      "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH] [-strict-scim-groups] [-scim-domains a.com,b.com] [-online-validation]"
     },
     {
       "name": "jq",
@@ -230,6 +230,16 @@
       "description": "an ipset is defined but referenced by no rule",
       "id": "unused-ipset",
       "severity": "info"
+    },
+    {
+      "description": "a svc: service selector used as a rule source; Tailscale services are destination-only",
+      "id": "svc-in-source",
+      "severity": "warn"
+    },
+    {
+      "description": "a svc: destination names a service not found in the tailnet (requires --online-validation)",
+      "id": "svc-unknown",
+      "severity": "warn"
     }
   ],
   "name": "tail-acl",

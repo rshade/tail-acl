@@ -213,6 +213,104 @@ func TestEvaluateLintSCIMGroupCountsDistinct(t *testing.T) {
 	}
 }
 
+// TestEvaluateLintServiceInSource asserts the svc: source case on its own: a
+// service is destination-only, so a svc: source must warn (svc-in-source), never
+// error (undefined-reference), and still be counted.
+func TestEvaluateLintServiceInSource(t *testing.T) {
+	t.Parallel()
+	p := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:server": {"autogroup:admin"}},
+		Grants: []tailscale.Grant{
+			{Source: []string{"svc:my-service"}, Destination: []string{"tag:server"}, IP: []string{"tcp:443"}},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(p, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countByID(report, aclpolicy.LintServiceInSource); got != 1 {
+		t.Errorf("svc-in-source findings = %d, want 1 (%#v)", got, report.Findings)
+	}
+	if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+		t.Errorf("undefined-reference findings = %d, want 0 (svc must not double-report)", got)
+	}
+	for _, finding := range findingsByID(report, aclpolicy.LintServiceInSource) {
+		if finding.Severity != aclpolicy.LintWarn {
+			t.Errorf("svc-in-source severity = %q, want warn", finding.Severity)
+		}
+	}
+	if report.Summary.SvcRefs != 1 {
+		t.Errorf("Summary.SvcRefs = %d, want 1", report.Summary.SvcRefs)
+	}
+}
+
+// TestEvaluateLintServiceInDestination asserts a svc: destination is exempt (no
+// undefined-reference) and that the summary tallies distinct services.
+func TestEvaluateLintServiceInDestination(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		destinations [][]string
+		wantSvcRefs  int
+	}{
+		{name: "single dst exempt and counted", destinations: [][]string{{"svc:my-service"}}, wantSvcRefs: 1},
+		{name: "distinct services counted", destinations: [][]string{{"svc:a"}, {"svc:b"}}, wantSvcRefs: 2},
+		{name: "same service twice counts once", destinations: [][]string{{"svc:a"}, {"svc:a"}}, wantSvcRefs: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			grants := make([]tailscale.Grant, 0, len(tc.destinations))
+			for _, destination := range tc.destinations {
+				grants = append(grants, tailscale.Grant{
+					Source: []string{"autogroup:member"}, Destination: destination, IP: []string{"tcp:443"},
+				})
+			}
+			report, err := aclpolicy.EvaluateLint(&tailscale.ACL{Grants: grants}, aclpolicy.LintOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := countByID(report, aclpolicy.LintUndefinedReference); got != 0 {
+				t.Errorf("undefined-reference findings = %d, want 0 (%#v)", got, report.Findings)
+			}
+			if report.Summary.SvcRefs != tc.wantSvcRefs {
+				t.Errorf("Summary.SvcRefs = %d, want %d", report.Summary.SvcRefs, tc.wantSvcRefs)
+			}
+		})
+	}
+}
+
+// TestEvaluateServiceExistence covers the pure online-validation classifier with
+// a fabricated known-service set and no network. A destination service present
+// in the set is clean; one absent is a svc-unknown warn; a svc: source is not a
+// destination and is never reported by this check; and distinct unknown services
+// are each reported once.
+func TestEvaluateServiceExistence(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Grants: []tailscale.Grant{
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:known"}, IP: []string{"tcp:443"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ghost"}, IP: []string{"tcp:80"}},
+			{Source: []string{"autogroup:member"}, Destination: []string{"svc:ghost"}, IP: []string{"tcp:22"}},
+			// A svc: source is not a destination, so this check never flags it.
+			{Source: []string{"svc:sourceonly"}, Destination: []string{"tag:web"}, IP: []string{"tcp:53"}},
+		},
+	}
+	findings := aclpolicy.EvaluateServiceExistence(policy, []string{"svc:known"})
+	if len(findings) != 1 {
+		t.Fatalf("findings = %#v, want exactly one svc-unknown", findings)
+	}
+	finding := findings[0]
+	if finding.ID != aclpolicy.LintServiceUnknown {
+		t.Errorf("finding ID = %q, want %q", finding.ID, aclpolicy.LintServiceUnknown)
+	}
+	if finding.Severity != aclpolicy.LintWarn {
+		t.Errorf("finding severity = %q, want warn", finding.Severity)
+	}
+	if finding.Value != "svc:ghost" {
+		t.Errorf("finding value = %q, want svc:ghost", finding.Value)
+	}
+}
+
 func TestEvaluateLintPortlessGrantDestinationsResolve(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{

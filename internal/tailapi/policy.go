@@ -130,6 +130,25 @@ func FetchPolicy(ctx context.Context, client *tailscale.Client) (FetchedPolicy, 
 	return FetchedPolicy{HuJSON: []byte(raw.HuJSON), ETag: raw.ETag}, nil
 }
 
+// FetchServices lists every Tailscale Service (vip-services) defined in the
+// tailnet. The returned Service.Name values include the svc: prefix, so a
+// caller can compare policy selectors verbatim.
+//
+// A transport or unreachable failure is wrapped as a
+// [ValidationUnavailableError] so it flows through the same "could not reach
+// the control plane" path as validation — a read that never happened must exit
+// as a collection failure, never as a policy verdict.
+func FetchServices(ctx context.Context, client *tailscale.Client) ([]tailscale.Service, error) {
+	services, err := client.Services().List(ctx)
+	if err != nil {
+		return nil, &ValidationUnavailableError{
+			Message: fmt.Sprintf("listing tailnet services: %v", err),
+			Err:     err,
+		}
+	}
+	return services, nil
+}
+
 // ValidateFile asks Tailscale to validate the policy and run its policy tests.
 func ValidateFile(ctx context.Context, client *tailscale.Client, path string) (ValidationResult, error) {
 	raw, err := aclpolicy.ReadRaw(path)

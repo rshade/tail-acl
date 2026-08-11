@@ -3577,6 +3577,54 @@ func TestLintVerboseTraceGoesToStderr(t *testing.T) {
 
 // TestLintFlags pins the two configurable behaviors: the -severity exit
 // threshold and the -wildcard policy.
+// TestLintOnlineFailureKeepsOfflineFindings pins the rule that a failed
+// control-plane check narrows the report rather than emptying it. Returning a
+// nil result on the collection error left stdout completely blank, so an
+// operator whose token cannot list services got exit 2 and no findings at all
+// and could not tell a broken policy from a broken token. The exit code still
+// has to say "could not check" rather than "policy is clean", so both halves
+// are asserted together.
+func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	// svc: on the source side is an offline finding, so the report is
+	// non-empty before the online check is ever attempted.
+	writeTestPolicy(t, path, `{
+		"tagOwners": {"tag:web": ["autogroup:admin"]},
+		"grants": [{"src": ["svc:bad"], "dst": ["tag:web"], "ip": ["tcp:443"]}]
+	}`)
+
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdLint, "--online-validation"},
+		func(key string) string {
+			switch key {
+			case "TAILSCALE_TAILNET":
+				return "example.com"
+			case "TAILSCALE_API_KEY":
+				return "tskey-test"
+			}
+			return ""
+		},
+		server.Client(),
+		server.URL,
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (collection failure, not a verdict); error %v", code, exitUsage, err)
+	}
+	if !strings.Contains(stdout.String(), "svc-in-source") {
+		t.Errorf("stdout lost the offline findings:\n%s", stdout.String())
+	}
+}
+
 func TestLintFlags(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {

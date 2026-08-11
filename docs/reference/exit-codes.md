@@ -27,6 +27,11 @@ judged the policy exit `2`. Examples include expired credentials, rate limits,
 server faults, unreadable responses, lost request bodies after redirects, and
 an unreachable API.
 
+`lint --online-validation` joins that list: a token that cannot list the
+tailnet's services exits `2` rather than reporting the policy clean. Unlike the
+others it still prints the offline findings it had already computed, so a
+failed online check narrows the report rather than emptying it.
+
 `upload` exits `2` before making a request when its policy-adjacent observation
 state is absent, unreadable, or has no entry for the selected tailnet and the
 operator supplied neither `--if-match` nor `--accept-remote-changes`. A stale

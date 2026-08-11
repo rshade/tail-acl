@@ -127,6 +127,34 @@ func TestLooksLikeUser(t *testing.T) {
 	}
 }
 
+func TestLooksLikeService(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		selector string
+		want     bool
+	}{
+		{name: "service is a service", selector: "svc:my-service", want: true},
+		// Recognizing a selector suppresses undefined-reference, so a bare
+		// prefix naming nothing must not qualify - the same rule the SCIM
+		// heuristic applies to group:@domain and group:name@.
+		{name: "bare prefix is not a service", selector: "svc:", want: false},
+		{name: "group is not a service", selector: "group:x", want: false},
+		{name: "tag is not a service", selector: "tag:web", want: false},
+		{name: "empty is not a service", selector: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := policycore.LooksLikeService(tt.selector); got != tt.want {
+				t.Errorf("LooksLikeService(%q) = %v; want %v", tt.selector, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLooksLikeSCIMGroup(t *testing.T) {
 	t.Parallel()
 

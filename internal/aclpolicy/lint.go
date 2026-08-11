@@ -43,6 +43,8 @@ const (
 	LintUnusedGroup        = "unused-group"
 	LintUnusedHost         = "unused-host"
 	LintUnusedIPSet        = "unused-ipset"
+	LintServiceInSource    = "svc-in-source"
+	LintServiceUnknown     = "svc-unknown"
 )
 
 // WildcardPolicy controls how strictly the overbroad-wildcard check treats "*".
@@ -152,6 +154,13 @@ type LintSummary struct {
 	// references retains its existing JSON shape byte for byte, the same
 	// convention as Advice above.
 	SCIMGroupRefs int `json:"scim_group_refs,omitempty"`
+	// SvcRefs counts distinct svc: (Tailscale Service) selectors that were
+	// exempted from undefined-reference reporting because they resolve at the
+	// control plane (the vip-services API) rather than in the local policy. It
+	// is omitted when zero so a policy with no service references retains its
+	// existing JSON shape byte for byte, the same convention as Advice and
+	// SCIMGroupRefs above.
+	SvcRefs int `json:"svc_refs,omitempty"`
 }
 
 // LintReport is the pure, deterministic result of statically linting a policy.
@@ -161,7 +170,7 @@ type LintReport struct {
 }
 
 // CountAtLeast reports how many findings are at least as severe as threshold.
-func (r LintReport) CountAtLeast(threshold LintSeverity) int {
+func (r *LintReport) CountAtLeast(threshold LintSeverity) int {
 	count := 0
 	for _, finding := range r.Findings {
 		if finding.Severity.AtLeast(threshold) {
@@ -221,6 +230,16 @@ func LintCatalog() []LintCheck {
 		{LintUnusedGroup, LintInfo, "a group is defined but referenced by no rule"},
 		{LintUnusedHost, LintInfo, "a host alias is defined but referenced by no rule"},
 		{LintUnusedIPSet, LintInfo, "an ipset is defined but referenced by no rule"},
+		{
+			LintServiceInSource,
+			LintWarn,
+			"a svc: service selector used as a rule source; Tailscale services are destination-only",
+		},
+		{
+			LintServiceUnknown,
+			LintWarn,
+			"a svc: destination names a service not found in the tailnet (requires --online-validation)",
+		},
 	}
 }
 
@@ -250,6 +269,76 @@ func EvaluatePolicyLint(policy *Policy, opts LintOptions) (LintReport, error) {
 	return evaluateLint(&policy.ACL, policy.sshRules(), policy.SSHTests, opts)
 }
 
+// EvaluateServiceExistence is the pure, network-free classifier behind
+// lint --online-validation: given the set of service names the control plane
+// reports (the vip-services List, whose names include the svc: prefix) it
+// returns a LintWarn svc-unknown finding for each distinct svc: selector used
+// as a destination in the policy that is not among them. A missing service is
+// a warn, not an error, because Tailscale services are late-bound — the control
+// plane itself validates a policy that names one that does not yet exist.
+//
+// It is deliberately kept here, fed a collected snapshot, so it stays golden-
+// and unit-testable with no network. Names are compared verbatim: Service.Name
+// carries the svc: prefix, so no normalization is needed.
+func EvaluateServiceExistence(policy *tailscale.ACL, knownServices []string) []LintFinding {
+	if policy == nil {
+		return nil
+	}
+	known := make(map[string]bool, len(knownServices))
+	for _, name := range knownServices {
+		known[name] = true
+	}
+
+	findings := make([]LintFinding, 0)
+	seen := make(map[string]bool)
+	report := func(locator, selector string) {
+		selector = strings.TrimSpace(selector)
+		if !policycore.LooksLikeService(selector) || known[selector] || seen[selector] {
+			return
+		}
+		seen[selector] = true
+		findings = append(findings, LintFinding{
+			ID:          LintServiceUnknown,
+			Severity:    LintWarn,
+			Rule:        locator,
+			Value:       selector,
+			Evidence:    selector + " is not a service defined in the tailnet",
+			Remediation: "create the service, or correct the reference; services are late-bound, so this is advisory",
+			Trace: []string{
+				locator + " references " + selector,
+				selector + " was not returned by the tailnet's vip-services list",
+			},
+		})
+	}
+
+	for index, grant := range policy.Grants {
+		locator := fmt.Sprintf("grants[%d].dst", index)
+		for position, destination := range grant.Destination {
+			report(fmt.Sprintf("%s[%d]", locator, position), destination)
+		}
+	}
+	for index, entry := range policy.ACLs {
+		locator := fmt.Sprintf("acls[%d].dst", index)
+		for position, destination := range aclDestinations(entry) {
+			report(fmt.Sprintf("%s[%d]", locator, position), destinationHost(destination))
+		}
+	}
+	for index, test := range policy.Tests {
+		locator := fmt.Sprintf("tests[%d]", index)
+		accept := test.Accept
+		if len(accept) == 0 {
+			accept = test.Allow
+		}
+		for position, destination := range accept {
+			report(fmt.Sprintf("%s.accept[%d]", locator, position), destinationHost(destination))
+		}
+		for position, destination := range test.Deny {
+			report(fmt.Sprintf("%s.deny[%d]", locator, position), destinationHost(destination))
+		}
+	}
+	return findings
+}
+
 func evaluateLint(
 	policy *tailscale.ACL,
 	sshRules []tailscale.ACLSSH,
@@ -268,6 +357,7 @@ func evaluateLint(
 		policy:   policy,
 		scim:     scimConfig{strict: opts.StrictSCIMGroups, domains: opts.SCIMDomains},
 		scimRefs: make(map[string]bool),
+		svcRefs:  make(map[string]bool),
 	}
 
 	findings := make([]LintFinding, 0)
@@ -284,34 +374,48 @@ func evaluateLint(
 	findings = append(findings, duplicates...)
 	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
 
-	// Sort into a stable order so the output is deterministic even though the
-	// unused-definition checks iterate over maps.
-	sort.SliceStable(findings, func(i, j int) bool {
-		if findings[i].Rule != findings[j].Rule {
-			return findings[i].Rule < findings[j].Rule
-		}
-		if findings[i].ID != findings[j].ID {
-			return findings[i].ID < findings[j].ID
-		}
-		return findings[i].Value < findings[j].Value
-	})
-
-	report := LintReport{Findings: findings}
+	report := LintReport{}
 	report.Summary.SCIMGroupRefs = len(linter.scimRefs)
+	report.Summary.SvcRefs = len(linter.svcRefs)
+	report.Add(findings...)
+	return report, nil
+}
+
+// Add appends findings, updates the severity counters, and restores the stable
+// order. It exists so a caller that discovers findings after the offline pass -
+// lint's --online-validation is the only one today - cannot drift from the
+// counting and ordering this package already does. Duplicating that switch
+// outside aclpolicy meant a newly added severity would silently produce a
+// Summary whose buckets no longer sum to Total, with no compile error and no
+// failing test to catch it.
+func (r *LintReport) Add(findings ...LintFinding) {
+	r.Findings = append(r.Findings, findings...)
 	for _, finding := range findings {
-		report.Summary.Total++
+		r.Summary.Total++
 		switch finding.Severity {
 		case LintAdvice:
-			report.Summary.Advice++
+			r.Summary.Advice++
 		case LintError:
-			report.Summary.Error++
+			r.Summary.Error++
 		case LintWarn:
-			report.Summary.Warn++
+			r.Summary.Warn++
 		case LintInfo:
-			report.Summary.Info++
+			r.Summary.Info++
 		}
 	}
-	return report, nil
+	// Sorted on every Add rather than once at the end of the offline pass, so
+	// findings appended later stay interleaved by locator instead of trailing
+	// the sorted block. The unused-definition checks iterate over maps, so this
+	// is what makes the output deterministic at all.
+	sort.SliceStable(r.Findings, func(i, j int) bool {
+		if r.Findings[i].Rule != r.Findings[j].Rule {
+			return r.Findings[i].Rule < r.Findings[j].Rule
+		}
+		if r.Findings[i].ID != r.Findings[j].ID {
+			return r.Findings[i].ID < r.Findings[j].ID
+		}
+		return r.Findings[i].Value < r.Findings[j].Value
+	})
 }
 
 // scimConfig captures how the linter treats SCIM/IdP-synced group selectors.
@@ -330,6 +434,10 @@ type refLinter struct {
 	policy   *tailscale.ACL
 	scim     scimConfig
 	scimRefs map[string]bool
+	// svcRefs accumulates the distinct svc: selectors seen in any position, so
+	// the summary can report their count. Services resolve at the control plane,
+	// so a static run only counts them; --online-validation checks existence.
+	svcRefs map[string]bool
 }
 
 func (l *refLinter) lintGrants(wildcard WildcardPolicy) []LintFinding {
@@ -586,6 +694,16 @@ func (l *refLinter) sourceReferenceFinding(rule, selector string) (LintFinding, 
 	if selector == "" || selector == "*" {
 		return LintFinding{}, false
 	}
+	// A svc: selector on the source side is destination-only: the control plane
+	// rejects it outright ("svc:... not valid on the src side of a rule"). Lint
+	// stays advisory — plan/validate give the authoritative rejection — so this
+	// is a warn, not an error, and it must not also route through
+	// undefinedReferenceReason (which the svc: case there exempts anyway) and
+	// double-report. Count it so svc_refs is position-independent.
+	if policycore.LooksLikeService(selector) {
+		l.svcRefs[selector] = true
+		return serviceInSourceFinding(rule, selector), true
+	}
 	if reason := l.undefinedReferenceReason(selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
@@ -656,6 +774,21 @@ func (l *refLinter) destinationReferenceFinding(
 	return LintFinding{}, false
 }
 
+func serviceInSourceFinding(rule, selector string) LintFinding {
+	return LintFinding{
+		ID:          LintServiceInSource,
+		Severity:    LintWarn,
+		Rule:        rule,
+		Value:       selector,
+		Evidence:    selector + " used as a source; Tailscale services are destination-only",
+		Remediation: "move " + selector + " to dst, or correct the reference",
+		Trace: []string{
+			rule + " references " + selector,
+			selector + " is a Tailscale service, which is valid only on the destination side of a rule",
+		},
+	}
+}
+
 func undefinedReferenceFinding(rule, value, reason string) LintFinding {
 	return LintFinding{
 		ID:          LintUndefinedReference,
@@ -706,6 +839,13 @@ func (l *refLinter) undefinedReferenceReason(selector string) string {
 		if _, ok := policy.IPSets[selector]; !ok {
 			return "is not defined in ipsets"
 		}
+		return ""
+	case policycore.LooksLikeService(selector):
+		// A svc: selector names a Tailscale Service, which resolves at the
+		// control plane (the vip-services API) and never in the policy file, so
+		// it is never an undefined-host reference. Count it and exempt it in
+		// every position; --online-validation verifies its existence.
+		l.svcRefs[selector] = true
 		return ""
 	}
 	if isLiteralAddress(selector) {
