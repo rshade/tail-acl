@@ -98,7 +98,44 @@ tail-acl --file acl/acl.generated.json upload     # apply, guarded by plan's ETa
 tail-acl -schema                                   # machine-readable command/flag catalog
 tail-acl --version                                 # version + VCS revision
 tail-acl -format json --file acl.json grant add …  # JSON result envelope on stdout
+
+# Query without an external jq installation:
+tail-acl --file acl.hujson jq '.grants[] | .src'
 ```
+
+### Query a policy
+
+`tail-acl jq PROGRAM` standardizes JSON or HuJSON before evaluating PROGRAM
+with the embedded [gojq](https://github.com/itchyny/gojq) engine. The command
+is read-only and does not provide jq-style in-place editing.
+
+The two output formats differ, because a query's results are the whole result
+rather than a verdict about one:
+
+- `-format human` (the default) writes one bare JSON value per line (NDJSON),
+  with no summary line, so the output pipes straight into line-oriented tools.
+  Values stream as the engine yields them.
+- `-format json` carries the same values under the versioned envelope's
+  `results` key, so an agent that discovered `jq` through `-schema` gets the
+  same machine contract every other command emits. The envelope cannot stream,
+  so the full result set is buffered before anything is written.
+
+That difference is visible when a query fails partway through. Under
+`-format json` nothing reaches stdout; under `-format human` the values
+produced before the error have already been written, and the non-zero exit is
+what marks the stream truncated. Every line emitted is still a complete JSON
+value either way.
+
+A query that matches nothing is a success: it exits `0` with an empty
+`results` array. `tail-acl` deliberately does not inherit jq's own `-e`
+convention, under which an empty or false result sets a non-zero exit — `1`
+here means a policy assertion failed, and overloading it would break every
+caller that branches on the [exit codes](#exit-codes) below.
+
+gojq implements jq-compatible semantics but is not the jq 1.7 binary. Programs
+that depend on implementation-specific extensions should be checked against the
+gojq version pinned in `go.mod`. A malformed program, unreadable or malformed
+policy, or evaluation error exits 2 with the diagnostic on stderr.
 
 ### Bootstrap an existing tailnet
 
@@ -136,6 +173,7 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
 | `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`) |
+| `jq` | Query the policy with the embedded gojq engine; read-only, NDJSON under `-format human` and enveloped under `-format json` (see [Query a policy](#query-a-policy)) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Replace the entire deployed policy with `--file`; defaults `If-Match` to the ETag last observed by `plan`, `pull`, or a successful upload (`--accept-remote-changes` is the explicit opt-out) |

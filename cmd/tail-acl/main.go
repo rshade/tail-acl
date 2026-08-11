@@ -117,6 +117,7 @@ const (
 	cmdTest      = "test"
 	cmdCheck     = "check"
 	cmdLint      = "lint"
+	cmdJQ        = "jq"
 	cmdPull      = "pull"
 	cmdPlan      = "plan"
 	cmdUpload    = "upload"
@@ -266,12 +267,17 @@ type result struct {
 	// Findings is a pointer for the same reason as Assertions: a lint run with a
 	// clean policy still emits "findings": [] rather than dropping the key, while
 	// every other command omits it.
-	Findings    *[]aclpolicy.LintFinding  `json:"findings,omitempty"`
-	LintSummary *aclpolicy.LintSummary    `json:"lint_summary,omitempty"`
-	Validation  *tailapi.ValidationResult `json:"validation,omitempty"`
-	Local       *localTestComponent       `json:"local,omitempty"`
-	Server      *serverTestComponent      `json:"server,omitempty"`
-	Agreement   string                    `json:"agreement,omitempty"`
+	Findings    *[]aclpolicy.LintFinding `json:"findings,omitempty"`
+	LintSummary *aclpolicy.LintSummary   `json:"lint_summary,omitempty"`
+	// Results carries jq's output values, and only jq sets it. The pointer is
+	// the same absent-versus-empty split as Assertions and Findings: a query
+	// that matched nothing still emits "results": [], which a consumer can tell
+	// apart from a command that never ran a query at all.
+	Results    *[]any                    `json:"results,omitempty"`
+	Validation *tailapi.ValidationResult `json:"validation,omitempty"`
+	Local      *localTestComponent       `json:"local,omitempty"`
+	Server     *serverTestComponent      `json:"server,omitempty"`
+	Agreement  string                    `json:"agreement,omitempty"`
 	// adviceFails records whether the resolved -severity threshold makes advisory
 	// findings set a non-zero exit. It shapes the human caveat only, so it stays
 	// out of the JSON envelope: the machine contract already carries severity per
@@ -2384,6 +2390,7 @@ func commandCatalog() []schemaCommand {
 			lintSummary,
 			"lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]",
 		},
+		{cmdJQ, "Query the policy with the embedded jq engine", "jq PROGRAM"},
 		{cmdPull, "Bootstrap a local policy from the live tailnet", "pull [--force]"},
 		{cmdPlan, "Diff the policy against the live tailnet (read-only)", cmdPlan},
 		{cmdUpload, "Upload the policy to the tailnet", "upload [--accept-remote-changes]"},
@@ -2412,7 +2419,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
+		Description:   "Make typed edits to a Tailscale policy file and query, pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
 		Capabilities: schemaCapabilities{
@@ -2451,7 +2458,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl: pull, edit, merge, normalize, validate, test, check, lint, plan, and upload"+
+	fmt.Fprintln(w, "tail-acl: pull, edit, query, merge, normalize, validate, test, check, lint, plan, and upload"+
 		" a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
@@ -2493,6 +2500,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings")
+	fmt.Fprintln(w, "  tail-acl --file acl.hujson jq '.grants[] | .src'    # NDJSON query results")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson")
 	fmt.Fprintln(w, "  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet")

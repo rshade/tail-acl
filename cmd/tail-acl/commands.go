@@ -53,6 +53,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newTestCommand(ctx, deps),
 		newCheckCommand(ctx, deps),
 		newLintCommand(ctx, deps),
+		newJQCommand(ctx, deps),
 		newPullCommand(ctx, deps),
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),

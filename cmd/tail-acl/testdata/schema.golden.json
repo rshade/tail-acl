@@ -86,6 +86,11 @@
       "usage": "lint [-severity advice|info|warn|error] [-wildcard any-to-any|any|off] [-config PATH]"
     },
     {
+      "name": "jq",
+      "summary": "Query the policy with the embedded jq engine",
+      "usage": "jq PROGRAM"
+    },
+    {
       "name": "pull",
       "summary": "Bootstrap a local policy from the live tailnet",
       "usage": "pull [--force]"
@@ -101,7 +106,7 @@
       "usage": "upload [--accept-remote-changes]"
     }
   ],
-  "description": "Make typed edits to a Tailscale policy file and pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
+  "description": "Make typed edits to a Tailscale policy file and query, pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
   "exit_codes": {
     "0": "success or reachable; server validation warnings with no errors and no message are non-fatal; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
     "1": "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",

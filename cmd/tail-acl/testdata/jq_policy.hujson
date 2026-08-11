@@ -1,0 +1,29 @@
+{
+	// Querying must standardize comments and trailing commas first.
+	"grants": [
+		{
+			"src": ["group:dev", "tag:ci"],
+			"dst": ["tag:web"],
+			"ip": ["tcp:443"],
+		},
+	],
+	"nodeAttrs": [
+		{
+			"target": ["autogroup:member"],
+			// App-connector config is freeform per app, so it is where a policy
+			// most plausibly carries a raw number and an explicit null.
+			"app": {
+				"tailscale.com/app-connectors": [
+					{
+						"name": "example",
+						"connectors": ["tag:connector"],
+						// Wider than float64's exact integer range: a decode
+						// without UseNumber rounds this to ...992.
+						"routeID": 9007199254740993,
+						"region": null,
+					},
+				],
+			},
+		},
+	],
+}
