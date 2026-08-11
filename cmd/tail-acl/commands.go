@@ -48,6 +48,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		grant, tagOwner, host, posture,
 		newInitCommand(deps),
 		newMergeCommand(deps),
+		newNormalizeCommand(deps),
 		newValidateCommand(ctx, deps),
 		newTestCommand(ctx, deps),
 		newCheckCommand(ctx, deps),
@@ -56,6 +57,19 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),
 	)
+}
+
+func newNormalizeCommand(deps *commandDeps) *cobra.Command {
+	return &cobra.Command{
+		Use:   cmdNormalize,
+		Short: "Emit the policy as standard JSON for general-purpose JSON tools",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runNormalize(deps.opts.file)
+			*deps.result = out
+			return err
+		},
+	}
 }
 
 func newInitCommand(deps *commandDeps) *cobra.Command {

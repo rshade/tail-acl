@@ -1,5 +1,6 @@
-// Command tail-acl makes typed edits to a Tailscale policy file and can merge,
-// validate, test, check, lint, plan, or upload it with Tailscale's policy-file API.
+// Command tail-acl makes typed edits to a Tailscale policy file and can pull,
+// merge, normalize, validate, test, check, lint, plan, or upload it with
+// Tailscale's policy-file API.
 //
 // Output contract (AX conventions, see ../../../AGENTS.md): the command result is
 // written to stdout — human text by default, or a versioned JSON envelope with
@@ -105,19 +106,20 @@ const (
 const (
 	toolName = "tail-acl"
 
-	cmdGrant    = "grant"
-	cmdTagOwner = "tag-owner"
-	cmdHost     = "host"
-	cmdPosture  = "posture"
-	cmdInit     = "init"
-	cmdMerge    = "merge"
-	cmdValidate = "validate"
-	cmdTest     = "test"
-	cmdCheck    = "check"
-	cmdLint     = "lint"
-	cmdPull     = "pull"
-	cmdPlan     = "plan"
-	cmdUpload   = "upload"
+	cmdGrant     = "grant"
+	cmdTagOwner  = "tag-owner"
+	cmdHost      = "host"
+	cmdPosture   = "posture"
+	cmdInit      = "init"
+	cmdMerge     = "merge"
+	cmdNormalize = "normalize"
+	cmdValidate  = "validate"
+	cmdTest      = "test"
+	cmdCheck     = "check"
+	cmdLint      = "lint"
+	cmdPull      = "pull"
+	cmdPlan      = "plan"
+	cmdUpload    = "upload"
 
 	subAdd    = "add"
 	subRemove = "remove"
@@ -260,6 +262,7 @@ type result struct {
 	// distinguish zero from unset.
 	SSHTestsSkipped int                    `json:"ssh_tests_skipped,omitempty"`
 	TestSummary     *aclpolicy.TestSummary `json:"test_summary,omitempty"`
+	Policy          json.RawMessage        `json:"policy,omitempty"`
 	// Findings is a pointer for the same reason as Assertions: a lint run with a
 	// clean policy still emits "findings": [] rather than dropping the key, while
 	// every other command omits it.
@@ -603,6 +606,10 @@ func render(w io.Writer, format string, res *result) error {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(res)
+	}
+	if res.Command == cmdNormalize {
+		_, err := w.Write(res.Policy)
+		return err
 	}
 	if res.Diff != "" {
 		if _, err := io.WriteString(w, res.Diff); err != nil {
@@ -1234,6 +1241,17 @@ func runMerge(path string, dirs []string) (*result, error) {
 	res := newResult(cmdMerge, statusOK, fmt.Sprintf("merged %d ACL files into %s", merged, path))
 	res.File = path
 	res.MergedFiles = &merged
+	return res, nil
+}
+
+func runNormalize(path string) (*result, error) {
+	standard, err := aclpolicy.Normalize(path)
+	if err != nil {
+		return nil, usagef("could not normalize policy: %v", err)
+	}
+	res := newResult(cmdNormalize, statusOK, fmt.Sprintf("normalized %s", path))
+	res.File = path
+	res.Policy = json.RawMessage(standard)
 	return res, nil
 }
 
@@ -2339,6 +2357,7 @@ func commandCatalog() []schemaCommand {
 		},
 		{commandPostureRemove, "Remove a posture definition", "posture remove NAME"},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
+		{cmdNormalize, "Emit the policy as standard JSON for general-purpose JSON tools", cmdNormalize},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{
 			cmdTest,
@@ -2393,7 +2412,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 		Name:          toolName,
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		Description:   "Make typed edits to a Tailscale policy file and pull, merge, validate, test, check, lint, plan, or upload it.",
+		Description:   "Make typed edits to a Tailscale policy file and pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
 		Flags:         flags,
 		Commands:      commandCatalog(),
 		Capabilities: schemaCapabilities{
@@ -2432,7 +2451,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl: pull, edit, merge, validate, test, check, lint, plan, and upload"+
+	fmt.Fprintln(w, "tail-acl: pull, edit, merge, normalize, validate, test, check, lint, plan, and upload"+
 		" a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
@@ -2458,6 +2477,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	//nolint:golines // example line needs to be intact
 	fmt.Fprintln(w, "  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal")
+	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json normalize | jq -r 'paths | join(\".\")'")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet")
 	fmt.Fprintln(w, "  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally")
 	fmt.Fprintln(w, "  tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432")

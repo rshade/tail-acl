@@ -1,6 +1,6 @@
 # tail-acl
 
-Compile, validate, test, check, lint, plan, and upload a Tailscale ACL policy.
+Compile, normalize, validate, test, check, lint, plan, and upload a Tailscale ACL policy.
 `tail-acl` makes typed edits to a policy file, deep-merges commented HuJSON
 sources into one strict-JSON policy, runs its native network assertions,
 ad-hoc reachability checks, and static hygiene lints locally, and talks to
@@ -65,6 +65,9 @@ tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp
 # Compile commented HuJSON sources into one strict-JSON policy:
 tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
 
+# Strip HuJSON comments and trailing commas for jq and other JSON tooling:
+tail-acl --file acl/acl.generated.json normalize | jq -r '.'
+
 # Run the policy's top-level tests locally (no credentials or network):
 tail-acl --file acl/acl.generated.json test
 tail-acl -format json --file acl/acl.generated.json test
@@ -128,6 +131,7 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`; merges by source and never renumbers existing assertion IDs |
 | `test remove` | Remove matching assertions for `--src`, pruning empty keys and entries; may renumber later assertion IDs |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
+| `normalize` | Emit `--file` as standard JSON on stdout for `jq`, `gron`, `fx`, and `yq` (read-only) |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
 | `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
@@ -135,6 +139,20 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Replace the entire deployed policy with `--file`; defaults `If-Match` to the ETag last observed by `plan`, `pull`, or a successful upload (`--accept-remote-changes` is the explicit opt-out) |
+
+`normalize` is the bridge from HuJSON to general-purpose JSON tooling: it is
+read-only and emits the bare standard-JSON policy by default, so its output can
+go directly to `jq`, `gron`, `fx`, or `yq`. With `-format json`, it follows the
+CLI's versioned-envelope contract and places that document under the `policy`
+key.
+
+Like every other command, it refuses a policy containing the same object member
+twice rather than emit one. HuJSON resolves a duplicate first-wins while the
+strict-JSON tools downstream resolve it last-wins, so passing the document
+through would answer an operator with the member `tail-acl` itself discards.
+Comments and trailing commas are overwritten with spaces rather than removed,
+which keeps every byte offset aligned with the HuJSON source and makes the two
+diffable against each other.
 
 ### Global flags
 

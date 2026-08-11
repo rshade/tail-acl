@@ -51,6 +51,11 @@
       "usage": "merge --dir DIR [--dir DIR ...]"
     },
     {
+      "name": "normalize",
+      "summary": "Emit the policy as standard JSON for general-purpose JSON tools",
+      "usage": "normalize"
+    },
+    {
       "name": "validate",
       "summary": "Validate the policy via the Tailscale API",
       "usage": "validate"
@@ -96,7 +101,7 @@
       "usage": "upload [--accept-remote-changes]"
     }
   ],
-  "description": "Make typed edits to a Tailscale policy file and pull, merge, validate, test, check, lint, plan, or upload it.",
+  "description": "Make typed edits to a Tailscale policy file and pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
   "exit_codes": {
     "0": "success or reachable; server validation warnings with no errors and no message are non-fatal; test also uses 0 for indeterminate assertions under --indeterminate=ignore",
     "1": "operation or policy assertion failed, not reachable, or test had an unsettleable assertion under --indeterminate=fail",

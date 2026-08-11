@@ -167,6 +167,33 @@ func ReadRaw(path string) ([]byte, error) {
 	return b, nil
 }
 
+// Normalize reads path and returns its contents as standard JSON. HuJSON-only
+// comments and trailing commas are replaced with whitespace, preserving the
+// document's data while making the result consumable by strict JSON tools.
+// The source file is never modified.
+//
+// Duplicate object members are rejected for the reason checkDuplicateMembers
+// gives, sharpened by where this output goes: hujson resolves duplicates
+// first-wins, while encoding/json, jq, and the rest of the strict-JSON tooling
+// this command feeds resolve them last-wins. Emitting the document would answer
+// an operator with the member tail-acl itself discards, so normalize refuses the
+// file exactly as Load does.
+func Normalize(path string) ([]byte, error) {
+	raw, err := ReadRaw(path)
+	if err != nil {
+		return nil, err
+	}
+	document, err := hujson.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err = checkDuplicateMembers(document); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	document.Standardize()
+	return document.Pack(), nil
+}
+
 // Load reads a JSON or HuJSON policy into the local Policy type. Unknown fields
 // are rejected so an edit cannot silently discard policy data that neither the
 // pinned Tailscale client nor the local extensions model. Duplicate object

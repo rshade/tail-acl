@@ -1,0 +1,13 @@
+{
+	// comments and trailing commas must not survive normalization
+	"grants": [
+		{
+			"src": ["tag:web"],
+			"dst": ["*"],
+			"ip": ["tcp:443"],
+		},
+	],
+	"hosts": {
+		"web": "100.64.0.10",
+	},
+}
