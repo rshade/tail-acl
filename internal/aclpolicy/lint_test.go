@@ -1002,3 +1002,37 @@ func findingsByID(report aclpolicy.LintReport, id string) []aclpolicy.LintFindin
 	}
 	return matched
 }
+
+// TestEvaluateLintCountsNodeAttrAndViaReferences pins the two selector fields
+// the unused-definition walk once skipped. The omission was not merely a
+// missed finding: lint reported a live definition as unused and recommended
+// deleting it, and tail-acl's own definition removal would then carry that
+// recommendation out without asking for --force.
+func TestEvaluateLintCountsNodeAttrAndViaReferences(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Groups: map[string][]string{"group:eng": {"alice@example.com"}},
+		IPSets: map[string][]string{"ipset:office": {"10.0.0.0/8"}},
+		NodeAttrs: []tailscale.NodeAttrGrant{
+			{Target: []string{"group:eng"}, Attr: []string{"funnel"}},
+		},
+		Grants: []tailscale.Grant{
+			{
+				Source:      []string{"autogroup:member"},
+				Destination: []string{"tag:web"},
+				IP:          []string{"tcp:443"},
+				Via:         []string{"ipset:office"},
+			},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unused := findingsByID(report, aclpolicy.LintUnusedGroup); len(unused) != 0 {
+		t.Errorf("unused-group findings = %#v, want none for a nodeAttrs target", unused)
+	}
+	if unused := findingsByID(report, aclpolicy.LintUnusedIPSet); len(unused) != 0 {
+		t.Errorf("unused-ipset findings = %#v, want none for a grant via-router", unused)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,11 +40,26 @@ func (d *commandDeps) colorize() bool {
 	return colorEnabled(*d.format, mode, d.stdout, d.getenv)
 }
 
-// addSubcommands registers the leaf commands, grouping the five that share
-// a noun (grant, tag-owner, host, posture, auto-approver) under a parent command.
+// addSubcommands registers the leaf commands, grouping related authoring
+// commands under their noun parent.
 func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps) {
 	grant := &cobra.Command{Use: cmdGrant, Short: "Manage grants", RunE: runParentCommand}
 	grant.AddCommand(newGrantAddCommand(deps), newGrantRemoveCommand(deps))
+
+	group := &cobra.Command{Use: cmdGroup, Short: "Manage group definitions", RunE: runParentCommand}
+	group.AddCommand(
+		newDefinitionAddCommand(deps, aclpolicy.DefinitionGroup),
+		newDefinitionRemoveCommand(deps, aclpolicy.DefinitionGroup),
+	)
+
+	ipset := &cobra.Command{Use: cmdIPSet, Short: "Manage ipset definitions", RunE: runParentCommand}
+	ipset.AddCommand(
+		newDefinitionAddCommand(deps, aclpolicy.DefinitionIPSet),
+		newDefinitionRemoveCommand(deps, aclpolicy.DefinitionIPSet),
+	)
+
+	ssh := &cobra.Command{Use: cmdSSH, Short: "Manage SSH rules", RunE: runParentCommand}
+	ssh.AddCommand(newSSHAddCommand(deps), newSSHRemoveCommand(deps))
 
 	tagOwner := &cobra.Command{Use: cmdTagOwner, Short: "Manage tag owners", RunE: runParentCommand}
 	tagOwner.AddCommand(newTagOwnerAddCommand(deps))
@@ -62,7 +78,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 	autoApprover.AddCommand(newAutoApproverAddCommand(deps), newAutoApproverRemoveCommand(deps))
 
 	root.AddCommand(
-		grant, tagOwner, host, posture, autoApprover,
+		grant, group, ipset, ssh, tagOwner, host, posture, autoApprover,
 		newInitCommand(deps),
 		newMergeCommand(deps),
 		newNormalizeCommand(deps),
@@ -75,6 +91,133 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),
 	)
+}
+
+func newSSHAddCommand(deps *commandDeps) *cobra.Command {
+	var spec sshRuleFlags
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add an SSH rule; selector order is ignored, duplicate rules are a no-op, and check without a period differs from check with one",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runSSHAdd(deps.opts.file, spec.spec(), spec.comment,
+				cmd.Flags().Changed(commentFlagName), spec.overwriteComment)
+			*deps.result = out
+			return err
+		},
+	}
+	registerSSHRuleFlags(cmd, &spec, true)
+	return cmd
+}
+
+func newSSHRemoveCommand(deps *commandDeps) *cobra.Command {
+	var spec sshRuleFlags
+	var index int
+	cmd := &cobra.Command{
+		Use:   subRemove,
+		Short: "Remove an SSH rule by semantic identity or --index",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("index") {
+				if spec.changed(cmd) {
+					return usagef("ssh remove --index cannot be combined with SSH rule fields")
+				}
+				out, err := runSSHRemoveAt(deps.opts.file, index)
+				*deps.result = out
+				return err
+			}
+			out, err := runSSHRemove(deps.opts.file, spec.spec())
+			*deps.result = out
+			return err
+		},
+	}
+	registerSSHRuleFlags(cmd, &spec, false)
+	cmd.Flags().IntVar(&index, "index", -1, "remove the SSH rule at this zero-based index")
+	return cmd
+}
+
+type sshRuleFlags struct {
+	action, checkPeriod                  string
+	source, destination, users, recorder stringListFlag
+	enforceRecorder                      bool
+	comment                              string
+	overwriteComment                     bool
+}
+
+func registerSSHRuleFlags(cmd *cobra.Command, flags *sshRuleFlags, add bool) {
+	cmd.Flags().StringVar(&flags.action, "action", "", "SSH action: accept or check")
+	cmd.Flags().Var(&flags.source, "src", "source selector; may be repeated")
+	cmd.Flags().Var(&flags.destination, "dst", "destination node selector; may be repeated")
+	cmd.Flags().Var(&flags.users, "user", "SSH login name or autogroup; may be repeated")
+	cmd.Flags().Var(&flags.users, "users", "alias for --user; may be repeated")
+	cmd.Flags().Var(&flags.recorder, "recorder", "recorder node selector; may be repeated")
+	cmd.Flags().StringVar(&flags.checkPeriod, "check-period", "",
+		"for action check, re-authorize after a positive DURATION or always; omitted means no period and differs from an explicit period")
+	cmd.Flags().BoolVar(&flags.enforceRecorder, "enforce-recorder", false, "require the recorder for this rule")
+	if add {
+		registerCommentFlags(cmd.Flags(), &flags.comment, &flags.overwriteComment)
+	}
+}
+
+func (f *sshRuleFlags) spec() aclpolicy.SSHRuleSpec {
+	return aclpolicy.SSHRuleSpec{
+		Action: f.action, Source: []string(f.source), Destination: []string(f.destination),
+		Users: []string(f.users), CheckPeriod: f.checkPeriod, CheckPeriodSet: f.checkPeriod != "",
+		Recorder: []string(f.recorder), EnforceRecorder: f.enforceRecorder,
+	}
+}
+
+func (f *sshRuleFlags) changed(cmd *cobra.Command) bool {
+	return slices.ContainsFunc(
+		[]string{"action", "src", "dst", "user", "users", "recorder", "check-period", "enforce-recorder"},
+		cmd.Flags().Changed,
+	)
+}
+
+func newDefinitionAddCommand(deps *commandDeps, kind aclpolicy.DefinitionKind) *cobra.Command {
+	var name, comment string
+	var members stringListFlag
+	var overwriteComment bool
+	memberFlag, memberUsage := "member", "group login or autogroup; may be repeated"
+	if kind == aclpolicy.DefinitionIPSet {
+		memberFlag, memberUsage = "cidr", "CIDR prefix; may be repeated"
+	}
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add members to a " + string(kind) + " definition",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runDefinitionAdd(
+				deps.opts.file, kind, name, []string(members), comment,
+				cmd.Flags().Changed(commentFlagName), overwriteComment,
+			)
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", string(kind)+" definition name ("+string(kind)+":NAME)")
+	cmd.Flags().Var(&members, memberFlag, memberUsage)
+	registerCommentFlags(cmd.Flags(), &comment, &overwriteComment)
+	return cmd
+}
+
+func newDefinitionRemoveCommand(deps *commandDeps, kind aclpolicy.DefinitionKind) *cobra.Command {
+	var name string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   subRemove,
+		Short: "Remove a " + string(kind) + " definition",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			out, err := runDefinitionRemove(deps.opts.file, kind, name, force)
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", string(kind)+" definition name ("+string(kind)+":NAME)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"remove even when policy rules still reference the definition")
+	return cmd
 }
 
 func newNormalizeCommand(deps *commandDeps) *cobra.Command {
@@ -119,8 +262,10 @@ func newInitCommand(deps *commandDeps) *cobra.Command {
 	}
 }
 
-// runParentCommand is RunE for the five grouping commands (grant, tag-owner,
-// host, posture, auto-approver). Without an explicit RunE, cobra treats a command with only
+// runParentCommand is RunE for every noun parent registered by addSubcommands
+// (TestParentCommandsDistinguishBareFromUnknownSubcommand enumerates them, so
+// the set is asserted rather than restated here). Without an explicit RunE,
+// cobra treats a command with only
 // subcommands as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
 // PersistentPreRunE ever run — for *any* leftover args, not just none — so
 // "tail-acl grant bogus" printed help and exited 0 exactly like a bare

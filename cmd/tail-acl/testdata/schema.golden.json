@@ -26,6 +26,36 @@
       "usage": "grant remove --index N"
     },
     {
+      "name": "group add",
+      "summary": "Add login or autogroup members to a group; idempotent and merges into an existing group",
+      "usage": "group add --name group:NAME --member LOGIN [--member LOGIN ...] [--comment TEXT]"
+    },
+    {
+      "name": "group remove",
+      "summary": "Remove a group definition; referenced groups require --force",
+      "usage": "group remove --name group:NAME [--force]"
+    },
+    {
+      "name": "ipset add",
+      "summary": "Add CIDR members to an ipset; idempotent and merges into an existing ipset",
+      "usage": "ipset add --name ipset:NAME --cidr CIDR [--cidr CIDR ...] [--comment TEXT]"
+    },
+    {
+      "name": "ipset remove",
+      "summary": "Remove an ipset definition; referenced ipsets require --force",
+      "usage": "ipset remove --name ipset:NAME [--force]"
+    },
+    {
+      "name": "ssh add",
+      "summary": "Add an SSH rule; selector order is ignored, duplicate rules are a no-op, and check without a period differs from check with one",
+      "usage": "ssh add --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder] [--comment TEXT]"
+    },
+    {
+      "name": "ssh remove",
+      "summary": "Remove an SSH rule by semantic identity or zero-based index; check without a period differs from check with one",
+      "usage": "ssh remove (--index N | --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder])"
+    },
+    {
       "name": "tag-owner add",
       "summary": "Add an owner to a tag",
       "usage": "tag-owner add TAG OWNER [--comment TEXT]"

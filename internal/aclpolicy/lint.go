@@ -1240,7 +1240,8 @@ func lintUnusedDefinitions(
 			Remediation: "reference " + name + ", or remove the definition",
 			Trace: []string{
 				fmt.Sprintf("%s %s is defined in %s", kind, name, container),
-				"no grant, acl, ssh, group, tagOwner, autoApprovers, test, or sshTest references " + name,
+				"no grant, acl, ssh, group, tagOwner, autoApprovers, nodeAttr, test, or sshTest references " +
+					name,
 			},
 		})
 	}
@@ -1280,6 +1281,15 @@ func collectReferences(
 	for _, grant := range policy.Grants {
 		addReferences(referenced, grant.Source)
 		addReferences(referenced, grant.Destination)
+		// via names the subnet routers a grant is routed through, so a
+		// definition reachable only from via is used, not unused.
+		addReferences(referenced, grant.Via)
+	}
+	// A node attribute targets the same selectors a grant source does. Omitting
+	// it reported a live definition as unused and told the operator to delete
+	// it, which tail-acl's own definition removal would then carry out.
+	for _, attr := range policy.NodeAttrs {
+		addReferences(referenced, attr.Target)
 	}
 	for _, entry := range policy.ACLs {
 		addReferences(referenced, aclSources(entry))

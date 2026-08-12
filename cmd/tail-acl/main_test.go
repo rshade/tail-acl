@@ -2577,7 +2577,8 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	// Comment authoring is expressed once as a capability, but an agent reading
 	// the catalog still has to see the flag on every command that accepts it.
 	for _, name := range []string{
-		commandGrantAdd, commandTagOwnerAdd, commandHostSet, commandPostureSet, commandAutoApproverAdd,
+		commandGrantAdd, commandGroupAdd, commandIPSetAdd, commandSSHAdd,
+		commandTagOwnerAdd, commandHostSet, commandPostureSet, commandAutoApproverAdd,
 	} {
 		if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool {
 			return command.Name == name && strings.Contains(command.Usage, "[--comment TEXT]")
@@ -2638,9 +2639,12 @@ func schemaHasDenyFirstTestEdits(commands []schemaCommand) bool {
 	return true
 }
 
-// TestParentCommandsDistinguishBareFromUnknownSubcommand covers all four
-// grouping commands (grant, tag-owner, host, posture) in both the bare-invocation
-// and unknown-subcommand shapes. Without an explicit RunE, cobra treats these
+// TestParentCommandsDistinguishBareFromUnknownSubcommand covers every parent
+// registered by addSubcommands, in both the bare-invocation and
+// unknown-subcommand shapes. The list is deliberately exhaustive rather than
+// representative: a parent added without an entry here is a command whose
+// "tail-acl <noun> bogus" exits 0, which is the exact regression this test
+// exists to catch. Without an explicit RunE, cobra treats these
 // parents as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
 // PersistentPreRunE ever run, for *any* leftover args — not just none — which
 // let "tail-acl grant bogus" print help and exit 0 exactly like a bare
@@ -2649,7 +2653,10 @@ func schemaHasDenyFirstTestEdits(commands []schemaCommand) bool {
 // the fix.
 func TestParentCommandsDistinguishBareFromUnknownSubcommand(t *testing.T) {
 	t.Parallel()
-	nouns := []string{cmdGrant, cmdTagOwner, cmdHost, cmdPosture}
+	nouns := []string{
+		cmdGrant, cmdGroup, cmdIPSet, cmdSSH,
+		cmdTagOwner, cmdHost, cmdPosture, cmdAutoApprover,
+	}
 	for _, noun := range nouns {
 		t.Run(noun+" bare", func(t *testing.T) {
 			t.Parallel()

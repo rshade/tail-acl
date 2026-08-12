@@ -107,6 +107,9 @@ const (
 	toolName = "tail-acl"
 
 	cmdGrant        = "grant"
+	cmdGroup        = "group"
+	cmdIPSet        = "ipset"
+	cmdSSH          = "ssh"
 	cmdTagOwner     = "tag-owner"
 	cmdHost         = "host"
 	cmdPosture      = "posture"
@@ -136,6 +139,12 @@ const (
 
 	commandGrantAdd           = "grant add"
 	commandGrantRemove        = "grant remove"
+	commandGroupAdd           = "group add"
+	commandGroupRemove        = "group remove"
+	commandIPSetAdd           = "ipset add"
+	commandIPSetRemove        = "ipset remove"
+	commandSSHAdd             = "ssh add"
+	commandSSHRemove          = "ssh remove"
 	commandTagOwnerAdd        = "tag-owner add"
 	commandHostSet            = "host set"
 	commandPostureSet         = "posture set"
@@ -862,8 +871,8 @@ func (e *streamEmitter) emit(res *result) error {
 // commentSet distinguishes an unset flag from --comment "": the empty string
 // asks for a comment, and "// " is an edit nobody requested.
 // --overwrite-comment alone is rejected rather than ignored, because doing
-// nothing quietly would read as "the overwrite happened". Shared by all four
-// authoring commands, each of which discovers commentSet from
+// nothing quietly would read as "the overwrite happened". Shared by all
+// typed authoring commands, each of which discovers commentSet from
 // cmd.Flags().Changed(commentFlagName).
 func commentFromFlags(commentSet bool, text string, overwrite bool) (string, bool, error) {
 	if !commentSet {
@@ -1016,6 +1025,203 @@ func grantResult(command, status, message, path string, index int) *result {
 	res.File = path
 	res.GrantIndex = &index
 	return res
+}
+
+func runDefinitionAdd(
+	path string,
+	kind aclpolicy.DefinitionKind,
+	name string,
+	members []string,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.AddDefinition(policy, kind, name, members)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	topLevel := definitionTopLevel(kind)
+	operations := slices.Clone(edit.Operations)
+	if comment != "" {
+		var commentOps []aclpolicy.PatchOperation
+		if edit.Existed {
+			commentOps, err = commentOperations(path, comment, overwriteComment, topLevel, edit.Name)
+		} else {
+			commentOps = []aclpolicy.PatchOperation{commentPatch(comment, overwriteComment, topLevel, edit.Name)}
+		}
+		if err != nil {
+			return nil, err
+		}
+		operations = append(operations, commentOps...)
+	}
+	command := definitionCommand(kind, subAdd)
+	status := statusNoChanges
+	message := fmt.Sprintf("%s %s already has the requested members in %s", kind, edit.Name, path)
+	if len(operations) != 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		message = fmt.Sprintf("updated %s %s in %s", kind, edit.Name, path)
+	}
+	res := newResult(command, status, message)
+	res.File = path
+	return res, nil
+}
+
+func runDefinitionRemove(
+	path string,
+	kind aclpolicy.DefinitionKind,
+	name string,
+	force bool,
+) (*result, error) {
+	canonical, err := normalizeDefinitionName(kind, name)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveDefinition(policy, kind, canonical, force)
+	if err != nil {
+		return nil, err
+	}
+	command := definitionCommand(kind, subRemove)
+	status := statusNoChanges
+	message := fmt.Sprintf("%s %s not present in %s", kind, canonical, path)
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		message = fmt.Sprintf("removed %s %s from %s", kind, canonical, path)
+	}
+	res := newResult(command, status, message)
+	res.File = path
+	return res, nil
+}
+
+func runSSHAdd(
+	path string,
+	spec aclpolicy.SSHRuleSpec,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.AddSSHRule(policy, spec)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	ruleChanged := edit.Changed()
+	if comment != "" {
+		if ruleChanged {
+			edit.Operations = append(edit.Operations, commentPatch(comment, overwriteComment, "ssh", "-"))
+		} else {
+			operations, commentErr := commentOperations(
+				path, comment, overwriteComment, "ssh", strconv.Itoa(edit.RuleIndex),
+			)
+			if commentErr != nil {
+				return nil, commentErr
+			}
+			edit.Operations = operations
+		}
+	}
+	status := statusNoChanges
+	message := fmt.Sprintf("SSH rule already present in %s", path)
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		if ruleChanged {
+			message = fmt.Sprintf("added SSH rule %d to %s", edit.RuleIndex, path)
+		} else {
+			message = fmt.Sprintf("added comment to SSH rule %d in %s", edit.RuleIndex, path)
+		}
+	}
+	res := newResult(commandSSHAdd, status, message)
+	res.File = path
+	return res, nil
+}
+
+func runSSHRemove(path string, spec aclpolicy.SSHRuleSpec) (*result, error) {
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveSSHRule(policy, spec)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	status := statusNoChanges
+	message := fmt.Sprintf("SSH rule not present in %s", path)
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		status = statusOK
+		message = fmt.Sprintf("removed SSH rule(s) from %s", path)
+	}
+	res := newResult(commandSSHRemove, status, message)
+	res.File = path
+	return res, nil
+}
+
+func runSSHRemoveAt(path string, index int) (*result, error) {
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveSSHRuleAt(policy, index)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+		return nil, err
+	}
+	res := newResult(commandSSHRemove, statusOK, fmt.Sprintf("removed SSH rule %d from %s", index, path))
+	res.File = path
+	return res, nil
+}
+
+func normalizeDefinitionName(kind aclpolicy.DefinitionKind, name string) (string, error) {
+	switch kind {
+	case aclpolicy.DefinitionGroup:
+		return aclpolicy.NormalizeGroupName(name)
+	case aclpolicy.DefinitionIPSet:
+		return aclpolicy.NormalizeIPSetName(name)
+	default:
+		return "", fmt.Errorf("unsupported definition kind %q", kind)
+	}
+}
+
+func definitionTopLevel(kind aclpolicy.DefinitionKind) string {
+	if kind == aclpolicy.DefinitionIPSet {
+		return "ipsets"
+	}
+	return "groups"
+}
+
+func definitionCommand(kind aclpolicy.DefinitionKind, subcommand string) string {
+	if kind == aclpolicy.DefinitionIPSet {
+		return cmdIPSet + " " + subcommand
+	}
+	return cmdGroup + " " + subcommand
 }
 
 // runTagOwnerAdd implements "tag-owner add TAG OWNER". args is cobra's
@@ -2866,6 +3072,36 @@ func commandCatalog() []schemaCommand {
 			"grant add --src SRC --dst DST --ip PROTO:PORT [--src-posture posture:NAME] [--comment TEXT]",
 		},
 		{commandGrantRemove, "Remove a grant by zero-based index", "grant remove --index N"},
+		{
+			commandGroupAdd,
+			"Add login or autogroup members to a group; idempotent and merges into an existing group",
+			"group add --name group:NAME --member LOGIN [--member LOGIN ...] [--comment TEXT]",
+		},
+		{
+			commandGroupRemove,
+			"Remove a group definition; referenced groups require --force",
+			"group remove --name group:NAME [--force]",
+		},
+		{
+			commandIPSetAdd,
+			"Add CIDR members to an ipset; idempotent and merges into an existing ipset",
+			"ipset add --name ipset:NAME --cidr CIDR [--cidr CIDR ...] [--comment TEXT]",
+		},
+		{
+			commandIPSetRemove,
+			"Remove an ipset definition; referenced ipsets require --force",
+			"ipset remove --name ipset:NAME [--force]",
+		},
+		{
+			commandSSHAdd,
+			"Add an SSH rule; selector order is ignored, duplicate rules are a no-op, and check without a period differs from check with one",
+			"ssh add --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder] [--comment TEXT]",
+		},
+		{
+			commandSSHRemove,
+			"Remove an SSH rule by semantic identity or zero-based index; check without a period differs from check with one",
+			"ssh remove (--index N | --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder])",
+		},
 		{commandTagOwnerAdd, "Add an owner to a tag", "tag-owner add TAG OWNER [--comment TEXT]"},
 		{commandHostSet, "Set a host alias to an address", "host set NAME ADDRESS [--comment TEXT]"},
 		{
@@ -3048,6 +3284,9 @@ const usageExamples = `
 Examples:
   tail-acl --file acl.json init
   tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
+  tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
+  tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+  tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
   tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
   tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
   tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng --comment "Lab subnet routers"

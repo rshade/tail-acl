@@ -224,7 +224,7 @@ func scanACLRules(entries []tailscale.ACLEntry) []RuleSkip {
 				Reason: "protocol is not a known name or number",
 			})
 		}
-		field, destinations := "dst", entry.Destination
+		field, destinations := policyDestinationField, entry.Destination
 		if len(destinations) == 0 {
 			field, destinations = "ports", entry.Ports
 		}
@@ -593,7 +593,7 @@ func aclAllows(
 	if !sourceMatched && sourceGate == "" {
 		return ruleOutcome{decision: "source did not match"}
 	}
-	if entry.Action != "" && entry.Action != "accept" {
+	if entry.Action != "" && entry.Action != string(TestAccept) {
 		return ruleOutcome{decision: fmt.Sprintf("action %q is not accept", entry.Action)}
 	}
 	protocolGate := ""

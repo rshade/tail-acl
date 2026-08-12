@@ -26,18 +26,32 @@ import (
 // defaultFileMode is applied to policy files that do not already exist.
 const defaultFileMode os.FileMode = 0o644
 
+// policySourceField and policyDestinationField name the two selector members
+// that appear alike in grants, ACL entries, SSH rules, and tests. They are
+// declared once for the package so a reference walk and a merge normalizer
+// cannot disagree about the spelling.
+const (
+	policySourceField      = "src"
+	policyDestinationField = "dst"
+)
+
 // Policy extends the pinned Tailscale client schema with policy-file fields the
 // client does not yet model.
 //
-// SSH shadows the promoted ACL.SSH field so acceptEnv can be preserved.
-// Callers must treat Policy.SSH as the source of truth if SSH authoring is ever
-// added; LoadBytes currently mirrors it into ACL.SSH only for read-only evaluators.
-// Write enforces that rule rather than trusting it — see checkSSHSourceOfTruth.
+// SSH shadows the promoted ACL.SSH field so acceptEnv can be preserved. Policy.SSH
+// remains the lossless source of truth; ACL.SSH is only a read-only evaluator
+// mirror. Typed SSH authoring validates against Policy.SSH but commits through
+// hujson.Patch on the raw document, so it never round-trips this incomplete
+// client shape and cannot drop acceptEnv or sshTests.
 type Policy struct {
 	tailscale.ACL
 
 	SSH      []SSHRule `json:"ssh,omitempty"`
 	SSHTests []SSHTest `json:"sshTests,omitempty"`
+
+	// sshCheckPeriodPresent records syntax that the pinned ACLSSH type collapses
+	// into a zero value. It is used only for semantic SSH edit identity.
+	sshCheckPeriodPresent []bool
 }
 
 // PatchOperation is one comment-preserving policy edit: an RFC 6902 operation,
@@ -227,11 +241,47 @@ func LoadBytes(name string, raw []byte) (*Policy, error) {
 		return nil, err
 	}
 
-	// SSH authoring does not exist, so this one-way copy is safe: Policy.SSH is
-	// the decoded and marshaled source of truth. Keep ACL.SSH populated so a
-	// read-only evaluator handed &policy.ACL never sees a false empty policy.
+	// Keep ACL.SSH populated so a read-only evaluator handed &policy.ACL never
+	// sees a false empty policy. SSH authoring does not marshal this mirror:
+	// its typed validation is followed by a raw hujson.Patch, which preserves
+	// fields the pinned ACLSSH cannot represent, including acceptEnv.
 	policy.ACL.SSH = policy.sshRules()
+	policy.sshCheckPeriodPresent = sshCheckPeriodPresence(document)
 	return &policy, nil
+}
+
+func sshCheckPeriodPresence(document hujson.Value) []bool {
+	object, ok := document.Value.(*hujson.Object)
+	if !ok {
+		return nil
+	}
+	sshName := resolveTopLevelKey(document, "ssh")
+	for i := range object.Members {
+		literal, isLiteral := object.Members[i].Name.Value.(hujson.Literal)
+		if !isLiteral || literal.String() != sshName {
+			continue
+		}
+		array, isArray := object.Members[i].Value.Value.(*hujson.Array)
+		if !isArray {
+			return nil
+		}
+		presence := make([]bool, len(array.Elements))
+		for index := range array.Elements {
+			entry, isEntry := array.Elements[index].Value.(*hujson.Object)
+			if !isEntry {
+				continue
+			}
+			for memberIndex := range entry.Members {
+				name, isName := entry.Members[memberIndex].Name.Value.(hujson.Literal)
+				if isName && strings.EqualFold(name.String(), "checkPeriod") {
+					presence[index] = true
+					break
+				}
+			}
+		}
+		return presence
+	}
+	return nil
 }
 
 // decodeHuJSON standardizes and strictly decodes one already-read HuJSON

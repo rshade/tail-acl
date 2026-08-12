@@ -43,6 +43,12 @@ go build -ldflags "-X main.version=v0.1.0" -o tail-acl ./cmd/tail-acl
 # Typed edits (comments and key order survive in .json and .hujson):
 tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
 tail-acl --file acl.json grant remove --index 0
+tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
+tail-acl --file acl.json group remove --name group:eng --force  # only when orphaning is intentional
+tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+tail-acl --file acl.json ipset remove --name ipset:office --force  # only when orphaning is intentional
+tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
+tail-acl --file acl.json ssh remove --action check --src autogroup:member --dst tag:server --user root --check-period 12h
 tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
@@ -164,6 +170,12 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | --- | --- |
 | `grant add` | Append a grant (`--src`, `--dst`, `--ip`; `--src-posture` optional; repeatable, order-insensitive, idempotent; `--comment`) |
 | `grant remove` | Remove a grant by zero-based `--index` |
+| `group add` | Add repeatable login or `autogroup:` members to `--name group:NAME`; merges and is idempotent (`--comment`) |
+| `group remove` | Remove `--name group:NAME`; refuses referenced groups unless `--force`, naming the referencing sites |
+| `ipset add` | Add repeatable CIDR members to `--name ipset:NAME`; canonicalizes, merges, and is idempotent (`--comment`) |
+| `ipset remove` | Remove `--name ipset:NAME`; refuses referenced ipsets unless `--force`, naming the referencing sites |
+| `ssh add` | Add an SSH rule with `--action accept\|check`, repeatable `--src`, `--dst`, and `--user`, optional `--check-period`, recorder fields, and `--comment`; selector order is ignored and duplicate rules are a no-op |
+| `ssh remove` | Remove an SSH rule by the same semantic fields, or by zero-based `--index`; omission of `--check-period` is distinct from an explicit period |
 | `tag-owner add` | Add an owner to a tag (`--comment`) |
 | `host set` | Set a host alias to an address (`--comment`) |
 | `posture set` | Add or replace a posture's expression list (`--comment`) |
@@ -182,6 +194,16 @@ not merge a fragment into the live policy. Always plan a complete policy first.
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
 | `plan` | Fetch the deployed policy and print a validated unified diff, without applying |
 | `upload` | Replace the entire deployed policy with `--file`; defaults `If-Match` to the ETag last observed by `plan`, `pull`, or a successful upload (`--accept-remote-changes` is the explicit opt-out) |
+
+SSH authoring accepts only the Tailscale actions `accept` and `check`. A
+`check` rule may omit `--check-period`, which leaves the policy member absent;
+an explicit duration (or `always`) is a different rule and is retained as
+such for idempotency and removal. `--check-period` is rejected for `accept`.
+The selector lists are sets for identity, while the first add retains the
+operator's spelling and order in the file. `ssh add` and `ssh remove` patch the
+raw document, so `ssh[].acceptEnv`, `sshTests`, comments, key order, and
+trailing commas are not reserialized through the pinned client's incomplete
+`ACLSSH` type.
 
 `normalize` is the bridge from HuJSON to general-purpose JSON tooling: it is
 read-only and emits the bare standard-JSON policy by default, so its output can
@@ -358,11 +380,12 @@ empties takes its member with it (the route key under `routes`, or the
 configured-but-empty approval rather than an absent one — the same rule
 `test remove` applies to emptied assertion keys.
 
-Five of the authoring commands can also **write** a comment. `--comment TEXT`
+Eight of the authoring commands can also **write** a comment. `--comment TEXT`
 attaches `// TEXT` to the exact node the command authored: the new `grants`
 element for `grant add`, the added owner element for `tag-owner add`, the
-`hosts` or `postures` member for `host set` and `posture set`, and the route
-or `exitNode` member for `auto-approver add`. `TEXT` is one
+`hosts` or `postures` member for `host set` and `posture set`, the `groups` or
+`ipsets` definition for `group add` and `ipset add`, and the route or `exitNode`
+member for `auto-approver add`, or the new SSH rule for `ssh add`. `TEXT` is one
 non-empty line — a carriage return or newline is rejected with exit `2` and the
 file is left byte-identical — and the `//` marker is supplied by the CLI.
 

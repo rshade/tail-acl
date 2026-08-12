@@ -194,7 +194,7 @@ func normalizeSelectorOrder(value any) {
 
 func isUnorderedSelectorField(key string) bool {
 	switch key {
-	case "src", "dst", "ip", "users", "srcPosture", "via":
+	case policySourceField, policyDestinationField, "ip", "users", "srcPosture", "via":
 		return true
 	default:
 		return false

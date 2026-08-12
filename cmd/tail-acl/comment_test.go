@@ -69,6 +69,21 @@ func authoringTargets() []commentTarget {
 			[]string{"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:platform"},
 			[]string{"autoApprovers", "routes", "10.0.0.0/8"},
 		},
+		{
+			commandGroupAdd,
+			[]string{"group", "add", "--name", "group:a", "--member", "platform@example.com"},
+			[]string{"groups", "group:a"},
+		},
+		{
+			commandIPSetAdd,
+			[]string{"ipset", "add", "--name", "ipset:office", "--cidr", "10.0.0.0/8"},
+			[]string{"ipsets", "ipset:office"},
+		},
+		{
+			commandSSHAdd,
+			[]string{"ssh", "add", "--action", "accept", "--src", "tag:app", "--dst", "tag:db", "--user", "root"},
+			[]string{"ssh", "-"},
+		},
 	}
 }
 
