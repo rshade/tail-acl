@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0 (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **tail-acl:** when `-severity` is explicitly set, `lint` filters the findings shown in human output and uses that value as the failure threshold. When the flag is omitted, lint shows all findings and fails on `warn` or `error`. JSON output always retains the complete `findings` array; `lint_summary` counts the whole policy and `lint_severity_threshold` records the resolved threshold. Pass `-severity advice` to show all findings and make advice findings fail the run.
+
+### Features
+
+* **tail-acl:** -severity filters findings, not just exit code
+* **tail-acl:** add normalize command emitting standard JSON
+* **tail-acl:** auto-approver add / remove
+* **tail-acl:** check SCIM group sync and subdomain scope
+* **tail-acl:** colorize human lint output
+* **tail-acl:** embedded jq query engine
+* **tail-acl:** recognize svc: services, add online check
+* **tail-acl:** report all unknown policy keys at once
+* **tail-acl:** typed group, ipset, and ssh authoring
+
+
+### Bug Fixes
+
+* codex review fixes
+* **scripts:** stop sanitize-policy leaking host names
+* **tail-acl:** exempt SCIM groups from undefined-reference
+* **tail-acl:** lint shows all findings unless -severity is set
+
 ## 0.1.0 (2026-08-07)
 
 
