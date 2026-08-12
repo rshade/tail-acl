@@ -189,6 +189,20 @@ go directly to `jq`, `gron`, `fx`, or `yq`. With `-format json`, it follows the
 CLI's versioned-envelope contract and places that document under the `policy`
 key.
 
+Policy-loading commands reject unrecognized top-level keys after reporting all
+of them together. The key catalog is derived from the pinned Tailscale policy
+types; a key that belongs at a nested location names every such location (`routes`
+points to `autoApprovers.routes`, and `src` to each of the five rule objects that
+accept it), and a close top-level typo gets a deterministic `did you mean` hint.
+Key matching folds case the way `encoding/json` does, so the check never rejects
+a spelling the decoder behind it would have accepted. A key it cannot place is
+reported as `not modeled by this build` rather than as an invalid key: Tailscale
+ships policy keys in alpha and beta ahead of GA, so an unmodeled key is
+routinely a real one the pinned client has not caught up to, and the message
+must not read as grounds for deleting live policy. Run `tail-acl --version` for
+the pin. Nested schema errors remain strict, so an edit never silently discards
+data the pinned types do not model.
+
 Like every other command, it refuses a policy containing the same object member
 twice rather than emit one. HuJSON resolves a duplicate first-wins while the
 strict-JSON tools downstream resolve it last-wins, so passing the document

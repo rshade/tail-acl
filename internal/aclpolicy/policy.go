@@ -219,6 +219,9 @@ func LoadBytes(name string, raw []byte) (*Policy, error) {
 	if err = checkDuplicateMembers(document); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	if err = checkUnknownPolicyKeys(document); err != nil {
+		return nil, fmt.Errorf("decoding %s as a Tailscale policy: %w", name, err)
+	}
 	var policy Policy
 	if err = decodeHuJSON(name, raw, "a Tailscale policy", &policy); err != nil {
 		return nil, err
@@ -232,8 +235,15 @@ func LoadBytes(name string, raw []byte) (*Policy, error) {
 }
 
 // decodeHuJSON standardizes and strictly decodes one already-read HuJSON
-// document. Policy and lint-config loading share this path so unknown-field and
-// trailing-value behavior cannot drift between the two local file formats.
+// document. Policy and lint-config loading share this path so trailing-value
+// behavior and the strictness of nested unknown fields cannot drift between the
+// two local file formats.
+//
+// Top-level unknown fields no longer share it: checkUnknownPolicyKeys reports
+// every one of a policy's at once before this runs. LintConfig deliberately
+// does not get that pre-pass -- it has a single top-level key, so the
+// misspelling worth catching there is nested, where both formats still fail
+// through DisallowUnknownFields one field at a time.
 func decodeHuJSON(name string, raw []byte, description string, destination any) error {
 	standard, err := hujson.Standardize(raw)
 	if err != nil {

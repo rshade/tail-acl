@@ -68,6 +68,85 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadReportsAllUnknownTopLevelFields(t *testing.T) {
+	t.Parallel()
+	_, err := aclpolicy.LoadBytes("acl.hujson", []byte(`{
+		"includes": [],
+		"routes": {},
+	}`))
+	if err == nil {
+		t.Fatal("LoadBytes accepted unknown top-level fields")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		`unknown field "includes" (not modeled by this build)`,
+		`unknown field "routes" (known nested Tailscale policy key; use "autoApprovers.routes")`,
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("LoadBytes error = %v, want %q", message, want)
+		}
+	}
+	if strings.Index(message, `unknown field "includes"`) > strings.Index(message, `unknown field "routes"`) {
+		t.Errorf("LoadBytes error = %v, want findings in document order", message)
+	}
+}
+
+func TestLoadSuggestsSimilarTopLevelField(t *testing.T) {
+	t.Parallel()
+	_, err := aclpolicy.LoadBytes("acl.hujson", []byte(`{
+		"autoApprover": {},
+	}`))
+	if err == nil {
+		t.Fatal("LoadBytes accepted a misspelled top-level field")
+	}
+	want := `unknown field "autoApprover" (not modeled by this build; ` +
+		`did you mean "autoApprovers"?)`
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("LoadBytes error = %v, want %q", err, want)
+	}
+}
+
+func TestLoadNamesEveryLocationForAmbiguousNestedField(t *testing.T) {
+	t.Parallel()
+	_, err := aclpolicy.LoadBytes("acl.hujson", []byte(`{
+		"src": [],
+	}`))
+	if err == nil {
+		t.Fatal("LoadBytes accepted a nested-only top-level field")
+	}
+	message := err.Error()
+	want := `unknown field "src" (known nested Tailscale policy key; use one of ` +
+		`"acls[].src", "grants[].src", "sshTests[].src", "ssh[].src", "tests[].src")`
+	if !strings.Contains(message, want) {
+		t.Errorf("LoadBytes error = %v, want %q", message, want)
+	}
+	// A key valid at several locations is still a real policy key. Falling
+	// through to the spelling hint reported "src" as unrecognized and then
+	// proposed "ssh", which is both false and actively misleading.
+	if strings.Contains(message, "not modeled by this build") {
+		t.Errorf("LoadBytes error = %v, want no unmodelled-key claim for a nested key", message)
+	}
+	if strings.Contains(message, "did you mean") {
+		t.Errorf("LoadBytes error = %v, want no spelling hint for a nested key", message)
+	}
+}
+
+func TestLoadAcceptsCaseFoldedTopLevelField(t *testing.T) {
+	t.Parallel()
+	// encoding/json matches struct fields with Unicode simple case folding, so
+	// the unknown-key check must fold the same way or it rejects a policy the
+	// decoder accepts. U+017F LATIN SMALL LETTER LONG S folds to "s".
+	policy, err := aclpolicy.LoadBytes("acl.hujson", []byte(`{
+		"ho\u017Fts": {"srv": "10.0.0.1"},
+	}`))
+	if err != nil {
+		t.Fatalf("LoadBytes rejected a field encoding/json accepts: %v", err)
+	}
+	if got := policy.Hosts["srv"]; got != "10.0.0.1" {
+		t.Errorf("policy.Hosts[srv] = %q, want 10.0.0.1", got)
+	}
+}
+
 func TestLoadPreservesSSHTests(t *testing.T) {
 	t.Parallel()
 	policy, err := aclpolicy.Load(filepath.Join("testdata", "sshtests_policy.hujson"))
@@ -237,8 +316,9 @@ func TestLoadRejectsDuplicateMembers(t *testing.T) {
 			"grants": [{"src": ["group:FIRST"], "dst": ["tag:b"], "ip": ["tcp:1"]}],
 			"grants": [{"src": ["group:SECOND"], "dst": ["tag:b"], "ip": ["tcp:2"]}],
 		}`,
-		"nested":   `{"tagOwners": {"tag:web": ["group:a"], "tag:web": ["group:b"]}}`,
-		"in array": `{"grants": [{"src": ["a"], "src": ["b"], "dst": ["tag:b"], "ip": ["tcp:1"]}]}`,
+		"duplicate before unknown": `{"routes": {}, "routes": {}}`,
+		"nested":                   `{"tagOwners": {"tag:web": ["group:a"], "tag:web": ["group:b"]}}`,
+		"in array":                 `{"grants": [{"src": ["a"], "src": ["b"], "dst": ["tag:b"], "ip": ["tcp:1"]}]}`,
 		"deep in ssh": `{"ssh": [{"action": "accept", "src": ["autogroup:member"],` +
 			` "dst": ["autogroup:self"], "users": ["root"], "users": ["ubuntu"]}]}`,
 	}
