@@ -68,6 +68,175 @@ func TestUploadAndValidateFile(t *testing.T) {
 	}
 }
 
+//nolint:gocognit // the stub covers token authentication and the protected API in one wire-level test.
+func TestOAuthClientCredentialsRequestScopeAndBearerToken(t *testing.T) {
+	t.Parallel()
+	var tokenRequests, apiRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/oauth/token":
+			tokenRequests++
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse token form: %v", err)
+			}
+			id, secret := r.Form.Get("client_id"), r.Form.Get("client_secret")
+			if basicID, basicSecret, ok := r.BasicAuth(); ok {
+				id, secret = basicID, basicSecret
+			}
+			if id != "client-id" || secret != "client-secret" {
+				t.Errorf("token credentials = (%q, %q)", id, secret)
+			}
+			if got := r.Form.Get("scope"); got != tailapi.ScopePolicyFileRead {
+				t.Errorf("requested scope = %q, want %q", got, tailapi.ScopePolicyFileRead)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+		case "/api/v2/tailnet/example.com/acl":
+			apiRequests++
+			if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+				t.Errorf("Authorization = %q, want bearer token", got)
+			}
+			_, _ = io.WriteString(w, `{"grants":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := tailapi.NewClient(tailapi.Config{
+		OAuthClientID:     "client-id",
+		OAuthClientSecret: "client-secret",
+		OAuthScopes:       []string{tailapi.ScopePolicyFileRead},
+		Tailnet:           "example.com",
+		BaseURL:           server.URL,
+		HTTP:              server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tailapi.FetchPolicy(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	if tokenRequests != 1 || apiRequests != 1 {
+		t.Errorf("token/API requests = %d/%d, want 1/1", tokenRequests, apiRequests)
+	}
+}
+
+func TestOAuthCredentialConfigurationIsValidatedWithoutARequest(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name string
+		cfg  tailapi.Config
+		want string
+	}{
+		{
+			name: "partial client",
+			cfg:  tailapi.Config{OAuthClientID: "client-id"},
+			want: "must be supplied together",
+		},
+		{
+			name: "API key and OAuth",
+			cfg: tailapi.Config{
+				APIKey:            "api-key",
+				OAuthClientID:     "client-id",
+				OAuthClientSecret: "client-secret",
+			},
+			want: "mutually exclusive",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := tailapi.NewClient(testCase.cfg)
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("NewClient error = %v, want %q", err, testCase.want)
+			}
+			if strings.Contains(err.Error(), "client-secret") {
+				t.Errorf("NewClient error exposed the client secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestWrapOAuthErrorAttributesScopeOnlyToOAuthAndAlwaysRedacts(t *testing.T) {
+	t.Parallel()
+	const secret = "client-secret"
+	// The control plane's own explanation, which the operator needs and which
+	// happens to echo the credential.
+	forbidden := &tailapi.ValidationUnavailableError{
+		Status:  http.StatusForbidden,
+		Message: "policy file is managed by a GitOps integration; sent by client-secret",
+	}
+	for _, testCase := range []struct {
+		name       string
+		err        error
+		clientID   string
+		wantScope  bool
+		wantDetail string
+	}{
+		{
+			name:       "OAuth 403 names the scope and keeps the server text",
+			err:        forbidden,
+			clientID:   "client-id",
+			wantScope:  true,
+			wantDetail: "managed by a GitOps integration",
+		},
+		{
+			// Without the clientID gate this reported a scope the operator
+			// has no OAuth client to grant, and dropped the one sentence
+			// explaining the actual cause.
+			name:       "API-key 403 is not an OAuth scope failure",
+			err:        forbidden,
+			clientID:   "",
+			wantScope:  false,
+			wantDetail: "managed by a GitOps integration",
+		},
+		{
+			// The redaction path proper: a non-403 error never reaches
+			// OAuthScopeError, so only redactError can remove the secret.
+			name:       "non-403 error is redacted in place",
+			err:        errors.New("oauth2: cannot fetch token: 400 Bad Request\nBody: client-secret"),
+			clientID:   "client-id",
+			wantScope:  false,
+			wantDetail: "cannot fetch token",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			err := tailapi.WrapOAuthError(
+				testCase.err, tailapi.ScopePolicyFileRead, testCase.clientID, secret)
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error exposed OAuth secret: %q", err)
+			}
+			if !strings.Contains(err.Error(), testCase.wantDetail) {
+				t.Errorf("error = %q, want it to retain %q", err, testCase.wantDetail)
+			}
+			var scopeErr *tailapi.OAuthScopeError
+			gotScope := errors.As(err, &scopeErr)
+			if gotScope != testCase.wantScope {
+				t.Fatalf("OAuthScopeError = %v, want %v (err %v)", gotScope, testCase.wantScope, err)
+			}
+			if gotScope && scopeErr.Scope != tailapi.ScopePolicyFileRead {
+				t.Errorf("scope = %q, want %q", scopeErr.Scope, tailapi.ScopePolicyFileRead)
+			}
+		})
+	}
+}
+
+// TestScopeStringsMatchTailscaleVocabulary pins the literal scope strings.
+// A stubbed token endpoint echoes whatever it is sent, so no wire test can
+// catch an invented scope name; Tailscale rejects one at the token endpoint,
+// which makes every request fail rather than just the privileged ones.
+func TestScopeStringsMatchTailscaleVocabulary(t *testing.T) {
+	t.Parallel()
+	if tailapi.ScopePolicyFileRead != "policy_file:read" {
+		t.Errorf("read scope = %q, want policy_file:read", tailapi.ScopePolicyFileRead)
+	}
+	if tailapi.ScopePolicyFile != "policy_file" {
+		t.Errorf("write scope = %q, want policy_file", tailapi.ScopePolicyFile)
+	}
+}
+
 func TestUploadFileReturnsResponseETagAndExactBytes(t *testing.T) {
 	t.Parallel()
 	const policy = "// keep this comment\n{\n\t\"grants\": [],\n}\n"

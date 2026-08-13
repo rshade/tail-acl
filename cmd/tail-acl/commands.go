@@ -630,7 +630,7 @@ func newLintCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			"(comma-separated; may be repeated)")
 	cmd.Flags().BoolVar(&online, "online-validation", false,
 		"check svc: destinations and SCIM group sync against the control plane, read-only "+
-			"(looks up each service, then submits the policy to /acl/validate); requires --tailnet/--api-key")
+			"(looks up each service, then submits the policy to /acl/validate); requires --tailnet and API-key or OAuth credentials")
 	return cmd
 }
 

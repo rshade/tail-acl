@@ -97,7 +97,7 @@ tail-acl --file acl/acl.generated.json lint -severity error   # only report and 
 tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
 tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
 
-# Talk to the tailnet (needs TAILSCALE_API_KEY + TAILSCALE_TAILNET):
+# Talk to the tailnet (needs TAILSCALE_TAILNET plus an API key or OAuth client):
 tail-acl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
 tail-acl --file acl/acl.generated.json validate   # server-side validation
 tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
@@ -163,6 +163,49 @@ ETag that `plan` recorded and refuses if the deployed policy changed afterward.
 
 **Warning:** `upload` replaces the entire deployed policy with `--file`; it does
 not merge a fragment into the live policy. Always plan a complete policy first.
+
+### Control-plane credentials and scopes
+
+The control-plane commands accept either the existing API key or an OAuth
+client-credentials pair. Set the OAuth values with
+`--oauth-client-id` / `--oauth-client-secret` or
+`TAILSCALE_OAUTH_CLIENT_ID` / `TAILSCALE_OAUTH_CLIENT_SECRET`:
+
+| Command | Minimum OAuth scope | Access |
+| --- | --- | --- |
+| `validate` | `policy_file:read` | Read and validate the policy |
+| `pull` | `policy_file:read` | Read the deployed policy |
+| `plan` | `policy_file:read` | Read and validate the deployed policy |
+| `test --watch --validate` | `policy_file:read` | Validate each snapshot |
+| `upload` | `policy_file` | Replace the deployed policy |
+
+The endpoint path is `/acl`, but the scope is not named after it — these are the
+scope strings from Tailscale's
+[trust credentials reference](https://tailscale.com/docs/reference/trust-credentials).
+An unrecognized scope is rejected at the token endpoint, so a wrong name here
+fails every request rather than only the privileged ones.
+
+`lint --online-validation` is the exception. It also reads the `vip-services`
+endpoint, which no published OAuth scope covers, so a scoped OAuth client is
+denied there. Rather than failing the run, `tail-acl` skips the `svc-unknown`
+findings, logs the reason to stderr, and reports everything else — the
+SCIM-group-sync warnings need only `policy_file:read` and still land, as do all
+offline findings. Use `--api-key` when you need `svc-unknown` coverage; an API
+key is unscoped and inherits its creator's permissions, which is why it reaches
+both endpoints.
+
+The client ID and secret must be supplied together. An explicitly supplied
+credential wins over an environment variable of the *other* class, so
+`--oauth-client-id` works in a shell that already exports `TAILSCALE_API_KEY`;
+supplying both classes explicitly is an error, validated before any request.
+The selected OAuth credential class is reported in the result envelope, but
+the client secret is never included in output, logs, or errors. A denied
+request names the scope it may have lacked *and* repeats the control plane's
+own explanation, because an HTTP 403 is not always about scope.
+
+The read-only commands intentionally request only `policy_file:read`; use a
+`policy_file` client only when the local workflow includes `upload`. OAuth
+access tokens are refreshed in memory and are not written to disk.
 
 ### Commands
 
@@ -236,7 +279,9 @@ diffable against each other.
 ### Global flags
 
 `--file` (policy path), `--tailnet` / `--api-key` (default to `TAILSCALE_TAILNET` /
-`TAILSCALE_API_KEY`), `--if-match` (explicit ETag override for `upload`), `-strict` (make local
+`TAILSCALE_API_KEY`), `--oauth-client-id` / `--oauth-client-secret` (default to
+`TAILSCALE_OAUTH_CLIENT_ID` / `TAILSCALE_OAUTH_CLIENT_SECRET`), `--if-match`
+(explicit ETag override for `upload`), `-strict` (make local
 `test`/`check` evaluation reject any unparseable rule),
 `--roster PATH` (resolve role autogroups for `test`/`check`; see
 [Resolving role autogroups](#resolving-role-autogroups)),
@@ -780,7 +825,7 @@ even though `svc_refs` counts every service selector.
 
 The offline linter cannot verify that a traffic-destination service actually
 exists — that needs credentials. Pass `-online-validation` (with
-`--tailnet`/`--api-key`) to have `lint` look up each distinct eligible selector
+`--tailnet` and API-key or OAuth credentials) to have `lint` look up each distinct eligible selector
 read-only through the `vip-services` Get endpoint and emit `svc-unknown` (warn)
 when that exact policy selector returns not found. A missing service is a
 **warning, not an error**, because services are late-bound: Tailscale itself
@@ -865,7 +910,7 @@ yes, it is not a `lint` finding.
 
 `--validate` is legal only with `--watch` and explicitly enables credentialed, read-only network
 access to Tailscale's `/acl/validate` endpoint. It requires `--tailnet`/`TAILSCALE_TAILNET` and
-`--api-key`/`TAILSCALE_API_KEY`; credentials in the environment never change plain `test --watch`.
+an API key or OAuth client; credentials in the environment never change plain `test --watch`.
 Each stable immutable byte snapshot is evaluated locally and submitted unchanged to the server, then
 emitted as one digest-correlated composite human block or NDJSON record. At most one request is
 active and one newest snapshot is pending; newer stable bytes supersede and cancel older work. API

@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	diff "github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
 	"github.com/hexops/gotextdiff/span"
 	"github.com/tailscale/hujson"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
@@ -19,12 +22,117 @@ import (
 
 const DefaultBaseURL = "https://api.tailscale.com"
 
+// Tailscale's OAuth scopes for the policy-file API: the read scope covers GET
+// and validation, the write scope additionally replaces the policy.
+//
+// The endpoint path is /acl but the scopes are not named after it — these are
+// the literal strings from Tailscale's trust-credentials reference, and an
+// invented name like "acl:read" is rejected at the token endpoint rather than
+// downscoped, so the failure lands on every request instead of just the
+// privileged ones.
+const (
+	ScopePolicyFileRead = "policy_file:read"
+	ScopePolicyFile     = "policy_file"
+)
+
 // Config configures the official Tailscale v2 API client.
 type Config struct {
-	APIKey  string
-	Tailnet string
-	BaseURL string
-	HTTP    *http.Client
+	APIKey            string
+	OAuthClientID     string
+	OAuthClientSecret string
+	OAuthScopes       []string
+	Tailnet           string
+	BaseURL           string
+	HTTP              *http.Client
+}
+
+// OAuthScopeError reports an OAuth client that was accepted but is not
+// authorized for the operation's required scope. It unwraps the original error
+// so callers can still classify the HTTP response, and reports that error's
+// text too: the secret is already redacted by the time one is constructed, and
+// a 403 body carries the only remediation the control plane offered. Naming a
+// scope while discarding "policy file is managed by a GitOps integration"
+// sends the operator to fix a credential that was never the problem.
+type OAuthScopeError struct {
+	Scope string
+	Err   error
+}
+
+func (e *OAuthScopeError) Error() string {
+	return fmt.Sprintf("OAuth client may lack the required scope %q: %v", e.Scope, e.Err)
+}
+
+func (e *OAuthScopeError) Unwrap() error { return e.Err }
+
+type redactedError struct {
+	message string
+	err     error
+}
+
+func (e *redactedError) Error() string { return e.message }
+func (e *redactedError) Unwrap() error { return e.err }
+
+// WrapOAuthError removes the client secret from every error string that can
+// reach a caller and, when an OAuth client issued the request, names the scope
+// an authorization failure most likely lacked. The token endpoint reports
+// invalid_scope as a normal OAuth error rather than a Tailscale APIError, so
+// its text is checked as well as the typed status.
+//
+// clientID gates the scope attribution, and that gate is the point: a 403 is
+// not scope-specific. A non-admin API key, a tailnet the credential cannot
+// reach, and a GitOps-managed policy file all return one, so blaming a missing
+// OAuth scope is only ever correct when an OAuth client is what authenticated.
+// Without the gate every API-key 403 in the tool reports a scope the operator
+// does not have and cannot grant.
+func WrapOAuthError(err error, requiredScope, clientID, clientSecret string) error {
+	if err == nil {
+		return nil
+	}
+	redacted := redactError(err, clientSecret)
+	if clientID == "" || !isScopeDenied(err) {
+		return redacted
+	}
+	return &OAuthScopeError{Scope: requiredScope, Err: redacted}
+}
+
+// RedactSecret removes the client secret from an error without attributing a
+// scope. It is the right wrapper for an endpoint no documented scope governs,
+// where naming one would send the operator after the wrong credential.
+func RedactSecret(err error, clientSecret string) error {
+	if err == nil {
+		return nil
+	}
+	return redactError(err, clientSecret)
+}
+
+// IsForbidden reports whether the control plane answered with HTTP 403.
+func IsForbidden(err error) bool { return isForbidden(err) }
+
+func redactError(err error, secret string) error {
+	if secret == "" || !strings.Contains(err.Error(), secret) {
+		return err
+	}
+	return &redactedError{
+		message: strings.ReplaceAll(err.Error(), secret, "[REDACTED]"),
+		err:     err,
+	}
+}
+
+func isForbidden(err error) bool {
+	var apiErr tailscale.APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+		return true
+	}
+	var unavailable *ValidationUnavailableError
+	return errors.As(err, &unavailable) && unavailable.Status == http.StatusForbidden
+}
+
+func isScopeDenied(err error) bool {
+	if isForbidden(err) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "invalid_scope") || strings.Contains(lower, "insufficient_scope")
 }
 
 // Plan describes the validated difference between the deployed policy and a
@@ -59,6 +167,14 @@ type UploadedPolicy struct {
 
 // NewClient constructs the official Tailscale API client.
 func NewClient(config Config) (*tailscale.Client, error) {
+	hasOAuthID := config.OAuthClientID != ""
+	hasOAuthSecret := config.OAuthClientSecret != ""
+	if hasOAuthID != hasOAuthSecret {
+		return nil, errors.New("OAuth client ID and OAuth client secret must be supplied together")
+	}
+	if config.APIKey != "" && hasOAuthID {
+		return nil, errors.New("TAILSCALE_API_KEY and OAuth client credentials are mutually exclusive")
+	}
 	baseURL := config.BaseURL
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
@@ -67,12 +183,62 @@ func NewClient(config Config) (*tailscale.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing Tailscale API URL: %w", err)
 	}
+	var auth tailscale.Auth
+	if hasOAuthID {
+		auth = oauthAuth{
+			clientID:     config.OAuthClientID,
+			clientSecret: config.OAuthClientSecret,
+			scopes:       append([]string(nil), config.OAuthScopes...),
+		}
+	}
 	return &tailscale.Client{
 		APIKey:  config.APIKey,
+		Auth:    auth,
 		Tailnet: config.Tailnet,
 		BaseURL: parsed,
 		HTTP:    config.HTTP,
 	}, nil
+}
+
+// oauthAuth adapts the standard client-credentials implementation to the
+// Tailscale client's Auth interface, and exists rather than using the pinned
+// client's own tailscale.OAuth for one reason: that implementation builds its
+// token source over a bare [context.Background] with no HTTP client, so the
+// token request runs on [http.DefaultClient]. tail-acl documents a 30s bound on
+// "every Tailscale API request" and an interrupt contract for a command that is
+// mid-request; an unbounded token fetch on a transport the caller never
+// configured breaks both, and it is the one request that must succeed before
+// any other can start. Tokens are still refreshed in memory only.
+//
+// If upstream adopts a caller-supplied token context, delete this and use
+// tailscale.OAuth — the fork has no other reason to exist.
+type oauthAuth struct {
+	clientID     string
+	clientSecret string
+	scopes       []string
+}
+
+func (a oauthAuth) HTTPClient(orig *http.Client, baseURL string) *http.Client {
+	config := clientcredentials.Config{
+		ClientID:     a.clientID,
+		ClientSecret: a.clientSecret,
+		Scopes:       a.scopes,
+		TokenURL:     baseURL + "/api/v2/oauth/token",
+	}
+	// orig carries the caller's timeout and transport and has no OAuth
+	// transport of its own, so the token request inherits both without
+	// recursing back through this client. The context stays Background
+	// because it also drives refreshes long after any one request returns.
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, orig)
+	// config.TokenSource already returns a ReuseTokenSource, so it caches the
+	// token until expiry; wrapping it again would allocate nothing and only
+	// suggest to a reader that the inner source is uncached.
+	return &http.Client{
+		Transport:     &oauth2.Transport{Base: orig.Transport, Source: config.TokenSource(tokenCtx)},
+		CheckRedirect: orig.CheckRedirect,
+		Jar:           orig.Jar,
+		Timeout:       orig.Timeout,
+	}
 }
 
 // UploadFile validates path as HuJSON and sets it as the tailnet policy. The v2
@@ -90,8 +256,9 @@ func UploadFile(
 	}
 
 	// Initialize defaults on the supplied client before cloning its public
-	// connection settings. NewClient is the only constructor in this package,
-	// so API-key authentication is the supported path here.
+	// connection settings. The initialized HTTP client already carries the
+	// configured API-key or OAuth transport, so the clone does not reconfigure
+	// authentication.
 	_ = client.PolicyFile()
 	httpClient := *client.HTTP
 	transport := httpClient.Transport

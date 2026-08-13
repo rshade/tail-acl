@@ -181,13 +181,15 @@ const httpTimeout = 30 * time.Second
 const defaultWatchInterval = 500 * time.Millisecond
 
 type options struct {
-	file          string
-	tailnet       string
-	apiKey        string
-	ifMatch       string
-	strict        bool
-	roster        string
-	indeterminate indeterminateOption
+	file              string
+	tailnet           string
+	apiKey            string
+	oauthClientID     string
+	oauthClientSecret string
+	ifMatch           string
+	strict            bool
+	roster            string
+	indeterminate     indeterminateOption
 }
 
 // indeterminateOption tracks whether the global flag was explicitly supplied
@@ -236,7 +238,10 @@ type result struct {
 	// byte-identical to the pre-watch envelope.
 	PolicyDigest string `json:"policy_digest,omitempty"`
 	Tailnet      string `json:"tailnet,omitempty"`
-	ETag         string `json:"etag,omitempty"`
+	// Authentication is emitted only for OAuth so a machine consumer can audit
+	// which credential class was selected without ever receiving the secret.
+	Authentication string `json:"authentication,omitempty"`
+	ETag           string `json:"etag,omitempty"`
 	// AcceptedRemoteChanges is emitted only for upload's explicit concurrency
 	// opt-out, so a machine consumer can audit that the safety guard was
 	// deliberately disabled rather than mistaking it for an ordinary upload.
@@ -441,6 +446,10 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	flags.StringVar(&opts.tailnet, "tailnet", getenv("TAILSCALE_TAILNET"),
 		"tailnet name or ID (default: TAILSCALE_TAILNET)")
 	flags.StringVar(&opts.apiKey, "api-key", "", "Tailscale API access token (default: TAILSCALE_API_KEY)")
+	flags.StringVar(&opts.oauthClientID, "oauth-client-id", "",
+		"OAuth client ID (default: TAILSCALE_OAUTH_CLIENT_ID)")
+	flags.StringVar(&opts.oauthClientSecret, "oauth-client-secret", "",
+		"OAuth client secret (default: TAILSCALE_OAUTH_CLIENT_SECRET)")
 	flags.StringVar(&opts.ifMatch, "if-match", "",
 		"upload: explicit ETag overriding the policy-adjacent observed value")
 	flags.BoolVar(&opts.strict, "strict", false,
@@ -509,9 +518,10 @@ func run(
 		return usageError{errors.New("a command is required")}
 	}
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
-		if opts.apiKey == "" {
-			opts.apiKey = getenv("TAILSCALE_API_KEY")
-		}
+		persistent := root.PersistentFlags()
+		resolveCredentials(&opts, getenv,
+			persistent.Changed("api-key"),
+			persistent.Changed("oauth-client-id") || persistent.Changed("oauth-client-secret"))
 		if format != formatHuman && format != formatJSON {
 			return usagef("unknown -format %q; want human or json", format)
 		}
@@ -693,6 +703,15 @@ func render(w io.Writer, format string, colorize bool, res *result) error {
 		if err := renderLintFindings(
 			w, reportedFindings, aclpolicy.LintSeverity(res.LintThreshold), colorize,
 		); err != nil {
+			return err
+		}
+	}
+	// Human output states the credential class on its own line rather than as a
+	// suffix on Message, because Message is the same field JSON emits: folding
+	// it in there would make the machine envelope's text vary by an orthogonal
+	// fact that already has its own field.
+	if res.Authentication != "" {
+		if _, err := fmt.Fprintln(w, "tail-acl: authenticated with OAuth client credentials"); err != nil {
 			return err
 		}
 	}
@@ -1714,11 +1733,12 @@ func runValidate(
 	apiURL string,
 	logger *slog.Logger,
 ) (*result, error) {
-	client, err := apiClient(opts, httpClient, apiURL)
+	client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFileRead)
 	if err != nil {
 		return nil, err
 	}
 	validation, err := tailapi.ValidateFile(ctx, client, opts.file)
+	err = tailapi.WrapOAuthError(err, tailapi.ScopePolicyFileRead, opts.oauthClientID, opts.oauthClientSecret)
 	status := validationEnvelopeStatus(err)
 	if status == "" {
 		return nil, err
@@ -1734,6 +1754,7 @@ func runValidate(
 	res := newResult(cmdValidate, status, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
+	res.Authentication = authenticationName(opts)
 	res.Validation = &validation
 	return res, err
 }
@@ -1784,7 +1805,7 @@ func runTest(
 	}
 	if testOpts.watch {
 		if testOpts.validate {
-			client, err := apiClient(opts, httpClient, apiURL)
+			client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFileRead)
 			if err != nil {
 				return nil, err
 			}
@@ -1972,6 +1993,8 @@ func watchValidatedTests(
 		cancel, active = requestCancel, &snapshot
 		go func() {
 			validation, validationErr := tailapi.ValidatePolicy(requestCtx, client, snapshot.raw)
+			validationErr = tailapi.WrapOAuthError(
+				validationErr, tailapi.ScopePolicyFileRead, opts.oauthClientID, opts.oauthClientSecret)
 			completed <- validationCompletion{snapshot, validation, validationErr}
 		}()
 	}
@@ -2167,6 +2190,9 @@ func compositeTestResult(opts options, snapshot validatedSnapshot, server server
 	)
 	res := newResult(cmdTest, status, message)
 	res.File, res.PolicyDigest, res.Local, res.Server, res.Agreement = opts.file, snapshot.digest, snapshot.local, &server, agreement
+	// Every record in this stream came from a credentialed request, so an audit
+	// over the NDJSON can tell "API key" from "field not implemented here".
+	res.Authentication = authenticationName(opts)
 	return res
 }
 
@@ -2513,6 +2539,11 @@ func runLint(
 	}
 
 	res := newLintResult(opts.file, report, threshold, severityExplicit)
+	// Only the online path authenticates; a plain lint reads no credential, so
+	// claiming one would misreport an entirely offline run.
+	if online {
+		res.Authentication = authenticationName(opts)
+	}
 	// A collection failure outranks the policy verdict: the report is rendered
 	// either way, but the exit code must say "could not check" rather than
 	// "policy is clean".
@@ -2546,35 +2577,50 @@ func lintOnline(
 	report *aclpolicy.LintReport,
 	logger *slog.Logger,
 ) error {
-	if opts.tailnet == "" || opts.apiKey == "" {
+	if opts.tailnet == "" || !hasCredentials(opts) {
 		logger.WarnContext(ctx, "skipping online validation: missing credentials",
-			"tailnet_set", opts.tailnet != "", "api_key_set", opts.apiKey != "")
+			"tailnet_set", opts.tailnet != "", "credentials_set", hasCredentials(opts))
 		return nil
 	}
-	client, err := tailapi.NewClient(tailapi.Config{
-		APIKey:  opts.apiKey,
-		Tailnet: opts.tailnet,
-		BaseURL: apiURL,
-		HTTP:    httpClient,
-	})
+	client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFileRead)
 	if err != nil {
 		return err
 	}
 	serviceRefs := aclpolicy.ServiceDestinationRefs(policy)
 	serviceExists := make(map[string]bool, len(serviceRefs))
+	servicesReadable := true
 	for _, ref := range serviceRefs {
 		lookup, lookupErr := tailapi.LookupService(ctx, client, ref.Selector)
+		// RedactSecret rather than WrapOAuthError: this call reads
+		// vip-services, and Tailscale publishes no OAuth scope covering that
+		// endpoint. Naming the policy-file scope here would blame a scope the
+		// token already holds and send the operator to re-grant it.
+		lookupErr = tailapi.RedactSecret(lookupErr, opts.oauthClientSecret)
 		if lookupErr != nil {
-			return lookupErr
+			if opts.oauthClientID == "" || !tailapi.IsForbidden(lookupErr) {
+				return lookupErr
+			}
+			// A scoped OAuth client cannot read vip-services at all, so
+			// svc-unknown degrades to absent rather than failing the run —
+			// the rule #119 set for a credential missing one read scope. The
+			// SCIM-sync warnings below need only policy_file:read and stay
+			// valid, as does every offline finding already in the report.
+			logger.WarnContext(ctx,
+				"skipping svc-unknown findings: the OAuth client cannot read vip-services",
+				"service", ref.Selector, "error", lookupErr)
+			servicesReadable = false
+			break
 		}
 		serviceExists[ref.Selector] = lookup.Exists
 	}
 	// Add rather than a local append-and-count: the severity vocabulary belongs
 	// to aclpolicy, and a copy of that switch out here would silently stop
 	// summing to Total the day a severity is added.
-	report.Add(aclpolicy.EvaluateServiceExistence(serviceRefs, serviceExists)...)
+	if servicesReadable {
+		report.Add(aclpolicy.EvaluateServiceExistence(serviceRefs, serviceExists)...)
+	}
 
-	warnings, err := collectSCIMSyncWarnings(ctx, client, opts.file, logger)
+	warnings, err := collectSCIMSyncWarnings(ctx, client, opts.file, opts.oauthClientSecret, logger)
 	if err != nil {
 		return err
 	}
@@ -2594,9 +2640,17 @@ func collectSCIMSyncWarnings(
 	ctx context.Context,
 	client *tailscale.Client,
 	path string,
+	clientSecret string,
 	logger *slog.Logger,
 ) ([]string, error) {
 	result, err := tailapi.ValidateFile(ctx, client, path)
+	// Redact before the error can be returned to realMain or handed to the
+	// logger. This is the one control-plane call whose error reaches stderr
+	// without passing through WrapOAuthError, and a token-endpoint failure
+	// arrives here as an oauth2.RetrieveError whose text embeds the response
+	// body — so "the secret never appears in output, logs, or errors" has to
+	// hold per call site, not per command.
+	err = tailapi.RedactSecret(err, clientSecret)
 	if err != nil {
 		// Judged() rather than == ValidationUnavailable: NotAttempted is the
 		// other "the control plane never answered" outcome - an unreadable
@@ -2842,11 +2896,12 @@ func runPlan(
 	apiURL string,
 	logger *slog.Logger,
 ) (*result, error) {
-	client, err := apiClient(opts, httpClient, apiURL)
+	client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFileRead)
 	if err != nil {
 		return nil, err
 	}
 	plan, err := tailapi.PlanFile(ctx, client, opts.file)
+	err = tailapi.WrapOAuthError(err, tailapi.ScopePolicyFileRead, opts.oauthClientID, opts.oauthClientSecret)
 	// Warnings the control plane did supply are reported even when a later step
 	// fails, so a diagnostic already collected is never silently discarded.
 	if plan != nil {
@@ -2864,6 +2919,7 @@ func runPlan(
 		res := newResult(cmdPlan, status, message)
 		res.File = opts.file
 		res.Tailnet = opts.tailnet
+		res.Authentication = authenticationName(opts)
 		res.Validation = &plan.Validation
 		return res, err
 	}
@@ -2878,6 +2934,7 @@ func runPlan(
 	res := newResult(cmdPlan, status, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
+	res.Authentication = authenticationName(opts)
 	res.ETag = plan.ETag
 	changed := plan.Changed
 	res.Changed = &changed
@@ -2905,11 +2962,12 @@ func runPull(
 			return nil, usagef("checking policy file %s: %v", opts.file, err)
 		}
 	}
-	client, err := apiClient(opts, httpClient, apiURL)
+	client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFileRead)
 	if err != nil {
 		return nil, err
 	}
 	policy, err := tailapi.FetchPolicy(ctx, client)
+	err = tailapi.WrapOAuthError(err, tailapi.ScopePolicyFileRead, opts.oauthClientID, opts.oauthClientSecret)
 	if err != nil {
 		return nil, usageError{err}
 	}
@@ -2932,6 +2990,7 @@ func runPull(
 	res := newResult(cmdPull, statusOK, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
+	res.Authentication = authenticationName(opts)
 	res.ETag = policy.ETag
 	return res, nil
 }
@@ -2950,7 +3009,7 @@ func runUpload(
 	if ifMatchExplicit && strings.TrimSpace(opts.ifMatch) == "" {
 		return nil, usagef("--if-match requires a non-empty ETag; use --accept-remote-changes to upload without one")
 	}
-	client, err := apiClient(opts, httpClient, apiURL)
+	client, err := apiClient(opts, httpClient, apiURL, tailapi.ScopePolicyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -2966,6 +3025,7 @@ func runUpload(
 		opts.ifMatch = observedETag
 	}
 	uploaded, err := tailapi.UploadFile(ctx, client, opts.file, opts.ifMatch)
+	err = tailapi.WrapOAuthError(err, tailapi.ScopePolicyFile, opts.oauthClientID, opts.oauthClientSecret)
 	if err != nil {
 		if isPreconditionFailed(err) {
 			return nil, errors.New(staleUploadRemediation)
@@ -2975,6 +3035,7 @@ func runUpload(
 	newETag := uploaded.ETag
 	if newETag == "" {
 		observed, fetchErr := tailapi.FetchPolicy(ctx, client)
+		fetchErr = tailapi.WrapOAuthError(fetchErr, tailapi.ScopePolicyFile, opts.oauthClientID, opts.oauthClientSecret)
 		switch {
 		case fetchErr != nil:
 			return nil, fmt.Errorf(
@@ -3007,6 +3068,7 @@ func runUpload(
 	res := newResult(cmdUpload, statusOK, message)
 	res.File = opts.file
 	res.Tailnet = opts.tailnet
+	res.Authentication = authenticationName(opts)
 	res.ETag = newETag
 	res.AcceptedRemoteChanges = acceptRemoteChanges
 	return res, nil
@@ -3024,19 +3086,60 @@ const staleUploadRemediation = "deployed policy changed since the last observati
 	"Review the result and run `tail-acl --file <reconciled-policy.hujson> plan` before retrying. " +
 	"Do not use `tail-acl merge` for this reconciliation; its directory merge standardizes away HuJSON comments"
 
-func apiClient(opts options, httpClient *http.Client, apiURL string) (*tailscale.Client, error) {
+func apiClient(opts options, httpClient *http.Client, apiURL, requiredScope string) (*tailscale.Client, error) {
 	if opts.tailnet == "" {
 		return nil, usagef("--tailnet or TAILSCALE_TAILNET is required")
 	}
-	if opts.apiKey == "" {
-		return nil, usagef("--api-key or TAILSCALE_API_KEY is required")
+	if opts.apiKey == "" && opts.oauthClientID == "" && opts.oauthClientSecret == "" {
+		return nil, usagef("--api-key or --oauth-client-id/--oauth-client-secret credentials are required")
 	}
-	return tailapi.NewClient(tailapi.Config{
-		APIKey:  opts.apiKey,
-		Tailnet: opts.tailnet,
-		BaseURL: apiURL,
-		HTTP:    httpClient,
+	client, err := tailapi.NewClient(tailapi.Config{
+		APIKey:            opts.apiKey,
+		OAuthClientID:     opts.oauthClientID,
+		OAuthClientSecret: opts.oauthClientSecret,
+		OAuthScopes:       []string{requiredScope},
+		Tailnet:           opts.tailnet,
+		BaseURL:           apiURL,
+		HTTP:              httpClient,
 	})
+	if err != nil {
+		return nil, usageError{err}
+	}
+	return client, nil
+}
+
+func authenticationName(opts options) string {
+	if opts.oauthClientID != "" && opts.oauthClientSecret != "" {
+		return "oauth_client_credentials"
+	}
+	return ""
+}
+
+func hasCredentials(opts options) bool {
+	return opts.apiKey != "" || opts.oauthClientID != "" || opts.oauthClientSecret != ""
+}
+
+// resolveCredentials fills each unset credential from the environment, with one
+// rule: an explicitly supplied class suppresses the *other* class's environment
+// fallback. Two credentials are only genuinely ambiguous when the operator
+// supplied both; an ambient TAILSCALE_API_KEY vetoing an explicit
+// --oauth-client-id is not a safety property, it is a dead end, because a
+// process cannot unset its own environment and this repo's own
+// scripts/tailnet-audit-report.sh injects that variable. Two explicit classes
+// still conflict, and NewClient rejects them before any request is made.
+func resolveCredentials(opts *options, getenv func(string) string, apiKeyExplicit, oauthExplicit bool) {
+	if !oauthExplicit && opts.apiKey == "" {
+		opts.apiKey = getenv("TAILSCALE_API_KEY")
+	}
+	if apiKeyExplicit {
+		return
+	}
+	if opts.oauthClientID == "" {
+		opts.oauthClientID = getenv("TAILSCALE_OAUTH_CLIENT_ID")
+	}
+	if opts.oauthClientSecret == "" {
+		opts.oauthClientSecret = getenv("TAILSCALE_OAUTH_CLIENT_SECRET")
+	}
 }
 
 type schemaFlag struct {
@@ -3200,7 +3303,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 				"verdict is printed in that case. For test --watch, also signals an unreadable --file, " +
 				"a non-positive --interval, incompatible flag combinations (--indeterminate with --watch, " +
 				"--interval without --watch, --validate without --watch), or a failed write to stdout. " +
-				"For test --watch --validate it additionally covers a missing --tailnet or --api-key, " +
+				"For test --watch --validate it additionally covers a missing --tailnet or API/OAuth credentials, " +
 				"which is checked before the loop starts, and a control plane that never judged a " +
 				"snapshot (authentication, authorization, rate_limited, transport, or response), which " +
 				"is reported as one last composite record before the watcher stops. An interrupt during " +
@@ -3270,6 +3373,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fs.SetOutput(w)
 	fs.PrintDefaults()
 	fmt.Fprint(w, usageRosterNote)
+	fmt.Fprint(w, usageAuthenticationNote)
 	fmt.Fprint(w, usageUploadNote)
 	fmt.Fprint(w, usageExamples)
 	fmt.Fprint(w, usageExitCodes)
@@ -3341,6 +3445,21 @@ const usageUploadNote = `
                   sends no If-Match; it cannot be combined with --if-match.
 `
 
+const usageAuthenticationNote = `
+  OAuth credentials   --oauth-client-id/--oauth-client-secret (or
+                      TAILSCALE_OAUTH_CLIENT_ID/TAILSCALE_OAUTH_CLIENT_SECRET)
+                      use the client-credentials grant. validate, pull, plan,
+                      and test --watch --validate request the policy_file:read
+                      scope; upload requests policy_file. An explicitly
+                      supplied credential wins over an environment variable of
+                      the other class; supplying both explicitly is an error,
+                      as is a client ID without its secret. The client secret
+                      is never reported. lint --online-validation also reads
+                      vip-services, which no OAuth scope covers, so its
+                      svc-unknown findings are skipped for an OAuth client and
+                      need --api-key to run.
+`
+
 // usageExitCodes is one block rather than a run of Fprintln calls so the help
 // text reads as the paragraph it is. Keep it ASCII: stdout stays parse-clean
 // across a Windows pipe boundary.
@@ -3394,8 +3513,8 @@ Authoritative watch (--validate):
   test --watch --validate explicitly enables credentialed, read-only network
   access and emits one composite local/server record per stable snapshot;
   credentials alone never enable networking, so plain test --watch stays
-  offline whatever the environment holds. It requires --tailnet and --api-key,
-  both checked before the loop starts. Policy verdicts remain stream data, but
+  offline whatever the environment holds. It requires --tailnet and API/OAuth
+  credentials, both checked before the loop starts. Policy verdicts remain stream data, but
   a control plane that never judged a snapshot ends the watcher with exit 2
   after emitting its sanitized evidence.
 

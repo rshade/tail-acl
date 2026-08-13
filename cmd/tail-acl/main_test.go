@@ -3175,6 +3175,314 @@ func TestValidateRequiresCredentials(t *testing.T) {
 	}
 }
 
+func TestOAuthCredentialsAreSelectedAndReportedWithoutSecret(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	var apiAuthorization, requestedScope string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/oauth/token":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse token form: %v", err)
+			}
+			id, secret := r.Form.Get("client_id"), r.Form.Get("client_secret")
+			if basicID, basicSecret, ok := r.BasicAuth(); ok {
+				id, secret = basicID, basicSecret
+			}
+			if id != "client-id" || secret != "client-secret" {
+				t.Errorf("token credentials = (%q, %q)", id, secret)
+			}
+			requestedScope = r.Form.Get("scope")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+		case "/api/v2/tailnet/example.com/acl/validate":
+			apiAuthorization = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, "validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, &stdout, io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedScope != "policy_file:read" || apiAuthorization != "Bearer access-token" {
+		t.Errorf("OAuth request scope/authorization = %q/%q", requestedScope, apiAuthorization)
+	}
+	if !strings.Contains(stdout.String(), `"authentication": "oauth_client_credentials"`) ||
+		strings.Contains(stdout.String(), "client-secret") {
+		t.Errorf("result = %s, want authentication without secret", stdout.String())
+	}
+}
+
+// TestHumanOutputStatesCredentialClassOnItsOwnLine guards the human rendering
+// of the authentication field. It is a separate line rather than a suffix on
+// the message so the JSON envelope's message text stays identical across
+// credential classes.
+func TestHumanOutputStatesCredentialClassOnItsOwnLine(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/oauth/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				`{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, &stdout, io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "tail-acl: authenticated with OAuth client credentials\n"
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout = %q, want a line reading %q", stdout.String(), want)
+	}
+	// The verdict line itself must read exactly as it does under an API key.
+	if !strings.Contains(stdout.String(), "tail-acl: "+path+" is valid\n") {
+		t.Errorf("stdout = %q, want the unmodified verdict line", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "client-secret") {
+		t.Errorf("stdout leaked the OAuth secret: %s", stdout.String())
+	}
+}
+
+func TestOAuthAndAPIKeyAreMutuallyExclusiveBeforeNetwork(t *testing.T) {
+	t.Parallel()
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	err := run(
+		context.Background(),
+		[]string{"validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_API_KEY":             "api-key",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, io.Discard, io.Discard,
+	)
+	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, exit = %d, want mutual-exclusion usage error", err, exitCode(err))
+	}
+	if requests != 0 || strings.Contains(err.Error(), "client-secret") {
+		t.Errorf("requests/error = %d/%v, want no request and no secret", requests, err)
+	}
+}
+
+func TestOAuthMissingScopeNamesScopeAndRedactsSecret(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/oauth/token":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse token form: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+		case "/api/v2/tailnet/example.com/acl/validate":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"client-secret is forbidden"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, io.Discard, io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), `may lack the required scope "policy_file:read"`) ||
+		strings.Contains(err.Error(), "client-secret") {
+		t.Fatalf("error = %v, want named scope without secret", err)
+	}
+}
+
+// TestAPIKeyForbiddenIsNotReportedAsAnOAuthScopeFailure is the regression guard
+// for the API-key path issue #126 requires to be unchanged. A 403 is not
+// scope-specific — a non-admin key, an unreachable tailnet, and a
+// GitOps-managed policy file all produce one — so an API-key run must never be
+// told to grant an OAuth scope, and must keep the control plane's own text,
+// which is the only remediation on offer.
+func TestAPIKeyForbiddenIsNotReportedAsAnOAuthScopeFailure(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	const serverText = "policy file is managed by a GitOps integration"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"`+serverText+`"}`)
+	}))
+	defer server.Close()
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET": "example.com",
+				"TAILSCALE_API_KEY": "api-key",
+			}[key]
+		},
+		server.Client(), server.URL, io.Discard, io.Discard,
+	)
+	if err == nil {
+		t.Fatal("validate error = nil, want the control plane's 403")
+	}
+	if strings.Contains(err.Error(), "may lack the required scope") {
+		t.Errorf("API-key error blames an OAuth scope: %v", err)
+	}
+	if !strings.Contains(err.Error(), serverText) {
+		t.Errorf("error = %v, want it to retain %q", err, serverText)
+	}
+}
+
+// TestExplicitCredentialFlagOverridesInheritedEnvironment covers both
+// directions of the precedence rule. A process cannot unset its own
+// environment, so an ambient credential that vetoed an explicit flag would
+// leave the operator no way to select one.
+func TestExplicitCredentialFlagOverridesInheritedEnvironment(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		args     []string
+		wantAuth string
+	}{
+		{
+			name:     "explicit OAuth beats ambient API key",
+			args:     []string{"--oauth-client-id", "client-id", "--oauth-client-secret", "client-secret"},
+			wantAuth: "Bearer access-token",
+		},
+		{
+			name: "explicit API key beats ambient OAuth",
+			// The v2 client sends an API key as HTTP Basic, not Bearer.
+			args:     []string{"--api-key", "flag-api-key"},
+			wantAuth: "basic:flag-api-key",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.json")
+			writeTestPolicy(t, path, `{"grants": []}`)
+			var gotAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v2/oauth/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w,
+						`{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				if user, _, ok := r.BasicAuth(); ok {
+					gotAuth = "basic:" + user
+				} else {
+					gotAuth = r.Header.Get("Authorization")
+				}
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			defer server.Close()
+			args := append(append([]string{"--file", path}, testCase.args...), "validate")
+			err := run(
+				context.Background(), args,
+				func(key string) string {
+					return map[string]string{
+						"TAILSCALE_TAILNET":             "example.com",
+						"TAILSCALE_API_KEY":             "env-api-key",
+						"TAILSCALE_OAUTH_CLIENT_ID":     "env-client-id",
+						"TAILSCALE_OAUTH_CLIENT_SECRET": "env-client-secret",
+					}[key]
+				},
+				server.Client(), server.URL, io.Discard, io.Discard,
+			)
+			if err != nil {
+				t.Fatalf("validate error = %v, want the explicit credential to be used", err)
+			}
+			if gotAuth != testCase.wantAuth {
+				t.Errorf("Authorization = %q, want %q", gotAuth, testCase.wantAuth)
+			}
+		})
+	}
+}
+
+// TestOAuthTokenRequestUsesTheCallersTransport proves the token fetch does not
+// silently fall back to [http.DefaultClient]. If it did, the request would leave
+// the test server's CA behind and the tool's documented 30s bound would cover
+// every request except the one that acquires the credential.
+func TestOAuthTokenRequestUsesTheCallersTransport(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"grants": []}`)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/oauth/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				`{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	// Only server.Client() trusts this server's certificate; http.DefaultClient
+	// does not, so a fallback surfaces as an x509 failure on the token request.
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "validate"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, io.Discard, io.Discard,
+	)
+	if err != nil {
+		t.Fatalf("validate error = %v, want the token fetch to use the caller's transport", err)
+	}
+}
+
 func TestLintHumanOutputAndExitCodes(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -3757,6 +4065,76 @@ func TestLintOnlineFailureKeepsOfflineFindings(t *testing.T) {
 // classifier. Repeated destinations cost one LookupService call, a service
 // named only by a policy test is still checked, and a readable 404 for the
 // exact selector produces svc-unknown.
+// TestLintOnlineDegradesServiceChecksForScopedOAuthClient covers the one
+// endpoint no OAuth scope reaches. Tailscale publishes no scope for
+// vip-services, so a scoped client is denied there; per #119's rule that a
+// credential missing one read scope degrades that scope's checks rather than
+// failing the run, svc-unknown goes absent while the SCIM-sync warnings — which
+// need only policy_file:read — still land, and lint keeps its offline findings.
+func TestLintOnlineDegradesServiceChecksForScopedOAuthClient(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v2/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				`{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
+		case strings.Contains(r.URL.Path, "/vip-services/"):
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message":"insufficient permissions"}`)
+		case r.URL.Path == "/api/v2/tailnet/example.com/acl/validate":
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"unexpected test request"}`)
+		}
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"grants": [
+			{"src": ["autogroup:member"], "dst": ["svc:ghost"], "ip": ["tcp:443"]}
+		]
+	}`)
+
+	var stdout strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"-format", "json", "--file", path, cmdLint, "--online-validation"},
+		func(key string) string {
+			return map[string]string{
+				"TAILSCALE_TAILNET":             "example.com",
+				"TAILSCALE_OAUTH_CLIENT_ID":     "client-id",
+				"TAILSCALE_OAUTH_CLIENT_SECRET": "client-secret",
+			}[key]
+		},
+		server.Client(), server.URL, &stdout, io.Discard,
+	)
+	// A denied vip-services read is not a collection failure for lint as a
+	// whole; the run completes and reports what it could establish.
+	if code := exitCode(err); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitOK, err)
+	}
+	var res result
+	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if res.Findings != nil {
+		for _, finding := range *res.Findings {
+			if finding.ID == aclpolicy.LintServiceUnknown {
+				t.Errorf("svc-unknown reported from a denied lookup: %+v", finding)
+			}
+		}
+	}
+	if res.Authentication != "oauth_client_credentials" {
+		t.Errorf("authentication = %q, want oauth_client_credentials", res.Authentication)
+	}
+	if strings.Contains(stdout.String(), "client-secret") {
+		t.Errorf("stdout leaked the OAuth secret: %s", stdout.String())
+	}
+}
+
 func TestLintOnlineLooksUpEachDistinctService(t *testing.T) {
 	t.Parallel()
 	var requests []string
