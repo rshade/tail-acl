@@ -303,6 +303,15 @@ func DefinitionReferences(policy *Policy, target string) []string {
 	}
 	for index, attr := range policy.NodeAttrs {
 		add(fmt.Sprintf("nodeAttrs[%d].target", index), attr.Target, false)
+		for appName, apps := range attr.App {
+			for appIndex, app := range apps {
+				if app == nil {
+					continue
+				}
+				add(fmt.Sprintf("nodeAttrs[%d].app[%q][%d].connectors", index, appName, appIndex),
+					app.Connectors, false)
+			}
+		}
 	}
 	for index, entry := range policy.ACLs {
 		sources, sourceField := entry.Source, policySourceField

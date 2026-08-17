@@ -58,7 +58,8 @@ server, then emitted as one digest-correlated block (human) or record
 
 Four properties matter in practice:
 
-- **Credentials are never implicit.** `--tailnet` and `--api-key` (or their
+- **Credentials are never implicit.** `--tailnet` plus either `--api-key` or
+  an OAuth client (`--oauth-client-id` / `--oauth-client-secret`, or their
   environment equivalents) are required. Credentials sitting in the
   environment never change the behavior of plain `test --watch`; you opt in by
   passing the flag.

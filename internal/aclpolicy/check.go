@@ -85,7 +85,8 @@ type ReachabilityOptions struct {
 	// parse, rather than reporting a decision computed while ignoring it.
 	Strict bool
 	// Protocol narrows the question to one IP protocol. The zero value asks
-	// about TCP or UDP, matching native policy tests.
+	// about any port-carrying protocol — TCP, UDP, or SCTP — matching native
+	// policy tests.
 	Protocol Protocol
 	// Roster maps a lowercased login to its tailnet role, resolving the role
 	// autogroups the policy file alone cannot decide. Build it with

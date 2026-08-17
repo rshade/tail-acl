@@ -97,7 +97,8 @@ tail-acl --file acl/acl.hujson lint                     # offline: shape only
 tail-acl --file acl/acl.hujson lint -online-validation  # also: does it exist?
 ```
 
-`-online-validation` needs `--tailnet`/`--api-key`. Without them it logs a
+`-online-validation` needs `--tailnet` plus either `--api-key` or an OAuth
+client (`--oauth-client-id` / `--oauth-client-secret`). Without them it logs a
 warning to stderr and reports the offline findings alone. With credentials that
 are *rejected*, it exits `2` — a check that never ran must not read as a clean
 policy — while still printing the offline findings.
@@ -193,10 +194,17 @@ need the live device inventory, and they belong to `tailnet-audit`.
 The discriminator is "does this finding need the live fleet?" If yes, it is
 not a `lint` finding.
 
-The same blindness applies to IdP-synced groups: `lint` recognizes the
-`group:<name>@<domain>` shape but cannot confirm the group exists or that anyone
-is in it. A typo'd synced group inside an exempted domain therefore passes
-`lint` and is caught only by `validate`.
+The same blindness applies to IdP-synced groups: an offline `lint` recognizes
+the `group:<name>@<domain>` shape but cannot confirm the group exists or that
+anyone is in it. A typo'd synced group inside an exempted domain therefore
+passes an offline `lint`.
+
+`-online-validation` narrows this rather than closing it: that mode POSTs the
+policy to the control plane and turns any "is not syncing from SCIM" warning it
+returns into a `scim-group-unsynced` lint finding. Whether a group that does not
+exist *at all* produces that particular warning depends on control-plane
+wording this repository cannot exercise, so treat `validate` as the check that
+settles a typo.
 
 ## Related
 

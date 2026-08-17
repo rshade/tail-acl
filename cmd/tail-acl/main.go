@@ -110,6 +110,7 @@ const (
 	cmdGroup        = "group"
 	cmdIPSet        = "ipset"
 	cmdSSH          = "ssh"
+	cmdNodeAttr     = "nodeattr"
 	cmdTagOwner     = "tag-owner"
 	cmdHost         = "host"
 	cmdPosture      = "posture"
@@ -145,6 +146,8 @@ const (
 	commandIPSetRemove        = "ipset remove"
 	commandSSHAdd             = "ssh add"
 	commandSSHRemove          = "ssh remove"
+	commandNodeAttrAdd        = "nodeattr add"
+	commandNodeAttrRemove     = "nodeattr remove"
 	commandTagOwnerAdd        = "tag-owner add"
 	commandHostSet            = "host set"
 	commandPostureSet         = "posture set"
@@ -153,6 +156,7 @@ const (
 	commandAutoApproverRemove = "auto-approver remove"
 	commandTestAdd            = "test add"
 	commandTestRemove         = "test remove"
+	nodeAttrsTopLevel         = "nodeAttrs"
 
 	// lintSummary is shared by commandCatalog and newLintCommand's Short text
 	// so the two descriptions of "lint" cannot drift.
@@ -1214,6 +1218,94 @@ func runSSHRemoveAt(path string, index int) (*result, error) {
 		return nil, err
 	}
 	res := newResult(commandSSHRemove, statusOK, fmt.Sprintf("removed SSH rule %d from %s", index, path))
+	res.File = path
+	return res, nil
+}
+
+func runNodeAttrAdd(
+	path string,
+	spec aclpolicy.NodeAttrSpec,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.AddNodeAttr(policy, spec)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	operations := slices.Clone(edit.Operations)
+	if comment != "" {
+		if edit.EntryIndex == len(policy.NodeAttrs) {
+			operations = append(operations,
+				commentPatch(comment, overwriteComment, nodeAttrsTopLevel, "-"))
+		} else {
+			commentOps, commentErr := commentOperations(
+				path, comment, overwriteComment, nodeAttrsTopLevel, strconv.Itoa(edit.EntryIndex))
+			if commentErr != nil {
+				return nil, commentErr
+			}
+			operations = append(operations, commentOps...)
+		}
+	}
+	res := newResult(commandNodeAttrAdd, statusNoChanges,
+		fmt.Sprintf("node attributes already present for target set in %s", path))
+	if len(operations) != 0 {
+		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("updated node attributes for target set in %s", path)
+		if !edit.Changed() {
+			message = fmt.Sprintf("added comment to node attributes for target set in %s", path)
+		}
+		res = newResult(commandNodeAttrAdd, statusOK, message)
+	}
+	res.File = path
+	return res, nil
+}
+
+func runNodeAttrRemove(path string, spec aclpolicy.NodeAttrSpec) (*result, error) {
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveNodeAttr(policy, spec)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	res := newResult(commandNodeAttrRemove, statusNoChanges,
+		fmt.Sprintf("node attributes not present for target set in %s", path))
+	if edit.Changed() {
+		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+			return nil, err
+		}
+		res = newResult(commandNodeAttrRemove, statusOK,
+			fmt.Sprintf("removed node attributes for target set from %s", path))
+	}
+	res.File = path
+	return res, nil
+}
+
+func runNodeAttrRemoveAt(path string, index int) (*result, error) {
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.RemoveNodeAttrAt(policy, index)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
+		return nil, err
+	}
+	res := newResult(commandNodeAttrRemove,
+		statusOK, fmt.Sprintf("removed nodeAttrs entry %d from %s", index, path))
 	res.File = path
 	return res, nil
 }
@@ -3166,6 +3258,8 @@ type schemaTypedEditCapability struct {
 
 // commandCatalog is the single source of truth for the command list, shared by
 // usage() and the -schema document so a human and an agent see the same set.
+//
+//nolint:funlen // the catalog intentionally keeps command metadata in one source of truth.
 func commandCatalog() []schemaCommand {
 	return []schemaCommand{
 		{cmdInit, "Initialize an empty policy for typed authoring", cmdInit},
@@ -3204,6 +3298,16 @@ func commandCatalog() []schemaCommand {
 			commandSSHRemove,
 			"Remove an SSH rule by semantic identity or zero-based index; check without a period differs from check with one",
 			"ssh remove (--index N | --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder])",
+		},
+		{
+			commandNodeAttrAdd,
+			"Add attributes or IP pools to a target set; target order is ignored and matching entries are merged",
+			"nodeattr add --target SELECTOR [--target SELECTOR ...] (--attr NAME [--attr NAME ...] | --ip-pool CIDR [--ip-pool CIDR ...]) [--comment TEXT] [--overwrite-comment]",
+		},
+		{
+			commandNodeAttrRemove,
+			"Remove attributes or IP pools from every matching target entry, pruning entries left empty, or remove one by index",
+			"nodeattr remove (--index N | --target SELECTOR [--target SELECTOR ...] (--attr NAME [--attr NAME ...] | --ip-pool CIDR [--ip-pool CIDR ...]))",
 		},
 		{commandTagOwnerAdd, "Add an owner to a tag", "tag-owner add TAG OWNER [--comment TEXT]"},
 		{commandHostSet, "Set a host alias to an address", "host set NAME ADDRESS [--comment TEXT]"},

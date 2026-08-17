@@ -75,9 +75,17 @@ func parseFile(path string) (hujson.Value, error) {
 // MergeInto recursively deep-merges src into dst. Objects merge by key,
 // arrays append semantically distinct elements, and scalar or mismatched
 // values are replaced by src.
+func MergeInto(dst, src *hujson.Value) error {
+	return mergeInto(dst, src, "")
+}
+
+// mergeInto carries the top-level policy section the recursion is inside, so
+// selector normalization can tell nodeAttrs[].app (typed, selector-bearing)
+// from grants[].app (an opaque third-party capability payload). See
+// normalizeSelectorOrder.
 //
 //nolint:gocognit // recursive deep-merge over the object/array/scalar cases; the branch count is the algorithm itself.
-func MergeInto(dst, src *hujson.Value) error {
+func mergeInto(dst, src *hujson.Value, section string) error {
 	switch destination := dst.Value.(type) {
 	case *hujson.Object:
 		source, ok := src.Value.(*hujson.Object)
@@ -102,7 +110,14 @@ func MergeInto(dst, src *hujson.Value) error {
 				return err
 			}
 			if idx, exists := index[key]; exists {
-				if mergeErr := MergeInto(&destination.Members[idx].Value, &sourceMember.Value); mergeErr != nil {
+				// The outermost object is the policy document, so its member
+				// names are the section names; below that the section is fixed.
+				childSection := section
+				if childSection == "" {
+					childSection = key
+				}
+				if mergeErr := mergeInto(
+					&destination.Members[idx].Value, &sourceMember.Value, childSection); mergeErr != nil {
 					return mergeErr
 				}
 			} else {
@@ -118,14 +133,14 @@ func MergeInto(dst, src *hujson.Value) error {
 		}
 		seen := make(map[string]struct{}, len(destination.Elements)+len(source.Elements))
 		for i := range destination.Elements {
-			key, err := semanticValueKey(&destination.Elements[i])
+			key, err := semanticValueKey(&destination.Elements[i], section)
 			if err != nil {
 				return err
 			}
 			seen[key] = struct{}{}
 		}
 		for i := range source.Elements {
-			key, err := semanticValueKey(&source.Elements[i])
+			key, err := semanticValueKey(&source.Elements[i], section)
 			if err != nil {
 				return err
 			}
@@ -144,7 +159,7 @@ func MergeInto(dst, src *hujson.Value) error {
 // semanticValueKey returns a canonical JSON representation that ignores
 // HuJSON comments, whitespace, trailing commas, object member order, and the
 // order of values in ACL selector fields.
-func semanticValueKey(value *hujson.Value) (string, error) {
+func semanticValueKey(value *hujson.Value, section string) (string, error) {
 	standard, err := hujson.Standardize(value.Pack())
 	if err != nil {
 		return "", fmt.Errorf("standardizing array element: %w", err)
@@ -156,7 +171,7 @@ func semanticValueKey(value *hujson.Value) (string, error) {
 	if err = decoder.Decode(&decoded); err != nil {
 		return "", fmt.Errorf("decoding array element: %w", err)
 	}
-	normalizeSelectorOrder(decoded)
+	normalizeSelectorOrder(decoded, section)
 	canonical, err := json.Marshal(decoded)
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing array element: %w", err)
@@ -167,12 +182,23 @@ func semanticValueKey(value *hujson.Value) (string, error) {
 // normalizeSelectorOrder treats ACL selector lists as sets while leaving all
 // other JSON arrays order-sensitive. This makes grants and SSH rules compare
 // equal when a hand-edited policy lists the same selectors in another order.
-func normalizeSelectorOrder(value any) {
+//
+// section is the top-level policy key the element came from, because one
+// member name means different things in different sections. nodeAttrs[].app is
+// the pinned NodeAttrGrantApp, whose connectors and domains are selector lists;
+// grants[].app is map[string][]map[string]any, an opaque payload owned by a
+// third-party capability. A member named target or domains inside that payload
+// carries the capability's meaning, and its order has to survive the merge —
+// sorting it would make two distinct grants compare equal and silently drop one.
+func normalizeSelectorOrder(value any, section string) {
 	switch value := value.(type) {
 	case map[string]any:
 		for key, child := range value {
-			normalizeSelectorOrder(child)
-			if !isUnorderedSelectorField(key) {
+			if strings.EqualFold(key, policyAppField) && !isNodeAttrsSection(section) {
+				continue
+			}
+			normalizeSelectorOrder(child, section)
+			if !isUnorderedSelectorField(key, section) {
 				continue
 			}
 			items, ok := child.([]any)
@@ -187,15 +213,30 @@ func normalizeSelectorOrder(value any) {
 		}
 	case []any:
 		for _, child := range value {
-			normalizeSelectorOrder(child)
+			normalizeSelectorOrder(child, section)
 		}
 	}
 }
 
-func isUnorderedSelectorField(key string) bool {
+// isNodeAttrsSection reports whether section names the nodeAttrs block. The
+// comparison folds case because merge never calls Load: it sees whatever
+// spelling the fragment used, and Tailscale's legacy policy style capitalizes
+// section names — the same reason resolveTopLevelKey exists. An exact match
+// here would leave a legacy-spelled grants[].App payload ungated, sorting a
+// member the capability owns and collapsing two distinct grants into one.
+func isNodeAttrsSection(section string) bool {
+	return strings.EqualFold(section, nodeAttrsKey)
+}
+
+// isUnorderedSelectorField reports whether key names a selector list whose
+// order is not identity. The nodeAttrs names are section-scoped because they
+// are ordinary English words a capability payload may also use.
+func isUnorderedSelectorField(key, section string) bool {
 	switch key {
 	case policySourceField, policyDestinationField, "ip", "users", "srcPosture", "via":
 		return true
+	case "target", nodeAttrAttrKey, nodeAttrIPPoolKey, "connectors", "domains":
+		return isNodeAttrsSection(section)
 	default:
 		return false
 	}

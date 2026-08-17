@@ -33,6 +33,9 @@ const defaultFileMode os.FileMode = 0o644
 const (
 	policySourceField      = "src"
 	policyDestinationField = "dst"
+	// policyAppField is typed under nodeAttrs and opaque under grants, so the
+	// merge normalizer has to tell the two apart by section.
+	policyAppField = "app"
 )
 
 // Policy extends the pinned Tailscale client schema with policy-file fields the

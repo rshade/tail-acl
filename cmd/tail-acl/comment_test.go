@@ -84,6 +84,11 @@ func authoringTargets() []commentTarget {
 			[]string{"ssh", "add", "--action", "accept", "--src", "tag:app", "--dst", "tag:db", "--user", "root"},
 			[]string{"ssh", "-"},
 		},
+		{
+			commandNodeAttrAdd,
+			[]string{"nodeattr", "add", "--target", "tag:app", "--attr", "funnel"},
+			[]string{"nodeAttrs", "-"},
+		},
 	}
 }
 

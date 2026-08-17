@@ -202,6 +202,39 @@ func TestRemoveDefinitionSeesNodeAttrAndViaReferences(t *testing.T) {
 	}
 }
 
+func TestRemoveDefinitionSeesNodeAttrAppConnectorReferences(t *testing.T) {
+	t.Parallel()
+	policy := mustLoad(t, `{
+		"groups": {"group:eng": ["alice@example.com"]},
+		"ipsets": {"ipset:office": ["10.0.0.0/8"]},
+		"nodeAttrs": [{
+			"target": ["*"],
+			"app": {"tailscale.com/app-connectors": [{
+				"connectors": ["group:eng", "ipset:office"]
+			}]}
+		}]
+	}`)
+	for _, test := range []struct {
+		name string
+		kind aclpolicy.DefinitionKind
+		want string
+	}{
+		{"group:eng", aclpolicy.DefinitionGroup, `nodeAttrs[0].app["tailscale.com/app-connectors"][0].connectors[0]`},
+		{"ipset:office", aclpolicy.DefinitionIPSet, `nodeAttrs[0].app["tailscale.com/app-connectors"][0].connectors[1]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := aclpolicy.RemoveDefinition(policy, test.kind, test.name, false)
+			if err == nil {
+				t.Fatalf("%s was removable without --force", test.name)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("refusal = %q, want site %s", err, test.want)
+			}
+		})
+	}
+}
+
 // TestAddDefinitionPatchesNullValuedDefinition covers a definition present in
 // the map with a null value. It decodes to a nil slice, so an append-into-array
 // patch cannot apply to it and the command died inside hujson with an internal

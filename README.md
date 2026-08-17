@@ -49,6 +49,9 @@ tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
 tail-acl --file acl.json ipset remove --name ipset:office --force  # only when orphaning is intentional
 tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
 tail-acl --file acl.json ssh remove --action check --src autogroup:member --dst tag:server --user root --check-period 12h
+tail-acl --file acl.json nodeattr add --target tag:k8s --attr funnel
+tail-acl --file acl.json nodeattr add --target tag:example-range --ip-pool 100.81.0.0/16
+tail-acl --file acl.json nodeattr remove --target tag:k8s --attr funnel
 tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
 tail-acl --file acl.json host set web 100.64.0.10
 tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
@@ -211,6 +214,7 @@ access tokens are refreshed in memory and are not written to disk.
 
 | Command | Purpose |
 | --- | --- |
+| `init` | Write an empty policy (`{}`) to `--file` as a starting point for typed authoring; refuses to overwrite an existing file |
 | `grant add` | Append a grant (`--src`, `--dst`, `--ip`; `--src-posture` optional; repeatable, order-insensitive, idempotent; `--comment`) |
 | `grant remove` | Remove a grant by zero-based `--index` |
 | `group add` | Add repeatable login or `autogroup:` members to `--name group:NAME`; merges and is idempotent (`--comment`) |
@@ -219,6 +223,8 @@ access tokens are refreshed in memory and are not written to disk.
 | `ipset remove` | Remove `--name ipset:NAME`; refuses referenced ipsets unless `--force`, naming the referencing sites |
 | `ssh add` | Add an SSH rule with `--action accept\|check`, repeatable `--src`, `--dst`, and `--user`, optional `--check-period`, recorder fields, and `--comment`; selector order is ignored and duplicate rules are a no-op |
 | `ssh remove` | Remove an SSH rule by the same semantic fields, or by zero-based `--index`; omission of `--check-period` is distinct from an explicit period |
+| `nodeattr add` | Add repeatable `--attr NAME` or `--ip-pool CIDR` values to a repeatable target set; target order is ignored, matching entries are merged, IP pools are canonicalized, and `--comment` is supported |
+| `nodeattr remove` | Remove repeatable attributes or IP pools from every matching target entry, pruning emptied entries, or remove one entry by zero-based `--index` |
 | `tag-owner add` | Add an owner to a tag (`--comment`) |
 | `host set` | Set a host alias to an address (`--comment`) |
 | `posture set` | Add or replace a posture's expression list (`--comment`) |
@@ -247,6 +253,17 @@ operator's spelling and order in the file. `ssh add` and `ssh remove` patch the
 raw document, so `ssh[].acceptEnv`, `sshTests`, comments, key order, and
 trailing commas are not reserialized through the pinned client's incomplete
 `ACLSSH` type.
+
+Node attribute authoring treats the `target` list as a set, so target order does
+not create duplicate entries. `nodeattr add` merges new `--attr` or `--ip-pool`
+values into the matching entry; the two value kinds are mutually exclusive per
+invocation. `--ip-pool` is canonicalized to its masked prefix the way `ipset
+add` and `auto-approver add` canonicalize theirs, so two spellings of one
+network cannot author two pool entries. `nodeattr remove` removes every matching
+duplicate and prunes an entry when no `attr`, `ipPool`, or `app` data remains.
+`--index` remains available for removing a hand-authored entry directly.
+Existing `app` blocks are preserved as raw HuJSON, including their comments and
+formatting.
 
 `normalize` is the bridge from HuJSON to general-purpose JSON tooling: it is
 read-only and emits the bare standard-JSON policy by default, so its output can
@@ -394,10 +411,16 @@ That is what turns exit `10` into a verdict, and it is why an empty roster
 is a real answer rather than a missing one. Supply a roster only when it covers
 every user; a partial or filtered read would produce confident wrong denials.
 
-Two things a roster cannot do. It maps logins to roles, so it says nothing about
+What a roster cannot do. It maps logins to roles, so it says nothing about
 which user owns a device: a bare address or CIDR `--src` against a role autogroup
-still reports exit `10`, and says why. And a role autogroup nested inside a
-`group:` is not yet resolved through it.
+still reports exit `10`, and says why.
+
+A role autogroup nested inside a `group:` **is** resolved through it. The group
+walk recurses into members, so a `group:leads` whose members include
+`autogroup:admin` matches an admin login and refutes a non-admin one.
+Resolvability takes the conjunction rather than the union: if any member is
+unsettled against the query, the whole group reports exit `10` rather than
+answering on the members it could read.
 
 The file lists login names. Treat it as exactly as sensitive as the policy it
 accompanies. `tail-acl` only reads it — it is never written, cached, or uploaded,
@@ -425,12 +448,13 @@ empties takes its member with it (the route key under `routes`, or the
 configured-but-empty approval rather than an absent one — the same rule
 `test remove` applies to emptied assertion keys.
 
-Eight of the authoring commands can also **write** a comment. `--comment TEXT`
+Authoring commands can also **write** a comment. `--comment TEXT`
 attaches `// TEXT` to the exact node the command authored: the new `grants`
 element for `grant add`, the added owner element for `tag-owner add`, the
 `hosts` or `postures` member for `host set` and `posture set`, the `groups` or
 `ipsets` definition for `group add` and `ipset add`, and the route or `exitNode`
-member for `auto-approver add`, or the new SSH rule for `ssh add`. `TEXT` is one
+member for `auto-approver add`, the matching `nodeAttrs` entry for `nodeattr
+add`, or the new SSH rule for `ssh add`. `TEXT` is one
 non-empty line — a carriage return or newline is rejected with exit `2` and the
 file is left byte-identical — and the `//` marker is supplied by the CLI.
 
@@ -533,8 +557,9 @@ subcommand itself establishes the postures namespace, so a bare name is
 unambiguous; `--src-posture` is a *reference* sitting alongside other
 fully-qualified selector flags (`--src`, `--dst`), where the prefix carries
 meaning and silently inventing one would hide a typo. Authoring does not validate
-that a referenced posture is actually defined — that dangling-reference check is
-`tail-acl lint`'s job (issue #17), not authoring's.
+that a referenced posture is actually defined — and neither does `lint`, which
+has no posture handling at all. A typo'd `posture:` name passes authoring and
+passes `lint`; server-side `validate` is what catches it.
 
 `test` is a pure evaluator over the candidate file's network-level grants and
 legacy ACLs. Each top-level `tests` `accept` or `deny` destination becomes one
@@ -550,7 +575,8 @@ never stays quiet about that gap — it warns on stderr and reports the count as
 `ssh_tests_skipped` in the JSON envelope, so a passing run can never be read as
 having checked assertions it skipped. The
 network evaluator supports groups, hosts, IP sets, literal IPs/CIDRs, tags and
-other exact selectors, `autogroup:member`, `autogroup:self`, `autogroup:internet`, and
+other exact selectors, the autogroups `policycore` resolves (see [Resolving role
+autogroups](#resolving-role-autogroups) for which of those need `--roster`), and
 single/list/range port expressions. Application-only capabilities do not grant
 network access. Because posture and `via` routing depend on semantics that
 cannot be reproduced safely from the policy alone, a matching rule that uses
@@ -620,8 +646,8 @@ evaluator applies rather than restated:
 
 ### Compatibility
 
-Two changes affect callers that branch on exit codes, in the same spirit as the
-`grant_index` note above:
+Three changes affect callers that branch on exit codes, in the same spirit as
+the `grant_index` notes below:
 
 - `test` previously exited `0` when an unparseable rule lay on an assertion's
   evaluation path, because such a rule was treated as unable to match — a
@@ -685,10 +711,19 @@ the implicit default-allow policy; an explicitly empty section denies access.
 ### The safety boundary
 
 A policy file does not contain every fact a verdict can depend on. Device
-posture, `via` routing, and the role autogroups (`autogroup:admin`,
-`autogroup:owner`, the `*-admin` family, `autogroup:auditor`,
-`autogroup:shared`) all resolve against control-plane state this evaluator
-never sees — as does any autogroup Tailscale adds after this release.
+posture and `via` routing resolve against control-plane state this evaluator
+never sees.
+
+The role autogroups — `autogroup:admin`, `autogroup:owner`, `autogroup:auditor`,
+and the `*-admin` family — also depend on control-plane state, but that state
+can be supplied: pass a user roster and they resolve offline. See [Resolving
+role autogroups](#resolving-role-autogroups). Without one they report exit `10`
+and the diagnostic names `--roster` as the remedy.
+
+`autogroup:shared` is **not** in that group, and a roster will not settle it.
+Shared membership is about devices reaching in from another tailnet, so it is
+matched by nothing and refutable against nothing — the same reading that applies
+to any autogroup Tailscale adds after this release.
 
 A rule the evaluator cannot *read* lands on the same boundary. A destination
 written without its port (`"dst": ["tag:web"]`), an unknown protocol token, or a
@@ -733,7 +768,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 
 | Finding | Severity | Fires when |
 | --- | --- | --- |
-| `undefined-reference` | error | a `src`/`dst` names an undefined selector, or a route/exit-node auto-approver is unsupported or names an undefined `group:`/`tag:` |
+| `undefined-reference` | error | a `src`/`dst`, `ssh[].recorder`, `sshTests[].src`/`dst`, or `autoApprovers.services` entry names an undefined selector, or a route/exit-node auto-approver is unsupported or names an undefined `group:`/`tag:` |
 | `dst-tag-no-owner` | error | a destination `tag:` has no `tagOwners` entry, so no node can carry it |
 | `overbroad-wildcard` | warn | an over-broad `*` (see `-wildcard`) |
 | `broad-rule-untested` | advice | a blanket source reaches a concrete destination on every port, with no posture/via gate and no deny assertion naming that destination |

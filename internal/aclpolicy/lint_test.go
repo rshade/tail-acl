@@ -1036,3 +1036,29 @@ func TestEvaluateLintCountsNodeAttrAndViaReferences(t *testing.T) {
 		t.Errorf("unused-ipset findings = %#v, want none for a grant via-router", unused)
 	}
 }
+
+func TestEvaluateLintCountsNodeAttrAppConnectorReferences(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		Groups: map[string][]string{"group:eng": {"alice@example.com"}},
+		IPSets: map[string][]string{"ipset:office": {"10.0.0.0/8"}},
+		NodeAttrs: []tailscale.NodeAttrGrant{{
+			Target: []string{"*"},
+			App: map[string][]*tailscale.NodeAttrGrantApp{
+				"tailscale.com/app-connectors": {{
+					Connectors: []string{"group:eng", "ipset:office"},
+				}},
+			},
+		}},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unused := findingsByID(report, aclpolicy.LintUnusedGroup); len(unused) != 0 {
+		t.Errorf("unused-group findings = %#v, want none for an app connector", unused)
+	}
+	if unused := findingsByID(report, aclpolicy.LintUnusedIPSet); len(unused) != 0 {
+		t.Errorf("unused-ipset findings = %#v, want none for an app connector", unused)
+	}
+}

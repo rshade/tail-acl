@@ -61,6 +61,9 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 	ssh := &cobra.Command{Use: cmdSSH, Short: "Manage SSH rules", RunE: runParentCommand}
 	ssh.AddCommand(newSSHAddCommand(deps), newSSHRemoveCommand(deps))
 
+	nodeAttr := &cobra.Command{Use: cmdNodeAttr, Short: "Manage node attributes", RunE: runParentCommand}
+	nodeAttr.AddCommand(newNodeAttrAddCommand(deps), newNodeAttrRemoveCommand(deps))
+
 	tagOwner := &cobra.Command{Use: cmdTagOwner, Short: "Manage tag owners", RunE: runParentCommand}
 	tagOwner.AddCommand(newTagOwnerAddCommand(deps))
 
@@ -78,7 +81,7 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 	autoApprover.AddCommand(newAutoApproverAddCommand(deps), newAutoApproverRemoveCommand(deps))
 
 	root.AddCommand(
-		grant, group, ipset, ssh, tagOwner, host, posture, autoApprover,
+		grant, group, ipset, ssh, nodeAttr, tagOwner, host, posture, autoApprover,
 		newInitCommand(deps),
 		newMergeCommand(deps),
 		newNormalizeCommand(deps),
@@ -91,6 +94,74 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 		newPlanCommand(ctx, deps),
 		newUploadCommand(ctx, deps),
 	)
+}
+
+func newNodeAttrAddCommand(deps *commandDeps) *cobra.Command {
+	var flags nodeAttrFlags
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add attributes or IP pools to a target set; target order is ignored and matching entries are merged",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runNodeAttrAdd(deps.opts.file, flags.spec(), flags.comment,
+				cmd.Flags().Changed(commentFlagName), flags.overwriteComment)
+			*deps.result = out
+			return err
+		},
+	}
+	registerNodeAttrFlags(cmd, &flags, true)
+	return cmd
+}
+
+func newNodeAttrRemoveCommand(deps *commandDeps) *cobra.Command {
+	var flags nodeAttrFlags
+	var index int
+	cmd := &cobra.Command{
+		Use:   subRemove,
+		Short: "Remove node attributes or IP pools by target set, or one entry by --index",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("index") {
+				if flags.changed(cmd) {
+					return usagef("nodeattr remove --index cannot be combined with node attribute fields")
+				}
+				out, err := runNodeAttrRemoveAt(deps.opts.file, index)
+				*deps.result = out
+				return err
+			}
+			out, err := runNodeAttrRemove(deps.opts.file, flags.spec())
+			*deps.result = out
+			return err
+		},
+	}
+	registerNodeAttrFlags(cmd, &flags, false)
+	cmd.Flags().IntVar(&index, "index", -1, "remove the nodeAttrs entry at this zero-based index")
+	return cmd
+}
+
+type nodeAttrFlags struct {
+	target, attr, ipPool stringListFlag
+	comment              string
+	overwriteComment     bool
+}
+
+func registerNodeAttrFlags(cmd *cobra.Command, flags *nodeAttrFlags, add bool) {
+	cmd.Flags().Var(&flags.target, "target", "target selector; may be repeated")
+	cmd.Flags().Var(&flags.attr, "attr", "node attribute name; may be repeated")
+	cmd.Flags().Var(&flags.ipPool, "ip-pool", "IP pool CIDR; may be repeated")
+	if add {
+		registerCommentFlags(cmd.Flags(), &flags.comment, &flags.overwriteComment)
+	}
+}
+
+func (f *nodeAttrFlags) spec() aclpolicy.NodeAttrSpec {
+	return aclpolicy.NodeAttrSpec{
+		Target: []string(f.target), Attr: []string(f.attr), IPPool: []string(f.ipPool),
+	}
+}
+
+func (f *nodeAttrFlags) changed(cmd *cobra.Command) bool {
+	return slices.ContainsFunc([]string{"target", "attr", "ip-pool"}, cmd.Flags().Changed)
 }
 
 func newSSHAddCommand(deps *commandDeps) *cobra.Command {

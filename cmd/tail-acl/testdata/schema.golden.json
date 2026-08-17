@@ -56,6 +56,16 @@
       "usage": "ssh remove (--index N | --action accept|check --src SRC --dst DST --user USER [--check-period DURATION|always] [--recorder DST] [--enforce-recorder])"
     },
     {
+      "name": "nodeattr add",
+      "summary": "Add attributes or IP pools to a target set; target order is ignored and matching entries are merged",
+      "usage": "nodeattr add --target SELECTOR [--target SELECTOR ...] (--attr NAME [--attr NAME ...] | --ip-pool CIDR [--ip-pool CIDR ...]) [--comment TEXT] [--overwrite-comment]"
+    },
+    {
+      "name": "nodeattr remove",
+      "summary": "Remove attributes or IP pools from every matching target entry, pruning entries left empty, or remove one by index",
+      "usage": "nodeattr remove (--index N | --target SELECTOR [--target SELECTOR ...] (--attr NAME [--attr NAME ...] | --ip-pool CIDR [--ip-pool CIDR ...]))"
+    },
+    {
       "name": "tag-owner add",
       "summary": "Add an owner to a tag",
       "usage": "tag-owner add TAG OWNER [--comment TEXT]"

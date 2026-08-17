@@ -2655,7 +2655,7 @@ func TestParentCommandsDistinguishBareFromUnknownSubcommand(t *testing.T) {
 	t.Parallel()
 	nouns := []string{
 		cmdGrant, cmdGroup, cmdIPSet, cmdSSH,
-		cmdTagOwner, cmdHost, cmdPosture, cmdAutoApprover,
+		cmdNodeAttr, cmdTagOwner, cmdHost, cmdPosture, cmdAutoApprover,
 	}
 	for _, noun := range nouns {
 		t.Run(noun+" bare", func(t *testing.T) {
