@@ -1,6 +1,6 @@
 module github.com/rshade/tailscale-utils/tail-acl
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/hexops/gotextdiff v1.0.3
@@ -12,7 +12,7 @@ require (
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
-	tailscale.com v1.102.2
+	tailscale.com v1.102.3
 	tailscale.com/client/tailscale/v2 v2.10.1
 )
 
