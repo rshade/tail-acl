@@ -28,14 +28,18 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jaxxstorm/tscli/pkg/tscli"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/policycore"
 	"github.com/rshade/tailscale-utils/policycore/cliflags"
+	"github.com/rshade/tailscale-utils/policycore/sanitize"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
@@ -174,6 +178,8 @@ const (
 		"adds explicit credentialed, read-only authoritative server validation)"
 
 	policyFormatHuJSON = "hujson"
+
+	flagSanitize = "--sanitize"
 )
 
 // httpTimeout bounds every Tailscale API request.
@@ -229,12 +235,13 @@ func (o *indeterminateOption) Type() string { return "fail|warn|ignore" }
 // result is the versioned envelope every command returns. Human rendering emits
 // Message (and Diff, when present); JSON rendering emits the whole struct.
 type result struct {
-	SchemaVersion string `json:"schema_version"`
-	Tool          string `json:"tool"`
-	Command       string `json:"command"`
-	Status        string `json:"status"`
-	Message       string `json:"message"`
-	File          string `json:"file,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Tool          string             `json:"tool"`
+	Sanitization  *sanitize.Metadata `json:"sanitization,omitempty"`
+	Command       string             `json:"command"`
+	Status        string             `json:"status"`
+	Message       string             `json:"message"`
+	File          string             `json:"file,omitempty"`
 	// PolicyDigest content-addresses the exact bytes that produced this result.
 	// Only watch mode sets it: a stream needs a correlator, and a digest is
 	// reproducible where a timestamp is not — it also identifies what was
@@ -501,11 +508,15 @@ func run(
 	colorRaw := colorModeAuto
 	verbose := false
 	showSchema := false
+	sanitizeLevel := string(sanitize.Off)
+	var outputSanitizer *sanitize.Sanitizer
 
 	root := newRootCommand(getenv, &opts)
 	root.PersistentFlags().StringVar(&format, "format", formatHuman, "output format: human|json")
 	root.PersistentFlags().StringVar(&colorRaw, "color", colorModeAuto, "colorize human output: auto|always|never")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "log operational detail to stderr")
+	root.PersistentFlags().StringVar(&sanitizeLevel, "sanitize", string(sanitize.Off),
+		"output sanitization level: off|identity|strict (a non-off TAILSCALE_SANITIZE value overrides this flag)")
 	// Registered but unbound: cobra's Version field intercepts --version before
 	// RunE, so no handler here would ever run. The registration must stay under
 	// this exact name and usage text, which schema.golden.json locks — cobra's
@@ -523,6 +534,13 @@ func run(
 	}
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		persistent := root.PersistentFlags()
+		configured, sanitizeErr := configureOutputSanitizer(
+			cmd, persistent, getenv, stderr, sanitizeLevel, opts.tailnet,
+		)
+		if sanitizeErr != nil {
+			return sanitizeErr
+		}
+		outputSanitizer = configured
 		resolveCredentials(&opts, getenv,
 			persistent.Changed("api-key"),
 			persistent.Changed("oauth-client-id") || persistent.Changed("oauth-client-secret"))
@@ -532,10 +550,10 @@ func run(
 		if _, ok := parseColorMode(colorRaw); !ok {
 			return usagef("unknown -color %q; want auto, always, or never", colorRaw)
 		}
-		if err := validateRoster(
+		if rosterErr := validateRoster(
 			cmd.Name(), opts.roster, root.PersistentFlags().Changed("roster"),
-		); err != nil {
-			return err
+		); rosterErr != nil {
+			return rosterErr
 		}
 		return validateIndeterminate(cmd.Name(), opts.indeterminate)
 	}
@@ -551,6 +569,7 @@ func run(
 		colorRaw:   &colorRaw,
 		getenv:     getenv,
 		verbose:    &verbose,
+		sanitizer:  &outputSanitizer,
 	}
 	addSubcommands(ctx, root, &deps)
 
@@ -567,6 +586,9 @@ func run(
 		err = usageError{err}
 	}
 	if res != nil {
+		if outputSanitizer != nil && outputSanitizer.Level() != sanitize.Off {
+			res = sanitizeResultEnvelope(res, outputSanitizer)
+		}
 		mode, _ := parseColorMode(colorRaw)
 		colorize := colorEnabled(format, mode, stdout, getenv)
 		if renderErr := render(stdout, format, colorize, res); renderErr != nil {
@@ -574,6 +596,49 @@ func run(
 		}
 	}
 	return err
+}
+
+func configureOutputSanitizer(
+	cmd *cobra.Command,
+	persistent *pflag.FlagSet,
+	getenv func(string) string,
+	stderr io.Writer,
+	flagLevel, tailnet string,
+) (*sanitize.Sanitizer, error) {
+	resolution, err := sanitize.Resolve(
+		getenv(sanitize.LevelEnv), flagLevel, persistent.Changed("sanitize"),
+	)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	if notice := resolution.Notice(toolName); notice != "" {
+		if _, err = fmt.Fprintln(stderr, notice); err != nil {
+			return nil, err
+		}
+	}
+	if resolution.Level != sanitize.Off && unsanitizableCommand(cmd.Name()) {
+		source := flagSanitize
+		if resolution.EnvironmentActive {
+			source = sanitize.LevelEnv
+		}
+		return nil, usagef(
+			"%s output contains a policy or policy diff and cannot be mechanically sanitized; "+
+				"unset %s or set it to off",
+			cmd.CommandPath(), source,
+		)
+	}
+	output, err := sanitize.New(sanitize.Options{
+		Level: resolution.Level, Tool: toolName, Tailnet: tailnet,
+		KeyHex: getenv(sanitize.KeyEnv),
+	})
+	if err != nil {
+		return nil, usageError{err}
+	}
+	return output, nil
+}
+
+func unsanitizableCommand(commandName string) bool {
+	return commandName == cmdNormalize || commandName == cmdPlan || commandName == cmdJQ
 }
 
 // validateIndeterminate enforces that --indeterminate, once resolvable as a
@@ -863,17 +928,26 @@ func renderLintFinding(w io.Writer, finding aclpolicy.LintFinding, colorize bool
 // test, so the human stream here stays plain in practice — and JSON never
 // colors, so NDJSON is still parse-clean whether or not stdout is a terminal.
 type streamEmitter struct {
-	w        io.Writer
-	format   string
-	colorize bool
-	wrote    bool
+	w         io.Writer
+	format    string
+	colorize  bool
+	sanitizer *sanitize.Sanitizer
+	wrote     bool
 }
 
-func newStreamEmitter(w io.Writer, format string, colorize bool) *streamEmitter {
-	return &streamEmitter{w: w, format: format, colorize: colorize}
+func newStreamEmitter(
+	w io.Writer,
+	format string,
+	colorize bool,
+	sanitizer *sanitize.Sanitizer,
+) *streamEmitter {
+	return &streamEmitter{w: w, format: format, colorize: colorize, sanitizer: sanitizer}
 }
 
 func (e *streamEmitter) emit(res *result) error {
+	if e.sanitizer != nil && e.sanitizer.Level() != sanitize.Off {
+		res = sanitizeResultEnvelope(res, e.sanitizer)
+	}
 	if e.format == formatJSON {
 		e.wrote = true
 		// No SetIndent: compact plus the encoder's trailing newline is exactly
@@ -2681,8 +2755,24 @@ func lintOnline(
 	serviceRefs := aclpolicy.ServiceDestinationRefs(policy)
 	serviceExists := make(map[string]bool, len(serviceRefs))
 	servicesReadable := true
+	// lookupClient is built via tscli rather than apiClient/tailapi.NewClient
+	// — scoped to this one call as the proof of concept recorded in
+	// CONTEXT.md/ROADMAP.md. Every other client in this command (including
+	// collectSCIMSyncWarnings below) still goes through tailapi.NewClient.
+	var lookupClient *tailscale.Client
+	if len(serviceRefs) > 0 {
+		lookupClient, err = tscliServiceLookupClient(opts, apiURL)
+		if err != nil {
+			return err
+		}
+	}
 	for _, ref := range serviceRefs {
-		lookup, lookupErr := tailapi.LookupService(ctx, client, ref.Selector)
+		// tscli's client builds its own http.Client with no Timeout set, so
+		// the httpTimeout bound that apiClient's httpClient would have applied
+		// is reapplied here through the context.
+		lookupCtx, cancel := context.WithTimeout(ctx, httpTimeout)
+		lookup, lookupErr := tailapi.LookupService(lookupCtx, lookupClient, ref.Selector)
+		cancel()
 		// RedactSecret rather than WrapOAuthError: this call reads
 		// vip-services, and Tailscale publishes no OAuth scope covering that
 		// endpoint. Naming the policy-file scope here would blame a scope the
@@ -3200,6 +3290,48 @@ func apiClient(opts options, httpClient *http.Client, apiURL, requiredScope stri
 	return client, nil
 }
 
+// tscliServiceLookupClientMu serializes access to viper's process-global
+// config: tscli.New (github.com/jaxxstorm/tscli/pkg/tscli) reads its
+// configuration from viper rather than taking an explicit Config the way
+// tailapi.NewClient does, and this repo's tests run in parallel. The mutex
+// scopes the race to "one goroutine sets viper, then reads it back into a
+// client" — the *tailscale.Client returned already carries everything it
+// read, so it needs no further synchronization once built.
+//
+//nolint:gochecknoglobals // guards access to tscli's process-global viper config, not application state
+var tscliServiceLookupClientMu sync.Mutex
+
+// tscliServiceLookupClient builds the same official v2 API client apiClient
+// does, but through github.com/jaxxstorm/tscli's constructor instead of
+// tailapi.NewClient — the one-call proof of concept recorded in
+// CONTEXT.md/ROADMAP.md ("tail-ipam" future-vision entry). It is scoped to
+// exactly the LookupService call in lintOnline.
+func tscliServiceLookupClient(opts options, apiURL string) (*tailscale.Client, error) {
+	tscliServiceLookupClientMu.Lock()
+	defer tscliServiceLookupClientMu.Unlock()
+
+	viper.Set("tailnet", opts.tailnet)
+	viper.Set("api-key", opts.apiKey)
+	viper.Set("oauth-client-id", opts.oauthClientID)
+	viper.Set("oauth-client-secret", opts.oauthClientSecret)
+	viper.Set("base-url", apiURL)
+
+	client, err := tscli.New()
+	viper.Set("oauth-client-secret", "")
+	viper.Set("api-key", "")
+	if err != nil {
+		redactedErr := tailapi.RedactSecret(
+			fmt.Errorf("constructing tscli-backed client: %w", err),
+			opts.oauthClientSecret,
+		)
+		return nil, redactedErr
+	}
+	// tscli.New() has an internal userAgentTransport that unconditionally
+	// overwrites User-Agent on every request, ignoring the public UserAgent field.
+	// This leak is a known limitation; a fix has been requested upstream.
+	return client, nil
+}
+
 func authenticationName(opts options) string {
 	if opts.oauthClientID != "" && opts.oauthClientSecret != "" {
 		return "oauth_client_credentials"
@@ -3377,6 +3509,7 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 		Version       string                `json:"version"`
 		SchemaVersion string                `json:"schema_version"`
 		Description   string                `json:"description"`
+		Sanitization  string                `json:"sanitization"`
 		Flags         []schemaFlag          `json:"flags"`
 		Commands      []schemaCommand       `json:"commands"`
 		Capabilities  schemaCapabilities    `json:"capabilities"`
@@ -3387,8 +3520,13 @@ func printSchema(w io.Writer, fs *pflag.FlagSet) error {
 		Version:       version,
 		SchemaVersion: schemaVersion,
 		Description:   "Make typed edits to a Tailscale policy file and query, pull, merge, normalize, validate, test, check, lint, plan, or upload it.",
-		Flags:         flags,
-		Commands:      commandCatalog(),
+		Sanitization: "TAILSCALE_SANITIZE=off|identity|strict sanitizes rendered output after evaluation; " +
+			"a non-off environment value overrides --sanitize. normalize, plan, and jq refuse active " +
+			"sanitization because policy bytes and policy diffs cannot be mechanically sanitized safely. " +
+			"Set TAILSCALE_SANITIZE_KEY (64 hex characters) for operator-scoped placeholders that remain comparable across runs; " +
+			"without it placeholders are artifact-scoped.",
+		Flags:    flags,
+		Commands: commandCatalog(),
 		Capabilities: schemaCapabilities{
 			TypedEdits: schemaTypedEditCapability{
 				Formats:           []string{formatJSON, policyFormatHuJSON},
@@ -3478,6 +3616,7 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 	fs.PrintDefaults()
 	fmt.Fprint(w, usageRosterNote)
 	fmt.Fprint(w, usageAuthenticationNote)
+	fmt.Fprint(w, usageSanitizationNote)
 	fmt.Fprint(w, usageUploadNote)
 	fmt.Fprint(w, usageExamples)
 	fmt.Fprint(w, usageExitCodes)
@@ -3562,6 +3701,18 @@ const usageAuthenticationNote = `
                       vip-services, which no OAuth scope covers, so its
                       svc-unknown findings are skipped for an OAuth client and
                       need --api-key to run.
+`
+
+const usageSanitizationNote = `
+  output sanitization   TAILSCALE_SANITIZE accepts off, identity, or strict and
+                        overrides --sanitize whenever the environment value is
+                        non-off. Active sanitization is announced on stderr and
+                        applied only after evaluation. normalize, plan, and jq
+                        refuse active sanitization because policy bytes and
+                        policy diffs cannot be mechanically sanitized safely.
+                        TAILSCALE_SANITIZE_KEY accepts exactly 64 hexadecimal
+                        characters for stable, operator-scoped placeholders;
+                        without it placeholders are artifact-scoped.
 `
 
 // usageExitCodes is one block rather than a run of Fprintln calls so the help

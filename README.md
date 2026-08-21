@@ -303,9 +303,29 @@ diffable against each other.
 `--roster PATH` (resolve role autogroups for `test`/`check`; see
 [Resolving role autogroups](#resolving-role-autogroups)),
 `--indeterminate fail|warn|ignore` (test exit policy, default `warn`),
-`-format human|json`, `-verbose`, `--version`, `-schema`,
+`-format human|json`, `--sanitize off|identity|strict`, `-verbose`, `--version`, `-schema`,
 `--color auto|always|never` (colorize human output, default `auto`).
 `TAILSCALE_API_URL` overrides the API base URL (used by tests).
+
+### Output sanitization
+
+`TAILSCALE_SANITIZE=identity` replaces user, hostname, IP/CIDR, tailnet, ETag,
+and other direct identities in structured `check`, `test`, `lint`, validation,
+and command-result output after policy evaluation. `strict` additionally
+replaces policy selectors such as tags, groups, ipsets, services, and postures,
+and policy digests. A non-`off` environment value overrides `--sanitize` and is
+announced only on stderr, so JSON and watch-mode NDJSON remain parse-clean.
+
+Placeholders use an ephemeral HMAC scope by default. Set
+`TAILSCALE_SANITIZE_KEY` to exactly 64 hexadecimal characters for stable
+operator-and-tailnet-scoped placeholders across runs. The JSON envelope records
+the effective level, scheme, and scope.
+
+Sanitization covers rendered command results, not policy files modified or
+written by authoring, merge, pull, or upload commands. `normalize`, `plan`, and
+`jq` refuse active sanitization with exit `2`: their stdout is respectively a
+policy, a policy diff, or arbitrary policy-derived data, none of which can be
+mechanically sanitized without pretending that a partial rewrite is safe.
 
 ### Color
 

@@ -210,6 +210,11 @@
       "usage": "test/check: PATH to a JSON login-to-role roster, asserting it is complete and authoritative"
     },
     {
+      "default": "off",
+      "name": "sanitize",
+      "usage": "output sanitization level: off|identity|strict (a non-off TAILSCALE_SANITIZE value overrides this flag)"
+    },
+    {
       "default": "false",
       "name": "schema",
       "usage": "print the machine-readable tool schema (JSON) and exit"
@@ -313,6 +318,7 @@
     }
   ],
   "name": "tail-acl",
+  "sanitization": "TAILSCALE_SANITIZE=off|identity|strict sanitizes rendered output after evaluation; a non-off environment value overrides --sanitize. normalize, plan, and jq refuse active sanitization because policy bytes and policy diffs cannot be mechanically sanitized safely. Set TAILSCALE_SANITIZE_KEY (64 hex characters) for operator-scoped placeholders that remain comparable across runs; without it placeholders are artifact-scoped.",
   "schema_version": "1",
   "version": "dev"
 }

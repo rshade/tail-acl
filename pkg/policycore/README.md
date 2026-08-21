@@ -1,7 +1,7 @@
 # policycore
 
-Selector resolution for Tailscale policy files, shared by `tail-acl` and
-`tailnet-audit`.
+Selector resolution for Tailscale policy files and the repository-wide output
+sanitization contract, shared by every tool module.
 
 Both tools need to answer one question identically: *does this policy selector
 name this thing?* Two tools in the same repo disagreeing about one policy is
@@ -9,7 +9,15 @@ worse than duplicated code, so the logic lives here rather than in each tool.
 
 ## Scope
 
-In scope — resolving a selector to the values it names:
+The `sanitize` subpackage owns level parsing, environment-over-flag precedence,
+HMAC placeholder allocation, exact known-value replacement in prose, strict
+timestamp quantization, envelope metadata, and reflection-guard support. It
+does not know any tool's report shape: each binary rebuilds its own output types
+from zero at the render boundary so a newly added field cannot pass through
+without an explicit decision.
+
+For selector matching, the scope is resolving a selector to the values it
+names:
 
 - `*` and the full autogroup vocabulary, split into role autogroups (resolved
   from the tailnet's user roster) and autogroups resolved from the policy
@@ -95,7 +103,8 @@ matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, ""
 ## Module layout
 
 This is a library module with no binary. It depends only on the Tailscale v2
-API client and the standard library.
+API client and the standard library; output sanitization adds no third-party
+dependency.
 
 ## Documentation
 

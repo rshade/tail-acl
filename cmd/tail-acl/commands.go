@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rshade/tailscale-utils/policycore/sanitize"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 )
 
@@ -28,6 +29,7 @@ type commandDeps struct {
 	colorRaw   *string
 	getenv     func(string) string
 	verbose    *bool
+	sanitizer  **sanitize.Sanitizer
 }
 
 func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
@@ -583,7 +585,8 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			}
 			out, err := runTest(
 				ctx, *deps.opts, testOptions{watch: watch, validate: validate, interval: interval}, deps.logger(),
-				newStreamEmitter(deps.stdout, *deps.format, deps.colorize()), deps.httpClient, deps.apiURL,
+				newStreamEmitter(deps.stdout, *deps.format, deps.colorize(), *deps.sanitizer),
+				deps.httpClient, deps.apiURL,
 			)
 			*deps.result = out
 			return err

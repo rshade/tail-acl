@@ -1,6 +1,30 @@
 # Public API reference
 
-This page describes the exported selector-matching API in `policycore`.
+This page describes the exported selector-matching API in `policycore` and the
+shared `policycore/sanitize` output contract.
+
+## Output sanitization
+
+`sanitize.ParseLevel` accepts `off`, `identity`, and `strict`.
+`sanitize.Resolve` applies the shared precedence rule: a non-`off`
+`TAILSCALE_SANITIZE` value wins over `--sanitize`; an unknown environment or
+flag value is an error. `Resolution.Notice` produces the required identity-free
+stderr notice.
+
+`sanitize.New` creates an invocation allocator. With no key it uses fresh
+cryptographic randomness and marks output as artifact-scoped. A 64-character
+hexadecimal `TAILSCALE_SANITIZE_KEY` generated from 32 random bytes produces
+stable tailnet-scoped HMAC placeholders and a non-secret key identifier,
+allowing compatible retained
+reports to establish that they share a correlation domain. It never falls back
+to an unkeyed hash.
+
+`Sanitizer.Value` registers and replaces a structured value;
+`Sanitizer.Text` replaces registered exact values in prose;
+`Sanitizer.Time` quantizes strict timestamps to a UTC day; and
+`Sanitizer.Metadata` supplies the versioned output marker. Tools use
+`UnhandledFields` in reflection-guard tests to require a decision whenever an
+output struct grows.
 
 ## `Matcher`
 

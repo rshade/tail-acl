@@ -60,18 +60,6 @@ func MergeDirectories(dirs []string, outputPath string) ([]byte, []string, error
 	return merged.Pack(), paths, nil
 }
 
-func parseFile(path string) (hujson.Value, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return hujson.Value{}, err
-	}
-	value, err := hujson.Parse(b)
-	if err != nil {
-		return hujson.Value{}, fmt.Errorf("%s: %w", path, err)
-	}
-	return value, nil
-}
-
 // MergeInto recursively deep-merges src into dst. Objects merge by key,
 // arrays append semantically distinct elements, and scalar or mismatched
 // values are replaced by src.
