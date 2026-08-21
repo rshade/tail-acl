@@ -1,7 +1,21 @@
 # Public API reference
 
-This page describes the exported selector-matching API in `policycore` and the
-shared `policycore/sanitize` output contract.
+This page describes the exported selector-matching API in `policycore`, the
+shared `policycore/addrspace` address primitives, and the
+`policycore/sanitize` output contract.
+
+## Address-space primitives
+
+`addrspace.Overlaps` reports whether two CIDR prefixes or bare addresses share
+any address. `addrspace.OverlappingPairs` applies the same comparison to a list,
+returning stable index pairs while isolating malformed entries in a per-index
+error map.
+
+`addrspace.IsViaPrefix` reports whether a parseable CIDR lies in Tailscale's
+4via6 range. It intentionally recognizes range members whose prefix length or
+site ID is invalid, allowing a caller to distinguish a malformed via route from
+an ordinary route. `addrspace.SiteID` performs the full validation and returns
+the embedded 16-bit site ID only for valid `/96` through `/128` via prefixes.
 
 ## Output sanitization
 

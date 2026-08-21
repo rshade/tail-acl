@@ -1,0 +1,59 @@
+package addrspace
+
+import (
+	"encoding/binary"
+	"net/netip"
+)
+
+// minViaPrefixBits and maxSiteID mirror the "currently reserved" site-ID
+// ceiling enforced by tailscale.com's CLI (cmd/tailscale/cli/debug.go), not
+// by tsaddr.MapVia itself, which does not validate it. Upstream already
+// relaxed this once (0-255 -> 0-65535, 2024-01); re-verify against the
+// pinned tailscale.com version on every dependency bump.
+const (
+	viaRangeCIDR     = "fd7a:115c:a1e0:b1a::/64"
+	minViaPrefixBits = 96
+	maxSiteID        = uint32(1<<16 - 1)
+	siteIDStartByte  = 8
+	siteIDEndByte    = 12
+)
+
+//nolint:gochecknoglobals // memoizes a compile-time-constant CIDR parse for process lifetime; avoids re-parsing on every isViaPrefix call.
+var viaRange = netip.MustParsePrefix(viaRangeCIDR)
+
+// SiteID extracts the 4via6 site ID embedded in a Tailscale "via" IPv6
+// prefix. cidr must be a full CIDR string (a bare or bracketed address
+// without an explicit prefix length is rejected, unlike
+// Overlaps/OverlappingPairs). ok is false if cidr is outside the via range,
+// has a prefix length shorter than /96, contains a site ID above 65535, or
+// is not a CIDR.
+func SiteID(cidr string) (uint32, bool) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !isViaPrefix(prefix) || prefix.Bits() < minViaPrefixBits {
+		return 0, false
+	}
+
+	address := prefix.Addr().As16()
+	siteID := binary.BigEndian.Uint32(address[siteIDStartByte:siteIDEndByte])
+	if siteID > maxSiteID {
+		return 0, false
+	}
+	return siteID, true
+}
+
+// IsViaPrefix reports whether cidr, once masked to its own prefix length,
+// lies within the Tailscale 4via6 "via" range. cidr must be a full CIDR
+// string (a bare or bracketed address without an explicit prefix length is
+// rejected, unlike Overlaps/OverlappingPairs). It requires cidr to be no
+// wider than the via range itself (/64), but deliberately does not
+// validate a prefix length of at least /96 or the embedded site ID,
+// allowing callers to distinguish a malformed via prefix from an ordinary
+// route.
+func IsViaPrefix(cidr string) bool {
+	prefix, err := netip.ParsePrefix(cidr)
+	return err == nil && isViaPrefix(prefix)
+}
+
+func isViaPrefix(prefix netip.Prefix) bool {
+	return prefix.Bits() >= viaRange.Bits() && viaRange.Overlaps(prefix)
+}

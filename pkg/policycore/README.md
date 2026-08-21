@@ -1,7 +1,7 @@
 # policycore
 
-Selector resolution for Tailscale policy files and the repository-wide output
-sanitization contract, shared by every tool module.
+Selector resolution, address-space primitives, and the repository-wide output
+sanitization contract, shared by the tool modules.
 
 Both tools need to answer one question identically: *does this policy selector
 name this thing?* Two tools in the same repo disagreeing about one policy is
@@ -15,6 +15,11 @@ timestamp quantization, envelope metadata, and reflection-guard support. It
 does not know any tool's report shape: each binary rebuilds its own output types
 from zero at the render boundary so a newly added field cannot pass through
 without an explicit decision.
+
+The `addrspace` subpackage compares route CIDRs and recognizes Tailscale 4via6
+prefixes, including extracting their embedded site IDs. It knows neither static
+policy shape nor live device state, and it does not decide whether an overlap or
+repeated site ID is intentional; callers own those classifications.
 
 For selector matching, the scope is resolving a selector to the values it
 names:
@@ -31,7 +36,7 @@ names:
 Out of scope — kept in `tail-acl`:
 
 - Port and protocol evaluation
-- `via` routing and posture evaluation
+- `via` routing behavior and posture evaluation
 - Policy parsing, merging, and upload
 
 The one shared policy-shape predicate is `ContainsLiteralWildcard`. Both
@@ -102,9 +107,10 @@ matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, ""
 
 ## Module layout
 
-This is a library module with no binary. It depends only on the Tailscale v2
-API client and the standard library; output sanitization adds no third-party
-dependency.
+This is a library module with no binary. Production `addrspace` code uses only
+the standard library. Its Tier-2 provenance test imports the pinned
+`tailscale.com/net/tsaddr` package to cross-validate the owned 4via6 decoder;
+no production package imports the full `tailscale.com` module.
 
 ## Documentation
 

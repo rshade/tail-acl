@@ -1,7 +1,7 @@
-// Package addrspace compares Tailscale route CIDRs for address overlap. It
-// knows nothing about ACL policy text, live device inventories, or 4via6
-// site-ID derivation — tail-acl and tailnet-audit each supply their own CIDR
-// strings, static or live, and interpret the results themselves.
+// Package addrspace provides policy-agnostic address-space primitives for
+// comparing route CIDRs and deriving site IDs from Tailscale 4via6 prefixes.
+// It knows nothing about ACL policy text or live device inventories: tail-acl
+// and tailnet-audit supply their own CIDR strings and classify the results.
 package addrspace
 
 import (
