@@ -21,6 +21,11 @@ prefixes, including extracting their embedded site IDs. It knows neither static
 policy shape nor live device state, and it does not decide whether an overlap or
 repeated site ID is intentional; callers own those classifications.
 
+The `hujsonedit` subpackage applies schema-agnostic, comment-preserving RFC
+6902 edits to HuJSON documents. It carries no knowledge of any particular
+document's fields; `tail-acl` and `tail-ipam` both build their typed edits on
+it.
+
 For selector matching, the scope is resolving a selector to the values it
 names:
 

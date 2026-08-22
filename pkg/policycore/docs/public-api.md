@@ -1,8 +1,9 @@
 # Public API reference
 
 This page describes the exported selector-matching API in `policycore`, the
-shared `policycore/addrspace` address primitives, and the
-`policycore/sanitize` output contract.
+shared `policycore/addrspace` address primitives, the `policycore/sanitize`
+output contract, and the `policycore/hujsonedit` comment-preserving document
+editor.
 
 ## Address-space primitives
 
@@ -39,6 +40,45 @@ to an unkeyed hash.
 `Sanitizer.Metadata` supplies the versioned output marker. Tools use
 `UnhandledFields` in reflection-guard tests to require a decision whenever an
 output struct grows.
+
+## HuJSON editing
+
+`hujsonedit` provides schema-agnostic, comment-preserving RFC 6902 edits to
+HuJSON documents. It carries no knowledge of any particular document's
+fields — callers own that; the package owns only the AST/patch mechanics.
+Extracted from `tail-acl/internal/aclpolicy` once `tail-ipam` needed the same
+mechanics and the generic layer was already visibly separable from
+ACL-specific code.
+
+`hujsonedit.PatchAdd(value, segments...)` and
+`hujsonedit.PatchRemove(segments...)` build `PatchOperation` values;
+`hujsonedit.WritePatch(path, resolve, operations...)` applies them to the
+document at `path` in order, then authors any comments those operations
+carry, then reformats. `resolve` (a `ResolveKey`) bridges alternate
+top-level key spellings before a path's first segment is resolved against
+the parsed document — pass `nil` when the schema has none.
+
+```go
+err := hujsonedit.WritePatch(path, nil,
+    hujsonedit.PatchAdd(entry, "acls", "-"),
+    hujsonedit.PatchComment("added by tail-acl grant add", "acls", "-"),
+)
+```
+
+`hujsonedit.PatchComment(text, segments...)` authors a leading `//`-prefixed
+line comment on the node at `segments`, naming it as it exists *after* every
+operation in the same call has applied, and appends after any comment
+already there; `PatchCommentOverwrite` replaces them instead.
+`hujsonedit.LeadingComments(path, resolve, segments...)` reads the comments
+already attached to a node, which lets a caller detect a no-op edit before
+writing. `hujsonedit.ValidateCommentText` rejects text that cannot render as
+one line comment (a carriage return, a newline, or invalid UTF-8).
+
+`hujsonedit.ParseFile` reads and parses a JSON or HuJSON document.
+`hujsonedit.WriteRaw` atomically writes raw bytes, preserving an existing
+file's permissions and defaulting new files to `0644`. `hujsonedit.JSONPointer`
+renders an RFC 6901 pointer for path segments, escaping `~` and `/` so a
+user-controlled segment cannot change the location an edit targets.
 
 ## `Matcher`
 
