@@ -54,6 +54,8 @@ github.com/itchyny/timefmt-go v0.1.8 h1:1YEo1JvfXeAHKdjelbYr/uCuhkybaHCeTkH8Bo79
 github.com/itchyny/timefmt-go v0.1.8/go.mod h1:5E46Q+zj7vbTgWY8o5YkMeYb4I6GeWLFnetPy5oBrAI=
 github.com/jaxxstorm/tscli v0.9.0 h1:sSxxf9FD+aDHYPgCf+RRFntp6XLJuT9YWmBRZgQW/+U=
 github.com/jaxxstorm/tscli v0.9.0/go.mod h1:S0NPWBZuwGwUjBKpujFgbooSpRLU4LMGiVlVtVQnDYc=
+github.com/jaxxstorm/tscli v0.10.0 h1:vRdVpOnp2kbRjNONmMKSJtOnV7ilX5ChsFshawJAmHY=
+github.com/jaxxstorm/tscli v0.10.0/go.mod h1:S0NPWBZuwGwUjBKpujFgbooSpRLU4LMGiVlVtVQnDYc=
 github.com/jaxxstorm/vers v0.0.3 h1:1gX03shJ+4UcIA55eDnZ1sSGbswBTz7CEtnnFBbsFTs=
 github.com/jaxxstorm/vers v0.0.3/go.mod h1:MdYMhmKfwEo/AwqX/dTo4mB9/lnB8Je+eXnWyQbXQbY=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 h1:BQSFePA1RWJOlocH6Fxy8MmwDt+yVQYULKfN0RoTN8A=

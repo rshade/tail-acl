@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/hexops/gotextdiff v1.0.3
 	github.com/itchyny/gojq v0.12.19
-	github.com/jaxxstorm/tscli v0.9.0
+	github.com/jaxxstorm/tscli v0.10.0
 	github.com/rshade/tailscale-utils/policycore v0.0.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
