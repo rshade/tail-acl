@@ -26,6 +26,11 @@ The `hujsonedit` subpackage applies schema-agnostic, comment-preserving RFC
 document's fields; `tail-acl` and `tail-ipam` both build their typed edits on
 it.
 
+The `alpha` subpackage is the convention for hand-modeling a Tailscale
+feature that is alpha or unreleased in the pinned SDK — see
+[Alpha feature modeling](#alpha-feature-modeling) below. It carries no
+knowledge of any particular alpha feature's types.
+
 For selector matching, the scope is resolving a selector to the values it
 names:
 
@@ -109,6 +114,58 @@ A caller with no tailnet access uses the roster-blind entry point instead:
 ```go
 matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, "")
 ```
+
+## Alpha feature modeling
+
+`policycore/alpha` is the shared convention for hand-modeling a Tailscale
+feature that is alpha or unreleased in the pinned
+`tailscale.com/client/tailscale/v2` SDK, so a tool in this repo can pick up an
+alpha feature early instead of waiting for the SDK to catch up. It is
+scaffolding only — no specific alpha feature's types live here; each
+feature's hand-modeled types live with the tool that needs them (or in a new
+`policycore/` subpackage, if more than one tool needs the same types resolved
+identically, following the precedent above).
+
+Adding an alpha-backed feature:
+
+1. Hand-model the feature's types where the tool that needs them lives, or in
+   a new `policycore/` subpackage if it must be shared.
+2. Add it to the slice returned by `alpha.RepositoryFeatures()` in
+   `policycore/alpha/alpha.go`. That function is the canonical repository-wide
+   inventory naming every hand-modeled alpha feature, its doc source, when this
+   repo started modeling it, and where it sits in Tailscale's own release
+   pipeline:
+
+   ```go
+   func RepositoryFeatures() []Feature {
+       return []Feature{
+           {
+               Name:        "declarative-node-sharing",
+               DocURL:      "https://tailscale.com/kb/example",
+               ModeledDate: time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC),
+               Stage:       StageAlpha,
+           },
+       }
+   }
+   ```
+
+   `alpha.NewRegistry()` instead returns an empty, caller-owned registry for
+   validation and lookup. Calling `Register` on that value does not update the
+   repository inventory.
+
+3. Give the feature its own migration tripwire — typically a test that fails
+   once the pinned SDK adds real support for it, forcing a conscious decision
+   to migrate off the hand-modeled types instead of letting them silently
+   diverge from the now-real SDK types. `alpha.RepositoryFeatures()` exposes
+   the feature and its `Stage`; it does not enforce that feature's tripwire
+   itself, so updating `Stage` as the feature moves through the pipeline is on
+   the contributor doing the migration.
+4. Cite alpha-sourced data with `alpha.AlphaHint` as the source-provenance
+   confidence, not `"hint"`. `"alpha-hint"` is an allowed `SourceRef`
+   confidence value in `tailscale-doctor` and `tailnet-audit` (AGENTS.md AX
+   convention 13): `"hint"` is editorial evidence verified at test time to
+   resolve in a *stable pinned* module, while `AlphaHint` is editorial evidence
+   against a surface Tailscale itself calls unstable — categorically weaker.
 
 ## Module layout
 

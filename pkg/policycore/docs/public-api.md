@@ -3,7 +3,27 @@
 This page describes the exported selector-matching API in `policycore`, the
 shared `policycore/addrspace` address primitives, the `policycore/sanitize`
 output contract, and the `policycore/hujsonedit` comment-preserving document
-editor.
+editor, plus the `policycore/alpha` inventory for features modeled ahead of the
+pinned SDK.
+
+## Alpha feature inventory
+
+`alpha.RepositoryFeatures()` returns a fresh copy of the canonical inventory
+of alpha or unreleased Tailscale features this repository hand-models. Each
+`alpha.Feature` records its `Name`, upstream `DocURL`, `ModeledDate`, and
+pipeline `Stage` (`StageAlpha`, `StageBeta`, or `StageGA`). Add new entries to
+the slice returned by that function in `policycore/alpha/alpha.go`.
+
+`alpha.NewRegistry()` returns an empty, caller-owned validation and lookup
+container. `Registry.Register` rejects missing fields, unknown stages, and
+duplicate names; it does not update `alpha.RepositoryFeatures()`.
+`Registry.Lookup` reads one entry and `Registry.List` returns entries sorted by
+name.
+
+`alpha.AlphaHint` is the string `alpha-hint`, the `SourceRef.confidence` value
+for an editorial pointer associated with one of these unstable or unreleased
+features. It complements `derived` and `hint`; it does not relax the rule that
+a source package pointer must resolve when one exists.
 
 ## Address-space primitives
 
