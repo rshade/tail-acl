@@ -20,8 +20,8 @@ var ErrTooManyChildren = errors.New("ipcalc: split would produce too many childr
 // Unmap4In6 rewrites an IPv4-mapped IPv6 prefix (::ffff:a.b.c.d/n) to its
 // equivalent plain IPv4 prefix. ok is false if prefix is not a 4-in-6
 // address, or if its bit length is too short to represent a valid IPv4
-// prefix once the 96-bit mapping prefix is removed — callers should treat
-// that the same as any other unsupported address family.
+// prefix once the 96-bit mapping prefix is removed. A caller that supports
+// IPv6 can preserve the original prefix when ok is false.
 func Unmap4In6(prefix netip.Prefix) (netip.Prefix, bool) {
 	addr := prefix.Addr()
 	if !addr.Is4In6() || prefix.Bits() < ipv4In6PrefixBits {
@@ -38,8 +38,8 @@ func Unmap4In6(prefix netip.Prefix) (netip.Prefix, bool) {
 //
 // If the number of children would exceed MaxMaterializedChildren, Split
 // returns (nil, count, ErrTooManyChildren) — count is still the exact
-// number (as [big.Int], since it can exceed uint64 range for IPv6 callers
-// added later), so a caller can report it without enumerating.
+// number (as [big.Int], since it can exceed uint64 range for IPv6 callers),
+// so a caller can report it without enumerating.
 func Split(parent netip.Prefix, targetBits int) ([]netip.Prefix, *big.Int, error) {
 	if !parent.IsValid() {
 		return nil, nil, errors.New("ipcalc: invalid parent prefix")

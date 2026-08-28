@@ -18,6 +18,22 @@ site ID is invalid, allowing a caller to distinguish a malformed via route from
 an ordinary route. `addrspace.SiteID` performs the full validation and returns
 the embedded 16-bit site ID only for valid `/96` through `/128` via prefixes.
 
+## Subnet arithmetic
+
+`ipcalc.Split` divides a parent CIDR into equal-sized child prefixes of a target
+bit length. It works for both IPv4 and IPv6 and returns the children alongside
+the exact child count as a `*big.Int` — since IPv6 splitting can exceed uint64
+range, the count is always computed this way even when the full list cannot be
+materialized. When the count would exceed `MaxMaterializedChildren` (65536),
+`Split` returns `(nil, count, ErrTooManyChildren)` so the caller can report the
+count without enumerating all children.
+
+`ipcalc.Unmap4In6` rewrites an IPv4-mapped IPv6 prefix (`::ffff:a.b.c.d/n`) to
+its equivalent plain IPv4 prefix. `ok` is false if the prefix is not a 4-in-6
+address, or if its bit length is too short to represent a valid IPv4 prefix
+once the 96-bit mapping prefix is removed. A caller that supports IPv6 can
+preserve the original prefix when `ok` is false.
+
 ## Output sanitization
 
 `sanitize.ParseLevel` accepts `off`, `identity`, and `strict`.

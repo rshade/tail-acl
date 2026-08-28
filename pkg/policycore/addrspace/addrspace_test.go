@@ -93,9 +93,19 @@ func TestOverlappingPairs(t *testing.T) {
 			wantPairs: [][2]int{{0, 1}},
 		},
 		{
+			name:      "network order can differ from input order",
+			cidrs:     []string{"10.1.0.0/16", "11.0.0.0/8", "10.0.0.0/8", "10.1.1.0/24"},
+			wantPairs: [][2]int{{0, 2}, {0, 3}, {2, 3}},
+		},
+		{
 			name:      "mapped ipv6 entry retains ipv6 and ipv4 overlaps",
 			cidrs:     []string{"::/0", "::ffff:10.0.0.0/104", "10.0.0.0/16"},
 			wantPairs: [][2]int{{0, 1}, {1, 2}},
+		},
+		{
+			name:      "mapped ipv6 projections do not duplicate pairs",
+			cidrs:     []string{"::ffff:10.0.0.0/104", "::ffff:10.0.0.0/104", "10.0.0.0/16"},
+			wantPairs: [][2]int{{0, 1}, {0, 2}, {1, 2}},
 		},
 		{
 			name:      "every pair overlaps",
@@ -129,6 +139,41 @@ func TestOverlappingPairs(t *testing.T) {
 			assertErrIndices(t, tt.cidrs, gotErrs, tt.wantErrs)
 		})
 	}
+}
+
+func TestOverlappingPairsMatchesPairwiseOverlaps(t *testing.T) {
+	t.Parallel()
+
+	cidrs := []string{
+		"10.1.2.0/24",
+		"2001:db8:1::/64",
+		"10.0.0.0/8",
+		"11.0.0.0/8",
+		"::/0",
+		"::ffff:10.1.0.0/112",
+		"10.1.0.0/16",
+		"2001:db8::/32",
+		"10.1.2.3",
+		"::ffff:10.1.2.3",
+		"2001:db9::/32",
+		"11.0.0.1",
+	}
+	var wantPairs [][2]int
+	for left := range cidrs {
+		for right := left + 1; right < len(cidrs); right++ {
+			overlaps, err := addrspace.Overlaps(cidrs[left], cidrs[right])
+			if err != nil {
+				t.Fatalf("Overlaps(%q, %q): %v", cidrs[left], cidrs[right], err)
+			}
+			if overlaps {
+				wantPairs = append(wantPairs, [2]int{left, right})
+			}
+		}
+	}
+
+	gotPairs, gotErrs := addrspace.OverlappingPairs(cidrs)
+	assertPairs(t, cidrs, gotPairs, wantPairs)
+	assertErrIndices(t, cidrs, gotErrs, nil)
 }
 
 func assertPairs(t *testing.T, cidrs []string, got, want [][2]int) {

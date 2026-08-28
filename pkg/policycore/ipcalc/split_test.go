@@ -2,7 +2,6 @@ package ipcalc_test
 
 import (
 	"errors"
-	"math/big"
 	"net/netip"
 	"strings"
 	"testing"
@@ -156,29 +155,60 @@ func TestSplitIPv4EdgeCases(t *testing.T) {
 func TestSplitIPv6EdgeCases(t *testing.T) {
 	t.Parallel()
 
-	// fd7a:115c:a1e0::/126 into /128s
-	parent, _ := netip.ParsePrefix("fd7a:115c:a1e0::/126")
-	children, count, err := ipcalc.Split(parent, 128)
-	if err != nil {
-		t.Fatalf("Split() error = %v", err)
-	}
-	if count.Int64() != 4 {
-		t.Errorf("count = %d, want 4", count.Int64())
-	}
-	if len(children) != 4 {
-		t.Errorf("len(children) = %d, want 4", len(children))
+	tests := []struct {
+		name       string
+		parent     string
+		targetBits int
+		want       []string
+	}{
+		{
+			name:       "split_127_to_128",
+			parent:     "fd7a:115c:a1e0::/127",
+			targetBits: 128,
+			want: []string{
+				"fd7a:115c:a1e0::/128",
+				"fd7a:115c:a1e0::1/128",
+			},
+		},
+		{
+			name:       "split_128_to_128",
+			parent:     "fd7a:115c:a1e0::1/128",
+			targetBits: 128,
+			want:       []string{"fd7a:115c:a1e0::1/128"},
+		},
+		{
+			name:       "parent_equals_target",
+			parent:     "2001:db8:1:2::/64",
+			targetBits: 64,
+			want:       []string{"2001:db8:1:2::/64"},
+		},
 	}
 
-	want := []string{
-		"fd7a:115c:a1e0::/128",
-		"fd7a:115c:a1e0::1/128",
-		"fd7a:115c:a1e0::2/128",
-		"fd7a:115c:a1e0::3/128",
-	}
-	for i, w := range want {
-		if children[i].String() != w {
-			t.Errorf("children[%d] = %v, want %v", i, children[i], w)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			parent, err := netip.ParsePrefix(tt.parent)
+			if err != nil {
+				t.Fatalf("parse parent %q: %v", tt.parent, err)
+			}
+
+			children, count, err := ipcalc.Split(parent, tt.targetBits)
+			if err != nil {
+				t.Fatalf("Split() error = %v", err)
+			}
+			if count.Int64() != int64(len(tt.want)) {
+				t.Errorf("Split() count = %d, want %d", count.Int64(), len(tt.want))
+			}
+			if len(children) != len(tt.want) {
+				t.Fatalf("Split() len(children) = %d, want %d", len(children), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if children[i].String() != want {
+					t.Errorf("Split() children[%d] = %v, want %v", i, children[i], want)
+				}
+			}
+		})
 	}
 }
 
@@ -242,19 +272,47 @@ func TestSplitMaxMaterialized(t *testing.T) {
 	}
 }
 
-func TestSplitIPv6SmallSplit(t *testing.T) {
+func TestSplitIPv6MaterializationBoundary(t *testing.T) {
 	t.Parallel()
 
-	// IPv6 split: fd7a:115c:a1e0::/48 into /64s
-	parent, _ := netip.ParsePrefix("fd7a:115c:a1e0::/48")
-	_, count, err := ipcalc.Split(parent, 64)
-
-	if err != nil {
-		t.Fatalf("Split() error = %v", err)
+	parent, parseErr := netip.ParsePrefix("2001:db8::/32")
+	if parseErr != nil {
+		t.Fatalf("parse parent: %v", parseErr)
 	}
 
-	expected := new(big.Int).Lsh(big.NewInt(1), 64-48) // 2^16
-	if count.Cmp(expected) != 0 {
-		t.Errorf("Split() count = %v, want %v", count, expected)
-	}
+	t.Run("at_limit_is_materialized", func(t *testing.T) {
+		t.Parallel()
+
+		children, count, err := ipcalc.Split(parent, 48)
+		if err != nil {
+			t.Fatalf("Split() error = %v", err)
+		}
+		if count.String() != "65536" {
+			t.Errorf("Split() count = %s, want 65536", count)
+		}
+		if len(children) != ipcalc.MaxMaterializedChildren {
+			t.Fatalf("Split() len(children) = %d, want %d", len(children), ipcalc.MaxMaterializedChildren)
+		}
+		if children[0].String() != "2001:db8::/48" {
+			t.Errorf("Split() first child = %v, want 2001:db8::/48", children[0])
+		}
+		if children[len(children)-1].String() != "2001:db8:ffff::/48" {
+			t.Errorf("Split() last child = %v, want 2001:db8:ffff::/48", children[len(children)-1])
+		}
+	})
+
+	t.Run("over_limit_returns_exact_count", func(t *testing.T) {
+		t.Parallel()
+
+		children, count, err := ipcalc.Split(parent, 64)
+		if !errors.Is(err, ipcalc.ErrTooManyChildren) {
+			t.Fatalf("Split() error = %v, want ErrTooManyChildren", err)
+		}
+		if children != nil {
+			t.Errorf("Split() children = %v, want nil", children)
+		}
+		if count.String() != "4294967296" {
+			t.Errorf("Split() count = %s, want 4294967296", count)
+		}
+	})
 }

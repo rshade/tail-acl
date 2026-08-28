@@ -5,9 +5,11 @@
 package addrspace
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -38,10 +40,11 @@ func Overlaps(a, b string) (bool, error) {
 // entry is reported in the returned error map and excluded from every
 // pairwise comparison rather than aborting the whole call, so one bad entry
 // in a larger set never hides the overlaps among the rest. A nil error map
-// means every entry parsed.
+// means every entry parsed. Pairs are returned sorted ascending by (i, j);
+// downstream callers such as tail-ipam's subnet-pool registry overlap validation
+// depend on this ordering for deterministic error messages.
 func OverlappingPairs(cidrs []string) ([][2]int, map[int]error) {
-	prefixes := make([]netip.Prefix, len(cidrs))
-	parsed := make([]bool, len(cidrs))
+	projections := make([]prefixProjection, 0, len(cidrs))
 	var errs map[int]error
 	for index, cidr := range cidrs {
 		prefix, err := parseAddressOrPrefix(cidr)
@@ -52,22 +55,80 @@ func OverlappingPairs(cidrs []string) ([][2]int, map[int]error) {
 			errs[index] = fmt.Errorf("addrspace: %q: %w", cidr, err)
 			continue
 		}
-		prefixes[index] = prefix
-		parsed[index] = true
+		projections = append(projections, prefixProjection{prefix: prefix, index: index})
+		normalized := normalizePrefix(prefix)
+		if normalized != prefix {
+			// A fully IPv4-mapped IPv6 prefix occupies both its native
+			// IPv6 range and the equivalent IPv4 range for overlap purposes.
+			projections = append(projections, prefixProjection{prefix: normalized, index: index})
+		}
 	}
+	return overlappingProjectionPairs(projections), errs
+}
 
+type prefixProjection struct {
+	prefix netip.Prefix
+	index  int
+}
+
+// overlappingProjectionPairs uses the prefix-tree property that two
+// canonical prefixes in one address family overlap only when one contains
+// the other. Sorting by address and then prefix length puts every containing
+// prefix before the prefixes it contains, so the active containment stack
+// replaces a full comparison of every input pair. The sort and sweep cost
+// O(n log n + k), where k is the number of pairs found; restoring the public
+// original-index ordering costs O(k log k). Canonical registry maps have
+// unique prefixes and bounded nesting depth, so their total cost is
+// O(n log n). Duplicate inputs can themselves require a quadratic-size result.
+// [netip.Addr.Compare] orders by BitLen() first, so all IPv4 projections
+// (BitLen 32) form a contiguous block ahead of all IPv6 projections (BitLen 128)
+// in the sort order, ensuring that an IPv4 entry cannot pop a needed IPv6 ancestor
+// and vice versa, making a single mixed-family sweep safe.
+func overlappingProjectionPairs(projections []prefixProjection) [][2]int {
+	slices.SortFunc(projections, func(left, right prefixProjection) int {
+		if c := left.prefix.Addr().Compare(right.prefix.Addr()); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(left.prefix.Bits(), right.prefix.Bits()); c != 0 {
+			return c
+		}
+		return cmp.Compare(left.index, right.index)
+	})
+
+	active := make([]prefixProjection, 0, netip.IPv6Unspecified().BitLen()+1)
+	seen := make(map[[2]int]struct{})
 	var pairs [][2]int
-	for i := range cidrs {
-		if !parsed[i] {
-			continue
+	for _, current := range projections {
+		for len(active) > 0 && !active[len(active)-1].prefix.Contains(current.prefix.Addr()) {
+			active = active[:len(active)-1]
 		}
-		for j := i + 1; j < len(cidrs); j++ {
-			if parsed[j] && prefixesOverlap(prefixes[i], prefixes[j]) {
-				pairs = append(pairs, [2]int{i, j})
+		for _, containing := range active {
+			if containing.index == current.index {
+				continue
 			}
+			pair := orderedPair(containing.index, current.index)
+			if _, duplicate := seen[pair]; duplicate {
+				continue
+			}
+			seen[pair] = struct{}{}
+			pairs = append(pairs, pair)
 		}
+		active = append(active, current)
 	}
-	return pairs, errs
+	slices.SortFunc(pairs, func(left, right [2]int) int {
+		if c := cmp.Compare(left[0], right[0]); c != 0 {
+			return c
+		}
+		return cmp.Compare(left[1], right[1])
+	})
+	return pairs
+}
+
+func orderedPair(left, right int) [2]int {
+	if left < right {
+		return [2]int{left, right}
+	}
+	return [2]int{right, left}
 }
 
 // parseAddressOrPrefix parses value as a CIDR prefix, falling back to a bare
