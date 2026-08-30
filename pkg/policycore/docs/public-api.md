@@ -25,6 +25,17 @@ for an editorial pointer associated with one of these unstable or unreleased
 features. It complements `derived` and `hint`; it does not relax the rule that
 a source package pointer must resolve when one exists.
 
+`alpha.NewVerifierRegistry(features)` returns an empty `VerifierRegistry`
+backed by a `*Registry`. `RegisterVerifier(featureName, fn)` ties a
+`LiveVerifyFunc` (`func(context.Context) error`) to a feature already present
+in `features`, rejecting a nil `fn`, an unregistered feature name, or a
+duplicate. `RunAll(ctx)` runs every registered verifier and returns one
+`VerifyResult{FeatureName, Err}` per registered verifier, sorted by name. It
+returns an empty slice when no verifiers have been registered, even if the
+backing feature registry is populated. See
+[Live-verifying an alpha feature](../README.md#live-verifying-an-alpha-feature)
+for the opt-in, credentialed workflow that invokes this.
+
 ## Address-space primitives
 
 `addrspace.Overlaps` reports whether two CIDR prefixes or bare addresses share

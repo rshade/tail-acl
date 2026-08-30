@@ -167,6 +167,48 @@ Adding an alpha-backed feature:
    resolve in a *stable pinned* module, while `AlphaHint` is editorial evidence
    against a surface Tailscale itself calls unstable — categorically weaker.
 
+### Live-verifying an alpha feature
+
+Every other test in this repo is pure/offline (AGENTS.md AX convention 9),
+which cannot validate a claim like "this hand-modeled struct still matches
+what the live API returns today." `alpha.VerifierRegistry` is the opt-in tier
+for exactly that claim:
+
+1. Alongside the feature's hand-modeled types, write a `alpha.LiveVerifyFunc`
+   that fetches live data and round-trips it through the type, returning an
+   error if a field the type expects is missing or reshaped. It takes only a
+   `context.Context`; close over whatever client and credentials it needs.
+2. Add a `//go:build live_verify`-tagged test beside the feature. Name it
+   `TestLiveVerify...` so the workflow's test filter selects it. In that test,
+   populate an `alpha.Registry` with the feature and use it to construct a
+   `VerifierRegistry`.
+3. In the same test, explicitly call
+   `VerifierRegistry.RegisterVerifier(featureName, fn)`. Registration is
+   caller-owned runtime state: defining a verifier does not register it, and
+   there is no package discovery or global verifier registry. A nil func, an
+   unknown feature name, or a duplicate registration is rejected.
+4. Call `VerifierRegistry.RunAll(ctx)` and fail the test for each non-nil
+   result error. `RunAll` returns one `VerifyResult` per registered verifier,
+   sorted by name without stopping at the first failure; it returns an empty
+   slice when no verifiers have been registered.
+
+This mechanism is generic; it carries no feature-specific knowledge itself.
+In particular, the generic test in
+`policycore/alpha/liveverify_live_test.go` imports no feature packages and
+registers no feature verifiers; it checks live credential resolution and the
+empty-run plumbing only. A feature receives live coverage only when its own
+tagged test performs the registration and execution described above.
+
+The credentialed tests are invoked only by
+`.github/workflows/alpha-live-verify.yml`'s opt-in `workflow_dispatch` job —
+the same "excluded from ordinary CI by design" posture as
+`macos-scutil-capture.yml`. On pull requests, that workflow runs only when the
+change touches `policycore/alpha/**` or the workflow file itself. When
+selected, its credential-free `go vet -tags live_verify ./...` job
+compile-checks tagged files in every module. A tagged verifier outside
+`policycore/alpha` does not by itself trigger that check; add its path to the
+workflow's `pull_request.paths` filter if it needs continuing PR coverage.
+
 ## Module layout
 
 This is a library module with no binary. Production `addrspace` code uses only
