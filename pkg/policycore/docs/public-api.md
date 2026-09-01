@@ -65,6 +65,17 @@ address, or if its bit length is too short to represent a valid IPv4 prefix
 once the 96-bit mapping prefix is removed. A caller that supports IPv6 can
 preserve the original prefix when `ok` is false.
 
+`ipcalc.Info` reports the classic block facts for an IPv4 prefix — network
+address, broadcast address, usable host range, and usable-host count — as a
+`BlockInfo`. Host bits are masked off first, so an address inside a block
+yields the facts for its containing block. `Broadcast` is the zero `netip.Addr`
+(`IsValid() == false`) for a `/31` (RFC 3021 point-to-point) and a `/32`
+(host route), which reserve no network or broadcast address; for both, every
+address in the block is usable. `UsableHosts` is a `*big.Int`, like `Split`'s
+count, so an IPv6 extension cannot change the field's type. A non-IPv4 prefix
+returns `ErrIPv6NotSupported` — including a 4-in-6 prefix, which callers must
+normalize with `Unmap4In6` before calling.
+
 ## Output sanitization
 
 `sanitize.ParseLevel` accepts `off`, `identity`, and `strict`.
