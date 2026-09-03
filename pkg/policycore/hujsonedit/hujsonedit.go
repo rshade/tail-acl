@@ -1,8 +1,9 @@
 // Package hujsonedit provides schema-agnostic, comment-preserving RFC 6902
 // edits to HuJSON documents: build PatchOperation values with PatchAdd,
 // PatchRemove, PatchComment, and PatchCommentOverwrite, then apply them with
-// WritePatch. It carries no knowledge of any particular document's fields —
-// callers own that; this package owns only the AST/patch mechanics.
+// WritePatch to a file or with PatchBytes to a document held in memory. It
+// carries no knowledge of any particular document's fields — callers own
+// that; this package owns only the AST/patch mechanics.
 //
 // Extracted from tail-acl/internal/aclpolicy, which found these mechanics
 // were already entirely free of ACL-specific logic. The one schema-specific
@@ -101,13 +102,40 @@ func ParseFile(path string) (hujson.Value, error) {
 // JSON or HuJSON document at path, then authors any comments those
 // operations carry. resolve may be nil — see ResolveKey.
 //
+// It is PatchBytes bracketed by a read and an atomic write, so the two
+// cannot disagree about what an operation means. Nothing is written unless
+// the whole patch succeeded: an operation that fails leaves the file exactly
+// as it was.
+func WritePatch(path string, resolve ResolveKey, operations ...PatchOperation) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	patched, err := PatchBytes(data, resolve, operations...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return WriteRaw(path, patched)
+}
+
+// PatchBytes applies comment-preserving RFC 6902 operations to the JSON or
+// HuJSON document in data, authors any comments those operations carry, and
+// returns the reformatted result. data is not modified. resolve may be nil —
+// see ResolveKey.
+//
 // Operations apply in order, then every comment, then the document is
 // reformatted. Comments come last because a comment names its node as that
 // node exists after the edit — see PatchComment.
-func WritePatch(path string, resolve ResolveKey, operations ...PatchOperation) error {
-	value, err := ParseFile(path)
+//
+// Patching in memory is what lets a caller decide whether an edit is any
+// good before it reaches the filesystem, rather than writing it, re-reading
+// to find out, and undoing it when it was not: a rejected candidate is
+// simply dropped, so there is no window in which the file holds it and no
+// restore that can itself fail.
+func PatchBytes(data []byte, resolve ResolveKey, operations ...PatchOperation) ([]byte, error) {
+	value, err := hujson.Parse(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// json.RawMessage rather than any: omitempty must track hasValue exactly.
 	// On an any field omitempty omits only a nil interface, so PatchAdd(nil)
@@ -136,7 +164,7 @@ func WritePatch(path string, resolve ResolveKey, operations ...PatchOperation) e
 		if operation.hasValue {
 			raw, valueErr := json.Marshal(operation.value)
 			if valueErr != nil {
-				return fmt.Errorf("encoding patch value for %s: %w", path, valueErr)
+				return nil, fmt.Errorf("encoding patch value: %w", valueErr)
 			}
 			encoded.Value = raw
 		}
@@ -147,16 +175,16 @@ func WritePatch(path string, resolve ResolveKey, operations ...PatchOperation) e
 	// retain compact layout where the surrounding edited region is compact.
 	rawPatch, err := json.MarshalIndent(patch, "", "\t")
 	if err != nil {
-		return fmt.Errorf("encoding patch for %s: %w", path, err)
+		return nil, fmt.Errorf("encoding patch: %w", err)
 	}
 	if err = value.Patch(rawPatch); err != nil {
-		return fmt.Errorf("patching %s: %w", path, err)
+		return nil, fmt.Errorf("applying patch: %w", err)
 	}
-	if err = applyComments(&value, path, resolve, operations); err != nil {
-		return err
+	if err = applyComments(&value, resolve, operations); err != nil {
+		return nil, err
 	}
 	value.Format()
-	return WriteRaw(path, value.Pack())
+	return value.Pack(), nil
 }
 
 // applyComments authors each operation's comment onto the already-patched
@@ -166,14 +194,15 @@ func WritePatch(path string, resolve ResolveKey, operations ...PatchOperation) e
 // aliased key still resolves and a key the patch just created resolves to
 // its own spelling. A target that does not resolve is an error rather than a
 // silent skip, so the edit fails closed: hujson leaves a partially patched
-// value behind on error, but nothing is written.
-func applyComments(value *hujson.Value, path string, resolve ResolveKey, operations []PatchOperation) error {
+// value behind on error, but PatchBytes discards it and returns no document,
+// so no caller can write it.
+func applyComments(value *hujson.Value, resolve ResolveKey, operations []PatchOperation) error {
 	for _, operation := range operations {
 		if operation.comment == "" {
 			continue
 		}
 		if err := ValidateCommentText(operation.comment); err != nil {
-			return fmt.Errorf("commenting %s: %w", path, err)
+			return fmt.Errorf("commenting: %w", err)
 		}
 		segments := slices.Clone(operation.commentSegments)
 		if resolve != nil && len(segments) > 0 {
@@ -181,10 +210,10 @@ func applyComments(value *hujson.Value, path string, resolve ResolveKey, operati
 		}
 		extra, found, err := leadingExtra(value, segments)
 		if err != nil {
-			return fmt.Errorf("commenting %s: %w", path, err)
+			return fmt.Errorf("commenting: %w", err)
 		}
 		if !found {
-			return fmt.Errorf("commenting %s: no node at %s", path, JSONPointer(segments...))
+			return fmt.Errorf("commenting: no node at %s", JSONPointer(segments...))
 		}
 		switch {
 		case operation.commentOverwrite:

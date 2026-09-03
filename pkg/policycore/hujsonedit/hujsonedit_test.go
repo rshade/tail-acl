@@ -1,8 +1,10 @@
 package hujsonedit_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -237,5 +239,117 @@ func TestWritePatchRejectsInvalidCommentAndPreservesFile(t *testing.T) {
 	}
 	if injected := document.Find(hujsonedit.JSONPointer("injected")); injected != nil {
 		t.Error("file contains the injected field despite patch rejection")
+	}
+}
+
+// TestPatchBytesPatchesInMemoryAndLeavesInputAlone locks the property that
+// makes PatchBytes worth having: the caller gets a candidate document back
+// and nothing has been written or mutated, so it is free to inspect the
+// candidate and drop it.
+func TestPatchBytesPatchesInMemoryAndLeavesInputAlone(t *testing.T) {
+	t.Parallel()
+	original := []byte("// keep me\n{\n\t\"foo\": \"bar\",\n}\n")
+	input := slices.Clone(original)
+
+	patched, err := hujsonedit.PatchBytes(input, nil, hujsonedit.PatchAdd("quux", "baz"))
+	if err != nil {
+		t.Fatalf("PatchBytes: %v", err)
+	}
+	if !bytes.Equal(input, original) {
+		t.Errorf("PatchBytes modified its input: got %q, want %q", input, original)
+	}
+	if !strings.Contains(string(patched), "// keep me") {
+		t.Errorf("patched document = %q, want the leading comment preserved", patched)
+	}
+
+	document, err := hujson.Parse(patched)
+	if err != nil {
+		t.Fatalf("parsing the patched document: %v", err)
+	}
+	found := document.Find(hujsonedit.JSONPointer("baz"))
+	if found == nil {
+		t.Fatalf("patched document = %q, want a /baz member", patched)
+	}
+	if got := strings.TrimSpace(found.String()); got != `"quux"` {
+		t.Errorf("/baz = %s, want \"quux\"", got)
+	}
+}
+
+// TestPatchBytesAndWritePatchAgree is the guard on there being one patch
+// implementation rather than two: WritePatch is defined as PatchBytes
+// bracketed by a read and a write, so the bytes it leaves on disk must be
+// exactly the bytes PatchBytes returns for the same document and operations.
+func TestPatchBytesAndWritePatchAgree(t *testing.T) {
+	t.Parallel()
+	const content = "{\n\t// a note\n\t\"foo\": {\"nested\": 1},\n}\n"
+	path := writeTemp(t, content)
+
+	operations := []hujsonedit.PatchOperation{
+		hujsonedit.PatchAdd(map[string]string{"a": "b"}, "added"),
+		hujsonedit.PatchRemove("foo", "nested"),
+		hujsonedit.PatchComment("why added exists", "added"),
+	}
+
+	inMemory, err := hujsonedit.PatchBytes([]byte(content), nil, operations...)
+	if err != nil {
+		t.Fatalf("PatchBytes: %v", err)
+	}
+	if err = hujsonedit.WritePatch(path, nil, operations...); err != nil {
+		t.Fatalf("WritePatch: %v", err)
+	}
+	if onDisk := readAll(t, path); onDisk != string(inMemory) {
+		t.Errorf("WritePatch wrote %q, want PatchBytes' %q", onDisk, inMemory)
+	}
+}
+
+func TestPatchBytesReturnsNoDocumentOnFailure(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		data      string
+		operation hujsonedit.PatchOperation
+		wantErr   string
+	}{
+		{
+			name:      "unparseable document",
+			data:      "{not json",
+			operation: hujsonedit.PatchAdd("bar", "foo"),
+			wantErr:   "invalid literal",
+		},
+		{
+			name:      "operation targets a missing node",
+			data:      "{}\n",
+			operation: hujsonedit.PatchRemove("absent"),
+			wantErr:   "applying patch",
+		},
+		{
+			name:      "comment targets a missing node",
+			data:      "{}\n",
+			operation: hujsonedit.PatchComment("nowhere", "absent"),
+			wantErr:   "commenting: no node at /absent",
+		},
+		{
+			name:      "comment text would inject a member",
+			data:      `{"foo":"bar"}` + "\n",
+			operation: hujsonedit.PatchComment("note\n\"injected\": \"pwned\",", "foo"),
+			wantErr:   "commenting:",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			patched, err := hujsonedit.PatchBytes([]byte(tc.data), nil, tc.operation)
+			if err == nil {
+				t.Fatalf("PatchBytes = %q, want an error", patched)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("PatchBytes error = %q, want it to contain %q", err, tc.wantErr)
+			}
+			if patched != nil {
+				t.Errorf("PatchBytes returned %q alongside its error, want nil", patched)
+			}
+		})
 	}
 }
