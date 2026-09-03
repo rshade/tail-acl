@@ -99,6 +99,14 @@ to an unkeyed hash.
 `UnhandledFields` in reflection-guard tests to require a decision whenever an
 output struct grows.
 
+The `sanitize/sanitizetest` subpackage holds the other test-facing half:
+`AssertNoIdentityLeaks` scans rendered output for a fixture's real values and
+reports every one it finds. It matches ASCII case-insensitively and as a plain
+substring, deliberately dropping the token-boundary rule `Sanitizer.Text`
+applies — a value that reaches rendered output has leaked whatever surrounds
+it. It takes a minimal `TestingT`, so it adds no dependency beyond the standard
+library.
+
 ## HuJSON editing
 
 `hujsonedit` provides schema-agnostic, comment-preserving RFC 6902 edits to

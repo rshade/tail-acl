@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rshade/tailscale-utils/policycore/sanitize"
+	"github.com/rshade/tailscale-utils/policycore/sanitize/sanitizetest"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
 )
@@ -85,16 +86,122 @@ func TestSanitizeResultEnvelopeReusesPlaceholdersInFreeText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leaked := range []string{"alice@example.com", "100.64.0.10", "example.ts.net"} {
-		if bytes.Contains(rendered, []byte(leaked)) {
-			t.Errorf("sanitized result leaked %q: %s", leaked, rendered)
-		}
-	}
+	sanitizetest.AssertNoIdentityLeaks(
+		t, rendered, []string{"alice@example.com", "100.64.0.10", "example.ts.net"},
+	)
 	if !strings.Contains(got.Message, got.Source) || !strings.Contains(got.Trace[0], got.Source) {
 		t.Errorf("source placeholder is inconsistent across structured and prose fields: %#v", got)
 	}
 	if !strings.Contains(got.Message, "tag:web") {
 		t.Errorf("identity level unexpectedly removed operational tag name: %q", got.Message)
+	}
+}
+
+func TestSanitizedRenderedOutputPassesIdentityLeakScan(t *testing.T) {
+	t.Parallel()
+
+	identityValues := []string{
+		"/tmp/LeakScan/AlicePolicy.hujson",
+		"LeakScan.Tailnet.Example",
+		"etag-LeakScan-215",
+		"Alice.LeakScan@Example.com",
+		"Router.LeakScan.Example",
+		"10.215.0.0/16",
+		"Validator.LeakScan@Example.com",
+		"Skipped.LeakScan.Example",
+	}
+	strictIdentityValues := []string{
+		"sha256-LeakScanPolicyDigest215",
+		"group:LeakScanEngineering",
+		"tag:LeakScanFinance",
+	}
+	allIdentityValues := append(append([]string{}, identityValues...), strictIdentityValues...)
+	identityProse := strings.Join(allIdentityValues, " | ")
+	assertions := []aclpolicy.AssertionResult{
+		{
+			ID: "tests[0].accept[0]", Status: aclpolicy.AssertionPass,
+			Source: "Alice.LeakScan@Example.com", Destination: "Router.LeakScan.Example:443",
+			Evidence: identityProse, Trace: []string{"assertion: " + identityProse},
+		},
+		{
+			ID: "tests[0].accept[1]", Status: aclpolicy.AssertionPass,
+			Source: "tag:LeakScanFinance", Destination: "10.215.0.0/16:443",
+			Evidence: identityProse, Trace: []string{"strict selector: " + identityProse},
+		},
+	}
+	findings := []aclpolicy.LintFinding{
+		{
+			ID: "unused-group", Severity: aclpolicy.LintWarn,
+			Rule: "groups[group:LeakScanEngineering]", Value: "group:LeakScanEngineering",
+			Evidence: identityProse, Remediation: "remove " + identityProse,
+			Suggestion: "replace " + identityProse, Trace: []string{"finding: " + identityProse},
+		},
+		{
+			ID: "auto-approver-route", Severity: aclpolicy.LintWarn,
+			Rule: "autoApprovers.routes[10.215.0.0/16][0]", Value: "10.215.0.0/16",
+			Evidence: identityProse, Remediation: identityProse, Trace: []string{identityProse},
+		},
+	}
+	validation := &tailapi.ValidationResult{
+		Message: identityProse,
+		Failures: []tailapi.ValidationDetail{{
+			User:   "Validator.LeakScan@Example.com",
+			Errors: []string{identityProse}, Warnings: []string{"warning: " + identityProse},
+		}},
+	}
+	input := newResult(cmdLint, statusFailed, identityProse)
+	input.File = "/tmp/LeakScan/AlicePolicy.hujson"
+	input.PolicyDigest = "sha256-LeakScanPolicyDigest215"
+	input.Tailnet = "LeakScan.Tailnet.Example"
+	input.ETag = "etag-LeakScan-215"
+	input.Source = "Alice.LeakScan@Example.com"
+	input.Destination = "Router.LeakScan.Example:443"
+	input.Evidence = identityProse
+	input.Trace = []string{"envelope: " + identityProse}
+	input.Assertions = &assertions
+	input.Skipped = []aclpolicy.RuleSkip{{
+		Rule: "grants[0]", Value: "Skipped.LeakScan.Example", Reason: identityProse,
+	}}
+	input.Findings = &findings
+	input.LintThreshold = string(aclpolicy.LintWarn)
+	input.Validation = validation
+	input.Local = &localTestComponent{
+		Status: statusFailed, Message: identityProse, Assertions: assertions,
+		Skipped: []aclpolicy.RuleSkip{{
+			Rule: "grants[1]", Value: "Skipped.LeakScan.Example", Reason: identityProse,
+		}},
+	}
+	input.Server = &serverTestComponent{
+		Status: statusFailed, Validation: validation, Message: identityProse,
+	}
+
+	for _, level := range []sanitize.Level{sanitize.Identity, sanitize.Strict} {
+		t.Run(string(level), func(t *testing.T) {
+			t.Parallel()
+
+			output, err := sanitize.New(sanitize.Options{
+				Level: level, Tool: toolName, Tailnet: input.Tailnet,
+				KeyHex: strings.Repeat("03", 32),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sanitized := sanitizeResultEnvelope(input, output)
+			var jsonOutput, humanOutput bytes.Buffer
+			if err = render(&jsonOutput, formatJSON, false, sanitized); err != nil {
+				t.Fatalf("render JSON: %v", err)
+			}
+			if err = render(&humanOutput, formatHuman, false, sanitized); err != nil {
+				t.Fatalf("render human: %v", err)
+			}
+
+			wantAbsent := append([]string{}, identityValues...)
+			if level == sanitize.Strict {
+				wantAbsent = append(wantAbsent, strictIdentityValues...)
+			}
+			rendered := bytes.Join([][]byte{jsonOutput.Bytes(), humanOutput.Bytes()}, []byte("\n"))
+			sanitizetest.AssertNoIdentityLeaks(t, rendered, wantAbsent)
+		})
 	}
 }
 
@@ -134,9 +241,9 @@ func TestRunSanitizeEnvironmentOverridesFlagAndKeepsJSONClean(t *testing.T) {
 	if envelope.Sanitization == nil || envelope.Sanitization.Level != sanitize.Identity {
 		t.Fatalf("sanitization marker = %#v", envelope.Sanitization)
 	}
-	if strings.Contains(stdout.String(), "alice@example.com") || strings.Contains(stdout.String(), "100.64.0.10") {
-		t.Fatalf("sanitized stdout leaked an input identity: %s", stdout.String())
-	}
+	sanitizetest.AssertNoIdentityLeaks(
+		t, stdout.Bytes(), []string{"alice@example.com", "100.64.0.10"},
+	)
 	if !strings.Contains(stderr.String(), "overrides --sanitize") {
 		t.Fatalf("stderr lacks override notice: %q", stderr.String())
 	}
