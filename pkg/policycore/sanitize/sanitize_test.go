@@ -138,6 +138,35 @@ func TestSanitizerScansShortDelimitedIdentitiesWithoutCorruptingLargerTokens(t *
 	}
 }
 
+func TestPseudonymDoesNotRegisterValueForText(t *testing.T) {
+	t.Parallel()
+
+	output, err := sanitize.New(sanitize.Options{
+		Level: sanitize.Identity, Tool: "test", Random: bytes.NewReader(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const original = "203.0.113.10"
+	placeholder := output.Pseudonym("ipv4", original)
+	if placeholder == original {
+		t.Fatal("Pseudonym() retained the original value")
+	}
+	if got := output.Pseudonym("ipv4", original); got != placeholder {
+		t.Errorf("Pseudonym() = %q, want stable %q", got, placeholder)
+	}
+	if got := output.Text("peer " + original); got != "peer "+original {
+		t.Errorf("Text() replaced an unregistered pseudonym input: %q", got)
+	}
+	if got := output.Value("ipv4", original); got != placeholder {
+		t.Errorf("Value() = %q, want Pseudonym() result %q", got, placeholder)
+	}
+	if got := output.Text("peer " + original); got != "peer "+placeholder {
+		t.Errorf("Text() did not replace registered input: %q", got)
+	}
+}
+
 func TestEphemeralMetadataIsNotComparable(t *testing.T) {
 	t.Parallel()
 

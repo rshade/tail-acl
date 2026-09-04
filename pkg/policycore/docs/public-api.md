@@ -120,7 +120,8 @@ allowing compatible retained
 reports to establish that they share a correlation domain. It never falls back
 to an unkeyed hash.
 
-`Sanitizer.Value` registers and replaces a structured value;
+`Sanitizer.Pseudonym` replaces a structured value without retaining it;
+`Sanitizer.Value` additionally registers a structured value for later prose replacement;
 `Sanitizer.Text` replaces registered exact values in prose;
 `Sanitizer.Time` quantizes strict timestamps to a UTC day; and
 `Sanitizer.Metadata` supplies the versioned output marker. Tools use

@@ -234,10 +234,22 @@ func (s *Sanitizer) Metadata() *Metadata {
 	return &Metadata{Level: s.level, Scheme: schemeHMAC, Scope: s.scope, KeyID: s.keyID}
 }
 
-// Value returns the stable placeholder for one real value in this invocation.
-// The first semantic kind wins if the same literal is registered through more
-// than one field, making the acceptance guarantee literal: the same real value
-// maps to the same placeholder everywhere it appears.
+// Pseudonym returns a stable placeholder without retaining the real value.
+// It is intended for structured output that never needs a later Text pass.
+// Unlike Value, the semantic kind is part of the mapping, so callers must use
+// the same kind wherever they need the same literal to correlate.
+func (s *Sanitizer) Pseudonym(kind, value string) string {
+	if s == nil || s.level == Off || value == "" {
+		return value
+	}
+	return placeholderPrefix(kind) + "-" + s.digest("value", kind, value)
+}
+
+// Value returns the stable placeholder for one real value in this invocation
+// and registers the value for replacement by Text. The first semantic kind
+// wins if the same literal is registered through more than one field, making
+// the acceptance guarantee literal: the same registered real value maps to the
+// same placeholder everywhere it appears.
 func (s *Sanitizer) Value(kind, value string) string {
 	if s == nil || s.level == Off || value == "" {
 		return value
@@ -245,8 +257,7 @@ func (s *Sanitizer) Value(kind, value string) string {
 	if placeholder, ok := s.byValue[value]; ok {
 		return placeholder
 	}
-	prefix := placeholderPrefix(kind)
-	placeholder := prefix + "-" + s.digest("value", kind, value)
+	placeholder := s.Pseudonym(kind, value)
 	s.byValue[value] = placeholder
 	s.original = append(s.original, value)
 	return placeholder
