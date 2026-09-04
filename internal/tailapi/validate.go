@@ -295,8 +295,7 @@ func ValidatePolicy(
 		}
 	}
 	result, classifyErr := classifyValidationResponse(response.StatusCode, body)
-	var unavailable *ValidationUnavailableError
-	if errors.As(classifyErr, &unavailable) {
+	if unavailable, ok := errors.AsType[*ValidationUnavailableError](classifyErr); ok {
 		unavailable.RetryAfter = response.Header.Get("Retry-After")
 	}
 	return result, classifyErr

@@ -966,7 +966,7 @@ func assertEmptiedBlockKeepsComment(t *testing.T, command []string, policy, want
 		t.Fatal(err)
 	}
 	output := string(got)
-	comment := strings.SplitN(strings.SplitN(policy, "\n\t", 2)[1], "\n", 2)[0]
+	comment, _, _ := strings.Cut(strings.SplitN(policy, "\n\t", 2)[1], "\n")
 	if !strings.Contains(output, comment) {
 		t.Errorf("removing the last entry lost %q:\n%s", comment, output)
 	}

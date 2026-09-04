@@ -723,10 +723,8 @@ func TestEvaluateLintUnusedCountsIndirectReferences(t *testing.T) {
 func TestEvaluatePolicyLintCountsSSHTestReferences(t *testing.T) {
 	t.Parallel()
 	policy := &aclpolicy.Policy{
-		ACL: tailscale.ACL{
-			TagOwners: map[string][]string{
-				"tag:ssh-only": {"autogroup:admin"},
-			},
+		TagOwners: map[string][]string{
+			"tag:ssh-only": {"autogroup:admin"},
 		},
 		SSHTests: []aclpolicy.SSHTest{{
 			Source:      "alice@example.com",
@@ -749,20 +747,16 @@ func TestEvaluatePolicyLintCountsSSHTestReferences(t *testing.T) {
 func TestEvaluatePolicyLintCountsSSHRuleReferences(t *testing.T) {
 	t.Parallel()
 	policy := &aclpolicy.Policy{
-		ACL: tailscale.ACL{
-			TagOwners: map[string][]string{
-				"tag:ssh-only": {"autogroup:admin"},
-				"tag:recorder": {"autogroup:admin"},
-			},
+		TagOwners: map[string][]string{
+			"tag:ssh-only": {"autogroup:admin"},
+			"tag:recorder": {"autogroup:admin"},
 		},
 		SSH: []aclpolicy.SSHRule{{
-			ACLSSH: tailscale.ACLSSH{
-				Action:      "accept",
-				Source:      []string{"autogroup:member"},
-				Destination: []string{"tag:ssh-only"},
-				Users:       []string{"ubuntu"},
-				Recorder:    []string{"tag:recorder"},
-			},
+			Action:      "accept",
+			Source:      []string{"autogroup:member"},
+			Destination: []string{"tag:ssh-only"},
+			Users:       []string{"ubuntu"},
+			Recorder:    []string{"tag:recorder"},
 		}},
 	}
 	report, err := aclpolicy.EvaluatePolicyLint(policy, aclpolicy.LintOptions{})
@@ -800,13 +794,11 @@ func TestEvaluatePolicyLintFlagsInvalidSSHSelectors(t *testing.T) {
 	t.Parallel()
 	policy := &aclpolicy.Policy{
 		SSH: []aclpolicy.SSHRule{{
-			ACLSSH: tailscale.ACLSSH{
-				Action:      "accept",
-				Source:      []string{"group:ghost"},
-				Destination: []string{"tag:missing"},
-				Users:       []string{"ubuntu"},
-				Recorder:    []string{"recorder-missing"},
-			},
+			Action:      "accept",
+			Source:      []string{"group:ghost"},
+			Destination: []string{"tag:missing"},
+			Users:       []string{"ubuntu"},
+			Recorder:    []string{"recorder-missing"},
 		}},
 		SSHTests: []aclpolicy.SSHTest{{
 			Source:      "ipset:ghost",

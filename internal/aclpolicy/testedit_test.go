@@ -11,9 +11,9 @@ import (
 
 func TestAddAssertionsMergesBySemanticAssertion(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{Source: "alice@example.com", Deny: []string{"tag:db:5432", "tag:cache:6379"}},
-	}}}
+	}}
 
 	edit, err := aclpolicy.AddAssertions(
 		policy,
@@ -40,13 +40,13 @@ func TestAddAssertionsMergesBySemanticAssertion(t *testing.T) {
 
 func TestAddAssertionsSkipsPostureQualifiedEntryAndUsesModernSpelling(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{
 			Source:          "alice@example.com",
 			Accept:          []string{"tag:old:443"},
 			SrcPostureAttrs: map[string]any{"node:os": "linux"},
 		},
-	}}}
+	}}
 
 	edit, err := aclpolicy.AddAssertion(
 		policy, "alice@example.com", aclpolicy.TestAccept, "tag:web:443",
@@ -66,14 +66,14 @@ func TestAddAssertionsSkipsPostureQualifiedEntryAndUsesModernSpelling(t *testing
 
 func TestRemoveAssertionsRemovesDuplicatesAndPrunesEntry(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{
 			User:  "alice@example.com",
 			Allow: []string{"tag:web:443", "tag:web:443"},
 			Deny:  []string{"tag:db:5432"},
 		},
 		{Source: "bob@example.com", Deny: []string{"tag:db:5432"}},
-	}}}
+	}}
 
 	edit, err := aclpolicy.RemoveAssertions(
 		policy,
@@ -104,9 +104,9 @@ func TestRemoveAssertionsRemovesDuplicatesAndPrunesEntry(t *testing.T) {
 // unrunnable.
 func TestAddAssertionsAppendsToTheFieldTheRunnerReads(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{Source: "alice@example.com", Accept: []string{}, Allow: []string{"tag:web:443"}},
-	}}}
+	}}
 
 	if _, err := aclpolicy.AddAssertion(
 		policy, "alice@example.com", aclpolicy.TestAccept, "tag:api:8443",
@@ -125,9 +125,9 @@ func TestAddAssertionsAppendsToTheFieldTheRunnerReads(t *testing.T) {
 
 func TestRemoveAssertionsMatchesTheFieldTheRunnerReads(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{Source: "alice@example.com", Accept: []string{}, Allow: []string{"tag:web:443"}},
-	}}}
+	}}
 
 	edit, err := aclpolicy.RemoveAssertion(
 		policy, "alice@example.com", aclpolicy.TestAccept, "tag:web:443",
@@ -147,13 +147,13 @@ func TestRemoveAssertionsMatchesTheFieldTheRunnerReads(t *testing.T) {
 // empty srcPostureAttrs object still runs and must stay editable.
 func TestEditsMatchEntryWithEmptyPostureAttrs(t *testing.T) {
 	t.Parallel()
-	policy := &aclpolicy.Policy{ACL: tailscale.ACL{Tests: []tailscale.ACLTest{
+	policy := &aclpolicy.Policy{Tests: []tailscale.ACLTest{
 		{
 			Source:          "alice@example.com",
 			Deny:            []string{"tag:db:5432"},
 			SrcPostureAttrs: map[string]any{},
 		},
-	}}}
+	}}
 
 	if _, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{}); err != nil {
 		t.Fatalf("runner rejects an empty srcPostureAttrs entry: %v", err)

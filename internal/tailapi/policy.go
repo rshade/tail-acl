@@ -327,8 +327,7 @@ func LookupService(
 	}
 
 	status := 0
-	var apiErr tailscale.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[tailscale.APIError](err); ok {
 		status = apiErr.Status
 	}
 	return ServiceLookup{}, &ValidationUnavailableError{

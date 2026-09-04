@@ -268,13 +268,11 @@ func TestWriteAndLoad(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.json")
 	policy := &aclpolicy.Policy{
-		ACL: tailscale.ACL{
-			Grants: []tailscale.Grant{{
-				Source:      []string{"autogroup:member"},
-				Destination: []string{"tag:web"},
-				IP:          []string{"tcp:443"},
-			}},
-		},
+		Grants: []tailscale.Grant{{
+			Source:      []string{"autogroup:member"},
+			Destination: []string{"tag:web"},
+			IP:          []string{"tcp:443"},
+		}},
 	}
 	if err := aclpolicy.Write(path, policy); err != nil {
 		t.Fatal(err)

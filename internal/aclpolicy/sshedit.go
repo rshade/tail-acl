@@ -174,15 +174,14 @@ func sshRuleFromSpec(spec SSHRuleSpec) (SSHRule, bool, error) {
 			)
 		}
 	}
-	return SSHRule{ACLSSH: tailscale.ACLSSH{
+	return SSHRule{
 		Action:          action,
 		Source:          source,
 		Destination:     destination,
 		Users:           users,
 		CheckPeriod:     checkPeriod,
 		Recorder:        recorder,
-		EnforceRecorder: spec.EnforceRecorder,
-	}}, checkPeriodSet, nil
+		EnforceRecorder: spec.EnforceRecorder}, checkPeriodSet, nil
 }
 
 func requiredSSHSelectors(name string, values []string) ([]string, error) {

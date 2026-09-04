@@ -34,8 +34,7 @@ import (
 func ParseRoster(data []byte) (map[string]tailscale.UserRole, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		var syntax *json.SyntaxError
-		if errors.As(err, &syntax) {
+		if syntax, ok := errors.AsType[*json.SyntaxError](err); ok {
 			return nil, fmt.Errorf("roster: invalid JSON at offset %d: %w", syntax.Offset, err)
 		}
 		return nil, fmt.Errorf("roster: invalid JSON: %w", err)

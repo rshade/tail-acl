@@ -2290,8 +2290,7 @@ func serverTestComponentFrom(validation tailapi.ValidationResult, err error) ser
 	if err != nil {
 		server.Message = err.Error()
 	}
-	var unavailable *tailapi.ValidationUnavailableError
-	if errors.As(err, &unavailable) {
+	if unavailable, ok := errors.AsType[*tailapi.ValidationUnavailableError](err); ok {
 		server.HTTPStatus = unavailable.Status
 		server.RetryAfter = unavailable.RetryAfter
 	}

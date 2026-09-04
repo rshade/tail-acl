@@ -558,8 +558,7 @@ func TestLookupServiceTypesUnreadableAnswersAsUnavailable(t *testing.T) {
 
 			lookup, err := tailapi.LookupService(
 				context.Background(), serviceLookupClient(t, server), "svc:known")
-			var unavailable *tailapi.ValidationUnavailableError
-			if !errors.As(err, &unavailable) {
+			if _, ok := errors.AsType[*tailapi.ValidationUnavailableError](err); !ok {
 				t.Fatalf("error = %v (%T), want *ValidationUnavailableError", err, err)
 			}
 			if lookup.Exists {
