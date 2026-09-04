@@ -1,0 +1,125 @@
+package alpha
+
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
+
+// ExternalTailnetConfig is one declarative node-sharing relationship. The
+// containing ExternalTailnets map supplies the local alias; ExternalID is the
+// other tailnet's stable ID.
+//
+// The upstream alpha documentation shows allowIncomingConnections explicitly
+// in both directions but does not specify the meaning of omitting it. This type
+// therefore preserves an explicit false when marshaled and assigns no semantic
+// default of its own.
+type ExternalTailnetConfig struct {
+	ExternalID                string   `json:"externalID"`
+	AllowIncomingConnections  bool     `json:"allowIncomingConnections"`
+	AllowExternalReferencesTo []string `json:"allowExternalReferencesTo,omitempty"`
+}
+
+// ExternalTailnets maps operator-chosen local aliases to declarative
+// node-sharing relationships. Aliases are local policy names; ExternalID is
+// the cross-tailnet identity suitable for correlation.
+type ExternalTailnets map[string]ExternalTailnetConfig
+
+// ExternalSelectorKind distinguishes the two cross-tailnet selector forms
+// declarative node sharing currently documents.
+type ExternalSelectorKind string
+
+const (
+	// ExternalSelectorGroup identifies group://<alias>/<name> selectors.
+	ExternalSelectorGroup ExternalSelectorKind = "group"
+	// ExternalSelectorTag identifies tag://<alias>/<name> selectors.
+	ExternalSelectorTag ExternalSelectorKind = "tag"
+)
+
+// ExternalSelector is a parsed cross-tailnet group or tag selector. Alias is
+// the local key in ExternalTailnets; Name omits the ordinary group: or tag:
+// prefix because Kind carries that distinction.
+type ExternalSelector struct {
+	Kind  ExternalSelectorKind
+	Alias string
+	Name  string
+}
+
+// ParseExternalSelector parses the declarative node-sharing selector forms
+// group://<alias>/<name> and tag://<alias>/<name>. Same-tailnet group:name and
+// tag:name selectors are intentionally rejected so callers cannot conflate
+// local and cross-tailnet references.
+func ParseExternalSelector(selector string) (ExternalSelector, error) {
+	if strings.TrimSpace(selector) != selector {
+		return ExternalSelector{}, fmt.Errorf("external selector %q contains surrounding whitespace", selector)
+	}
+
+	var (
+		kind      ExternalSelectorKind
+		remainder string
+	)
+	switch {
+	case strings.HasPrefix(selector, "group://"):
+		kind = ExternalSelectorGroup
+		remainder = strings.TrimPrefix(selector, "group://")
+	case strings.HasPrefix(selector, "tag://"):
+		kind = ExternalSelectorTag
+		remainder = strings.TrimPrefix(selector, "tag://")
+	default:
+		return ExternalSelector{}, fmt.Errorf(
+			"external selector %q must use group:// or tag:// syntax", selector,
+		)
+	}
+
+	alias, name, found := strings.Cut(remainder, "/")
+	if strings.TrimSpace(alias) == "" {
+		return ExternalSelector{}, fmt.Errorf("external selector %q: alias is required", selector)
+	}
+	if !found || strings.TrimSpace(name) == "" {
+		return ExternalSelector{}, fmt.Errorf("external selector %q: name is required", selector)
+	}
+	if strings.Contains(name, "/") {
+		return ExternalSelector{}, fmt.Errorf(
+			"external selector %q must contain exactly one alias and one name", selector,
+		)
+	}
+	if err := validateToken(selector, "alias", alias); err != nil {
+		return ExternalSelector{}, err
+	}
+	if err := validateToken(selector, "name", name); err != nil {
+		return ExternalSelector{}, err
+	}
+	// ExternalSelector.Kind already records whether a selector names a group or a
+	// tag, so a prefixed name conflates the local and cross-tailnet forms. The
+	// sibling AllowExternalReferencesTo field holds prefixed local selectors,
+	// which makes group://partner/group:engineering the natural mistake rather
+	// than an exotic one. The loop keeps the message written once.
+	for _, prefix := range []string{"group:", "tag:"} {
+		if strings.HasPrefix(name, prefix) {
+			return ExternalSelector{}, fmt.Errorf(
+				"external selector %q: name must omit the %s prefix, which the selector kind already carries",
+				selector, prefix,
+			)
+		}
+	}
+
+	return ExternalSelector{Kind: kind, Alias: alias, Name: name}, nil
+}
+
+// validateToken rejects whitespace or a non-printable rune anywhere in an alias
+// or name, not merely at its edges. An interior space, newline, NUL, or
+// zero-width character can never match a real externalTailnets key, so accepting
+// one turns an authoring typo into a silent non-match surfacing far from its
+// cause; a newline additionally corrupts the line-oriented output every CLI in
+// this repo is required to keep parse-clean.
+func validateToken(selector, label, token string) error {
+	if strings.ContainsFunc(token, func(r rune) bool {
+		return unicode.IsSpace(r) || !unicode.IsPrint(r)
+	}) {
+		return fmt.Errorf(
+			"external selector %q: %s contains whitespace or a non-printable character",
+			selector, label,
+		)
+	}
+	return nil
+}

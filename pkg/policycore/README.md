@@ -28,8 +28,9 @@ it.
 
 The `alpha` subpackage is the convention for hand-modeling a Tailscale
 feature that is alpha or unreleased in the pinned SDK — see
-[Alpha feature modeling](#alpha-feature-modeling) below. It carries no
-knowledge of any particular alpha feature's types.
+[Alpha feature modeling](#alpha-feature-modeling) below. Shared alpha policy
+shapes also live there when multiple tools must interpret them identically;
+declarative node sharing is the first such model.
 
 For selector matching, the scope is resolving a selector to the values it
 names:
@@ -120,16 +121,17 @@ matched := policycore.SelectorMatches("group:eng", "ada@example.com", policy, ""
 `policycore/alpha` is the shared convention for hand-modeling a Tailscale
 feature that is alpha or unreleased in the pinned
 `tailscale.com/client/tailscale/v2` SDK, so a tool in this repo can pick up an
-alpha feature early instead of waiting for the SDK to catch up. It is
-scaffolding only — no specific alpha feature's types live here; each
-feature's hand-modeled types live with the tool that needs them (or in a new
-`policycore/` subpackage, if more than one tool needs the same types resolved
-identically, following the precedent above).
+alpha feature early instead of waiting for the SDK to catch up. A feature's
+hand-modeled types live with the tool that needs them, or in `policycore/alpha`
+when more than one tool needs the same policy representation. Declarative node
+sharing follows the shared case: `ExternalTailnets` models the policy section,
+and `ParseExternalSelector` parses its cross-tailnet group and tag references.
+Parsing does not give `Matcher` resolution semantics to those references.
 
 Adding an alpha-backed feature:
 
 1. Hand-model the feature's types where the tool that needs them lives, or in
-   a new `policycore/` subpackage if it must be shared.
+   `policycore/alpha` if the policy representation must be shared.
 2. Add it to the slice returned by `alpha.RepositoryFeatures()` in
    `policycore/alpha/alpha.go`. That function is the canonical repository-wide
    inventory naming every hand-modeled alpha feature, its doc source, when this
@@ -140,7 +142,7 @@ Adding an alpha-backed feature:
    func RepositoryFeatures() []Feature {
        return []Feature{
            {
-               Name:        "declarative-node-sharing",
+               Name:        "example-alpha-feature",
                DocURL:      "https://tailscale.com/kb/example",
                ModeledDate: time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC),
                Stage:       StageAlpha,

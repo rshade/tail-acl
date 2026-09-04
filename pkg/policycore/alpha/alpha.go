@@ -3,7 +3,7 @@
 // tailscale.com/client/tailscale/v2 SDK, so a tool in this repo can pick up
 // an alpha feature early instead of waiting for the SDK to catch up.
 //
-// It owns three things only: Registry, which validates and queries a
+// It owns the Registry, which validates and queries a
 // caller-owned feature inventory; RepositoryFeatures, the canonical inventory
 // of every feature this repository hand-models (Name, DocURL, ModeledDate, and
 // pipeline Stage); and AlphaHint, the string "alpha-hint" and the third
@@ -12,13 +12,12 @@
 // pinned module; AlphaHint is editorial evidence against a surface Tailscale
 // itself calls unstable — categorically weaker.
 //
-// It carries no knowledge of any particular alpha feature's types. Each
-// feature's hand-modeled types live with the tool that needs them (or in a
-// dedicated policycore subpackage, if more than one tool needs them resolved
-// identically) and are expected to carry their own migration tripwire — a
-// test that fails once the pinned SDK adds real support for the feature,
-// forcing a conscious decision to migrate off the hand-modeled types rather
-// than letting them silently diverge from the now-real SDK types.
+// Shared hand-modeled policy types can also live here when more than one tool
+// needs an identical representation; declarative node sharing is the first.
+// Each feature is expected to carry its own migration tripwire — a test that
+// fails once the pinned SDK adds real support for the feature, forcing a
+// conscious decision to migrate off the hand-modeled types rather than letting
+// them silently diverge from the now-real SDK types.
 // RepositoryFeatures makes the feature discoverable; it does not enforce that
 // feature's tripwire itself.
 package alpha
@@ -71,10 +70,16 @@ type Feature struct {
 // RepositoryFeatures returns the canonical repository-wide feature inventory.
 // Add every hand-modeled alpha or unreleased feature to the slice returned
 // here. A fresh slice is returned on every call, so callers cannot mutate the
-// inventory exposed to the rest of the repository. It is empty until the first
-// such feature lands.
+// inventory exposed to the rest of the repository.
 func RepositoryFeatures() []Feature {
-	return []Feature{}
+	return []Feature{
+		{
+			Name:        "declarative-node-sharing",
+			DocURL:      "https://tailscale.com/docs/features/declarative-node-sharing",
+			ModeledDate: time.Date(2026, time.September, 3, 0, 0, 0, 0, time.UTC),
+			Stage:       StageAlpha,
+		},
+	}
 }
 
 // Registry validates and queries a caller-owned feature inventory. It is not

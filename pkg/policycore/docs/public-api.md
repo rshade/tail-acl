@@ -3,8 +3,8 @@
 This page describes the exported selector-matching API in `policycore`, the
 shared `policycore/addrspace` address primitives, the `policycore/sanitize`
 output contract, and the `policycore/hujsonedit` comment-preserving document
-editor, plus the `policycore/alpha` inventory for features modeled ahead of the
-pinned SDK.
+editor, plus the `policycore/alpha` inventory and shared policy models for
+features modeled ahead of the pinned SDK.
 
 ## Alpha feature inventory
 
@@ -24,6 +24,34 @@ name.
 for an editorial pointer associated with one of these unstable or unreleased
 features. It complements `derived` and `hint`; it does not relax the rule that
 a source package pointer must resolve when one exists.
+
+### Declarative node sharing
+
+`alpha.ExternalTailnets` maps a policy-local alias to an
+`ExternalTailnetConfig`. The config records the other tailnet's stable ID,
+whether incoming connections are allowed, and the local groups or tags that
+tailnet may reference. The alpha docs do not establish an omission default for
+`allowIncomingConnections`; the model preserves an explicit `false` and does
+not assign a semantic default.
+
+`alpha.ParseExternalSelector` parses `group://<alias>/<name>` and
+`tag://<alias>/<name>` into an `ExternalSelector{Kind, Alias, Name}`. Ordinary
+same-tailnet selectors such as `group:engineering`, missing aliases or names,
+and extra path segments are rejected.
+
+Whitespace and non-printable characters are rejected anywhere in an alias or
+name, not only around them: an interior space, newline, NUL, or zero-width
+character can never match a real `externalTailnets` key, so accepting one would
+turn an authoring typo into a silent non-match surfacing far from its cause.
+
+A name must also omit the `group:` or `tag:` prefix, which `Kind` already
+carries. The sibling `AllowExternalReferencesTo` field holds *prefixed* local
+selectors, so `group://partner/group:engineering` is the natural mistake rather
+than an exotic one, and it is refused rather than parsed into a name nothing
+resolves.
+
+This is syntax modeling only; `Matcher` does not yet resolve cross-tailnet
+membership.
 
 `alpha.NewVerifierRegistry(features)` returns an empty `VerifierRegistry`
 backed by a `*Registry`. `RegisterVerifier(featureName, fn)` ties a
