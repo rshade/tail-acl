@@ -6,21 +6,22 @@ import (
 	"net/netip"
 )
 
-// ErrIPv6NotSupported is returned by [Info] for a prefix that is not plain
-// IPv4, including an IPv4-mapped (4-in-6) prefix the caller has not run
-// through [Unmap4In6]. Broadcast and usable-range subtraction are IPv4
-// concepts; IPv6 block facts are deliberately unmodeled here until they
-// get their own semantics.
+// ErrIPv6NotSupported is retained for source compatibility with callers that
+// handled the IPv4-only behavior. Info no longer returns it because it now
+// reports IPv6 block facts.
+//
+// Deprecated: IPv6 prefixes are supported by [Info].
 var ErrIPv6NotSupported = errors.New("ipcalc: IPv6 prefixes are not supported")
 
-// BlockInfo reports the classic ipcalc facts for an IPv4 block.
+// BlockInfo reports classic ipcalc facts for an IPv4 or IPv6 block.
 type BlockInfo struct {
 	// Network is the block's network address (the masked prefix address).
 	Network netip.Addr
 
-	// Broadcast is the block's broadcast address. It is the zero Addr
-	// (IsValid() == false) for /31 and /32, which have none: a /31 is an
-	// RFC 3021 point-to-point link and a /32 is a host route.
+	// Broadcast is the IPv4 block's broadcast address. It is the zero Addr
+	// (IsValid() == false) for every IPv6 block and for IPv4 /31 and /32,
+	// which have none: a /31 is an RFC 3021 point-to-point link and a /32 is
+	// a host route.
 	Broadcast netip.Addr
 
 	// FirstUsable and LastUsable bound the usable host range. For /30 and
@@ -36,28 +37,35 @@ type BlockInfo struct {
 	UsableHosts *big.Int
 }
 
-// Info reports the network address, broadcast address, usable host range,
-// and usable-host count for an IPv4 prefix. Host bits in prefix are masked
-// off first, so an address inside a block yields the facts for its
-// containing block. A non-IPv4 prefix returns [ErrIPv6NotSupported];
-// callers accepting 4-in-6 input should normalize it with [Unmap4In6]
-// before calling.
+// Info reports the network address, broadcast address where applicable,
+// usable host range, and usable-host count for an IPv4 or IPv6 prefix. Host
+// bits in prefix are masked off first, so an address inside a block yields
+// the facts for its containing block. IPv6 has no broadcast address and all
+// addresses in its prefix are usable. Callers accepting 4-in-6 input can
+// normalize it with [Unmap4In6] before calling.
 func Info(prefix netip.Prefix) (BlockInfo, error) {
 	if !prefix.IsValid() {
 		return BlockInfo{}, errors.New("ipcalc: invalid prefix")
 	}
-	if !prefix.Addr().Is4() {
-		return BlockInfo{}, ErrIPv6NotSupported
-	}
 
 	prefix = prefix.Masked()
 	network := prefix.Addr()
+	is4 := network.Is4()
 
-	// Block size: 2^(ipv4AddrBits - bits). The block's top address is
+	// Block size: 2^(address bits - prefix bits). The block's top address is
 	// network + blockSize - 1.
-	blockSize := new(big.Int).Lsh(big.NewInt(1), uint(ipv4AddrBits-prefix.Bits()))
+	blockSize := new(big.Int).Lsh(big.NewInt(1), uint(network.BitLen()-prefix.Bits()))
 	topInt := new(big.Int).Add(addrToBigInt(network), new(big.Int).Sub(blockSize, big.NewInt(1)))
-	top := bigIntToAddr(topInt, true)
+	top := bigIntToAddr(topInt, is4)
+
+	if !is4 {
+		return BlockInfo{
+			Network:     network,
+			FirstUsable: network,
+			LastUsable:  top,
+			UsableHosts: blockSize,
+		}, nil
+	}
 
 	// A /31 (RFC 3021 point-to-point) and a /32 (host route) reserve no
 	// network or broadcast address, so every address in the block is a
@@ -81,8 +89,7 @@ func Info(prefix netip.Prefix) (BlockInfo, error) {
 	return info, nil
 }
 
-// ipv4AddrBits is the bit length of an IPv4 address. [Info] rejects
-// everything but plain IPv4, so its block arithmetic uses it directly.
+// ipv4AddrBits is the bit length of an IPv4 address.
 const ipv4AddrBits = 32
 
 // reservedNetworkAndBroadcast is the number of addresses a classic (/30 or

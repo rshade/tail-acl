@@ -1,7 +1,6 @@
 package ipcalc_test
 
 import (
-	"errors"
 	"net/netip"
 	"testing"
 
@@ -117,19 +116,38 @@ func TestInfoIPv4Blocks(t *testing.T) {
 	}
 }
 
-func TestInfoRejectsIPv6(t *testing.T) {
+func TestInfoIPv6Blocks(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name   string
-		prefix string
-	}{
-		{name: "native_ipv6", prefix: "2001:db8::/64"},
-		{name: "ipv6_full_length", prefix: "fd7a:115c:a1e0::1/128"},
-		// Info takes plain IPv4 only; unmapping 4-in-6 input is the
-		// caller's job (ipcalc.Unmap4In6), so a raw mapped prefix is
-		// rejected like any other IPv6 prefix.
-		{name: "unmapped_4in6", prefix: "::ffff:10.0.0.0/120"},
+	tests := []blockFactsCase{
+		{
+			name: "slash48", prefix: "2001:db8:1234:5678::/48",
+			wantNetwork: "2001:db8:1234::", wantBroadcast: "",
+			wantFirst: "2001:db8:1234::", wantLast: "2001:db8:1234:ffff:ffff:ffff:ffff:ffff",
+			wantHosts: "1208925819614629174706176",
+		},
+		{
+			name: "slash64_host_bits_masked", prefix: "2001:db8:1::42/64",
+			wantNetwork: "2001:db8:1::", wantBroadcast: "",
+			wantFirst: "2001:db8:1::", wantLast: "2001:db8:1:0:ffff:ffff:ffff:ffff",
+			wantHosts: "18446744073709551616",
+		},
+		{
+			name: "slash96", prefix: "2001:db8:abcd:1234:5678:90ab:cdef:1234/96",
+			wantNetwork: "2001:db8:abcd:1234:5678:90ab::", wantBroadcast: "",
+			wantFirst: "2001:db8:abcd:1234:5678:90ab::", wantLast: "2001:db8:abcd:1234:5678:90ab:ffff:ffff",
+			wantHosts: "4294967296",
+		},
+		{
+			name: "slash127", prefix: "2001:db8::4/127",
+			wantNetwork: "2001:db8::4", wantBroadcast: "",
+			wantFirst: "2001:db8::4", wantLast: "2001:db8::5", wantHosts: "2",
+		},
+		{
+			name: "slash128", prefix: "2001:db8::1/128",
+			wantNetwork: "2001:db8::1", wantBroadcast: "",
+			wantFirst: "2001:db8::1", wantLast: "2001:db8::1", wantHosts: "1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -141,10 +159,11 @@ func TestInfoRejectsIPv6(t *testing.T) {
 				t.Fatalf("parse prefix %q: %v", tt.prefix, err)
 			}
 
-			_, err = ipcalc.Info(prefix)
-			if !errors.Is(err, ipcalc.ErrIPv6NotSupported) {
-				t.Fatalf("Info() error = %v, want ErrIPv6NotSupported", err)
+			info, err := ipcalc.Info(prefix)
+			if err != nil {
+				t.Fatalf("Info() error = %v", err)
 			}
+			assertBlockFacts(t, info, tt)
 		})
 	}
 }
@@ -155,8 +174,5 @@ func TestInfoRejectsInvalidPrefix(t *testing.T) {
 	_, err := ipcalc.Info(netip.Prefix{})
 	if err == nil {
 		t.Fatal("Info() error = nil, want error for invalid prefix")
-	}
-	if errors.Is(err, ipcalc.ErrIPv6NotSupported) {
-		t.Fatalf("Info() error = %v, want a plain invalid-prefix error, not ErrIPv6NotSupported", err)
 	}
 }
