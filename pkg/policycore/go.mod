@@ -13,6 +13,7 @@ require (
 require (
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
