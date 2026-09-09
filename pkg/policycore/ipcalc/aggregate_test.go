@@ -42,6 +42,35 @@ func TestAggregate(t *testing.T) {
 			input: []string{"10.0.0.1/25", "10.0.0.129/25"},
 			want:  []string{"10.0.0.0/24"},
 		},
+		{
+			name:  "adjacent IPv6 siblings",
+			input: []string{"2001:db8:0:8000::/49", "2001:db8::/49"},
+			want:  []string{"2001:db8::/48"},
+		},
+		{
+			name: "ULA blocks merge across levels",
+			input: []string{
+				"fd12:3456:789a:1::/64", "fd12:3456:789a:2::/63", "fd12:3456:789a::/64",
+			},
+			want: []string{"fd12:3456:789a::/62"},
+		},
+		{
+			name:  "wide IPv6 prefix covers descendants",
+			input: []string{"2000::/3", "2001:db8::/32", "3ffe::/16"},
+			want:  []string{"2000::/3"},
+		},
+		{
+			name:  "unmergeable IPv6 ordered",
+			input: []string{"2001:db8:2::/48", "2001:db8::/48"},
+			want:  []string{"2001:db8::/48", "2001:db8:2::/48"},
+		},
+		{
+			name: "mixed families never merge and order IPv4 first",
+			input: []string{
+				"2001:db8::/49", "10.0.0.128/25", "2001:db8:0:8000::/49", "10.0.0.0/25",
+			},
+			want: []string{"10.0.0.0/24", "2001:db8::/48"},
+		},
 	}
 
 	for _, tt := range tests {

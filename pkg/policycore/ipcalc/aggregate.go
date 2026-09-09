@@ -8,7 +8,9 @@ import (
 // Aggregate returns the minimal CIDR cover of prefixes. It masks prefixes,
 // drops prefixes already covered by a wider prefix, and repeatedly replaces
 // adjacent sibling prefixes with their parent. The result is ordered by
-// network address. Callers must provide valid prefixes from one address family.
+// network address. Both address families may be supplied together: a prefix
+// never merges with or is covered by a prefix of the other family, and every
+// IPv4 result precedes every IPv6 result. Callers must provide valid prefixes.
 func Aggregate(prefixes []netip.Prefix) []netip.Prefix {
 	if len(prefixes) == 0 {
 		return nil
