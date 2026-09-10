@@ -113,8 +113,10 @@ type TestReport struct {
 // Skipped is therefore policy-scoped; an indeterminate assertion is separately
 // path-scoped and is reported only when its evaluation reaches such a defect.
 func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) {
+	// HaveExternalTailnets stays false: this loader does not parse
+	// externalTailnets, so a cross-tailnet selector stays Unresolvable.
 	matcher := policycore.Matcher{
-		Policy:    policy,
+		Policy:    &policycore.Policy{ACL: policy},
 		Roles:     opts.Roster,
 		HaveRoles: opts.Roster != nil,
 	}

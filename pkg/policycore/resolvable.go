@@ -78,19 +78,20 @@ func classifyQuery(query string) queryTarget {
 	}
 }
 
-// autogroupResolvable reports whether this matcher holds enough information to
+// selectorResolvable reports whether this matcher holds enough information to
 // decide selector against query. Groups recurse because their members may be
-// autogroups whose membership needs live state. Membership is looked up through
-// groupMembers — by key, exactly as groupMatches looks it up, never by the
-// group: prefix — so a selector the matching walk expands can never be one this
-// walk reports as settled. The guard is path-scoped, like groupMatches:
-// deleting on return lets a shared group be explored through every branch of a
-// diamond while still terminating cycles.
-func (m Matcher) autogroupResolvable(selector, query string) bool {
-	return m.autogroupResolvableSeen(selector, query, make(map[string]bool))
+// autogroups whose membership needs live state, or cross-tailnet selectors
+// whose membership lives in another tailnet's policy entirely. Membership is
+// looked up through groupMembers — by key, exactly as groupMatches looks it
+// up, never by the group: prefix — so a selector the matching walk expands can
+// never be one this walk reports as settled. The guard is path-scoped, like
+// groupMatches: deleting on return lets a shared group be explored through
+// every branch of a diamond while still terminating cycles.
+func (m Matcher) selectorResolvable(selector, query string) bool {
+	return m.selectorResolvableSeen(selector, query, make(map[string]bool))
 }
 
-func (m Matcher) autogroupResolvableSeen(
+func (m Matcher) selectorResolvableSeen(
 	selector string,
 	query string,
 	seenGroups map[string]bool,
@@ -101,7 +102,7 @@ func (m Matcher) autogroupResolvableSeen(
 		seenGroups[selector] = true
 		defer delete(seenGroups, selector)
 		for _, member := range members {
-			if !m.autogroupResolvableSeen(member, query, seenGroups) {
+			if !m.selectorResolvableSeen(member, query, seenGroups) {
 				return false
 			}
 		}
@@ -111,6 +112,15 @@ func (m Matcher) autogroupResolvableSeen(
 		// spelled "autogroup:admin" is named by both readings, and returning here
 		// would report the roster-dependent one settled on the strength of the
 		// member list alone.
+	}
+
+	// Cross-tailnet selectors are their own vocabulary, decided without the
+	// query: see crossTailnetSettles. Placing the branch here rather than
+	// before the group walk preserves the conjunction above, so a Groups key
+	// spelled as a cross-tailnet selector cannot settle the cross-tailnet
+	// reading on the strength of its local member list.
+	if crossSpec, ok := crossTailnetSpecFor(selector); ok {
+		return m.crossTailnetSettles(crossSpec)
 	}
 
 	if !strings.HasPrefix(selector, autogroupPrefix) {
@@ -137,8 +147,13 @@ func (m Matcher) autogroupResolvableSeen(
 // matter. This function has no policy argument, so it cannot inspect group
 // members; use Matcher.MatchesTri or SelectorMatchesTri when resolving a policy
 // selector that may name a group.
+//
+// Having no policy document, it also holds no external-tailnet declarations,
+// so it reports every cross-tailnet selector undecidable. A Matcher whose
+// policy declares them settles the undeclared-alias case, exactly as a roster
+// settles the role-autogroup case.
 func AutogroupResolvable(selector, query string) bool {
-	return Matcher{}.autogroupResolvable(selector, query)
+	return Matcher{}.selectorResolvable(selector, query)
 }
 
 // KnownAutogroup reports whether selector is an autogroup whose membership this
@@ -160,7 +175,7 @@ func KnownAutogroup(selector string) bool {
 // state. source is the requesting identity, used only to resolve
 // autogroup:self.
 func SelectorMatchesTri(selector, query string, policy *tailscale.ACL, source string) Match {
-	return Matcher{Policy: policy}.MatchesTri(selector, query, source)
+	return Matcher{Policy: &Policy{ACL: policy}}.MatchesTri(selector, query, source)
 }
 
 // AnySelectorMatchesTri resolves a selector list against query. A match by any
@@ -173,5 +188,5 @@ func AnySelectorMatchesTri(
 	policy *tailscale.ACL,
 	source string,
 ) (Match, string) {
-	return Matcher{Policy: policy}.AnyMatchesTri(selectors, query, source)
+	return Matcher{Policy: &Policy{ACL: policy}}.AnyMatchesTri(selectors, query, source)
 }

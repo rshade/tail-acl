@@ -59,10 +59,11 @@ literal `*`; it deliberately does not classify any autogroup as a wildcard.
 ## Usage
 
 A `Matcher` carries the policy plus the live tailnet facts the policy document
-cannot supply:
+cannot supply. `Policy` is a container holding the pinned SDK's ACL together
+with the policy fields that SDK does not model:
 
 ```go
-matcher := policycore.Matcher{Policy: policy}
+matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: acl}}
 matched := matcher.AnyMatches(rule.Source, "tag:web", "")
 ```
 
@@ -72,7 +73,7 @@ complete and authoritative; leave it false after a failed, partial, or
 truncated read:
 
 ```go
-matcher := policycore.Matcher{Policy: policy, Roles: roles, HaveRoles: true}
+matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: acl}, Roles: roles, HaveRoles: true}
 ```
 
 A matcher can preserve the difference between a definite non-match and missing
@@ -98,6 +99,37 @@ shape determine the three-state result:
 A complete roster maps logins to roles. It makes an absent user a definite
 non-match, but it cannot settle a bare device address because it does not map
 devices to owners.
+
+### Cross-tailnet selectors
+
+A `group://<alias>/<name>` or `tag://<alias>/<name>` selector names members of
+another tailnet, whose roster this policy cannot supply. `HaveExternalTailnets`
+plays the role `HaveRoles` plays for the roster: it asserts that the policy's
+`externalTailnets` declarations were actually read, so an alias missing from
+them is missing rather than merely unparsed.
+
+```go
+matcher := policycore.Matcher{Policy: &policycore.Policy{
+    ACL:                  acl,
+    ExternalTailnets:     declarations,
+    HaveExternalTailnets: true,
+}}
+```
+
+| Selector | `HaveExternalTailnets` | Alias declared | Verdict |
+| --- | --- | --- | --- |
+| well-formed | `true` | yes | `Unresolvable` |
+| well-formed | `true` | no | `NoMatch` |
+| well-formed | `false` | — | `Unresolvable` |
+| malformed | either | — | `Unresolvable` |
+
+An alias is a local name, so one absent from declarations that were read is
+named by nothing in this policy — the same reading an undefined `group:` gets.
+A malformed selector stays undecidable because the `://` prefix declares
+intent: it is a mistyped cross-tailnet reference, not a string that happens to
+name nobody. A caller that does not parse `externalTailnets` must leave
+`HaveExternalTailnets` false, and every cross-tailnet selector then reports
+`Unresolvable`.
 
 Three-state resolution follows nested groups. A group is decidable only when
 every member is decidable against the query; one nested undecidable autogroup
@@ -125,8 +157,11 @@ alpha feature early instead of waiting for the SDK to catch up. A feature's
 hand-modeled types live with the tool that needs them, or in `policycore/alpha`
 when more than one tool needs the same policy representation. Declarative node
 sharing follows the shared case: `ExternalTailnets` models the policy section,
-and `ParseExternalSelector` parses its cross-tailnet group and tag references.
-Parsing does not give `Matcher` resolution semantics to those references.
+`ParseExternalSelector` parses its cross-tailnet group and tag references, and
+`LooksLikeExternalSelector` is the recognition view of the same grammar.
+`Matcher` resolves those references only as far as this tailnet's policy allows
+— see [Cross-tailnet selectors](#cross-tailnet-selectors) — never by confirming
+membership in the other tailnet.
 
 Adding an alpha-backed feature:
 

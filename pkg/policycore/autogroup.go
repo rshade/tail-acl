@@ -100,7 +100,7 @@ func settlesUnlessBareDevice(query queryContext) bool { return query.target != q
 
 func matchesAlways(Matcher, string, string) bool { return true }
 
-func matchesInternet(m Matcher, query, _ string) bool { return IsPublicAddress(query, m.Policy) }
+func matchesInternet(m Matcher, query, _ string) bool { return IsPublicAddress(query, m.acl()) }
 
 func matchesSelf(_ Matcher, query, source string) bool {
 	return query == source && LooksLikeUser(query)

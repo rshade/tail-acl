@@ -106,3 +106,22 @@ func TestIsPublicAddress(t *testing.T) {
 		})
 	}
 }
+
+// TestAddressExpansionToleratesANilPolicy pins the guard that keeps a matcher
+// holding no policy document usable. Address expansion runs on every selector
+// that is not a group, so reading through a nil document panicked before any
+// resolver could notice there was nothing to resolve against.
+func TestAddressExpansionToleratesANilPolicy(t *testing.T) {
+	t.Parallel()
+
+	got := policycore.ExpandAddressSelector("web", nil)
+	if len(got) != 1 || got[0] != "web" {
+		t.Errorf("ExpandAddressSelector(web, nil) = %v, want [web]", got)
+	}
+	if !policycore.IsPublicAddress("8.8.8.8", nil) {
+		t.Error("IsPublicAddress(8.8.8.8, nil) = false, want true")
+	}
+	if policycore.IsPublicAddress("10.0.0.1", nil) {
+		t.Error("IsPublicAddress(10.0.0.1, nil) = true, want false")
+	}
+}

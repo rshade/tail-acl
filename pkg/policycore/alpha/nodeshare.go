@@ -25,6 +25,15 @@ type ExternalTailnetConfig struct {
 // the cross-tailnet identity suitable for correlation.
 type ExternalTailnets map[string]ExternalTailnetConfig
 
+// The cross-tailnet scheme prefixes. LooksLikeExternalSelector and
+// ParseExternalSelector both read these, and the "must use" error below
+// renders them rather than restating them, so recognition, parsing, and
+// diagnostics cannot disagree about what a cross-tailnet selector is.
+const (
+	externalGroupPrefix = "group://"
+	externalTagPrefix   = "tag://"
+)
+
 // ExternalSelectorKind distinguishes the two cross-tailnet selector forms
 // declarative node sharing currently documents.
 type ExternalSelectorKind string
@@ -45,6 +54,20 @@ type ExternalSelector struct {
 	Name  string
 }
 
+// LooksLikeExternalSelector reports whether selector uses the cross-tailnet
+// scheme syntax, whether or not the rest of it is well-formed.
+//
+// It is deliberately more permissive than ParseExternalSelector: a mistyped
+// cross-tailnet reference is still a cross-tailnet reference, and a caller
+// that routed it to the local-selector vocabulary instead would report the
+// typo as "this rule names nobody" rather than "this cannot be decided from
+// this tailnet's policy". Recognizing it here lets the caller keep that
+// distinction and surface the parse error.
+func LooksLikeExternalSelector(selector string) bool {
+	return strings.HasPrefix(selector, externalGroupPrefix) ||
+		strings.HasPrefix(selector, externalTagPrefix)
+}
+
 // ParseExternalSelector parses the declarative node-sharing selector forms
 // group://<alias>/<name> and tag://<alias>/<name>. Same-tailnet group:name and
 // tag:name selectors are intentionally rejected so callers cannot conflate
@@ -59,15 +82,16 @@ func ParseExternalSelector(selector string) (ExternalSelector, error) {
 		remainder string
 	)
 	switch {
-	case strings.HasPrefix(selector, "group://"):
+	case strings.HasPrefix(selector, externalGroupPrefix):
 		kind = ExternalSelectorGroup
-		remainder = strings.TrimPrefix(selector, "group://")
-	case strings.HasPrefix(selector, "tag://"):
+		remainder = strings.TrimPrefix(selector, externalGroupPrefix)
+	case strings.HasPrefix(selector, externalTagPrefix):
 		kind = ExternalSelectorTag
-		remainder = strings.TrimPrefix(selector, "tag://")
+		remainder = strings.TrimPrefix(selector, externalTagPrefix)
 	default:
 		return ExternalSelector{}, fmt.Errorf(
-			"external selector %q must use group:// or tag:// syntax", selector,
+			"external selector %q must use %s or %s syntax",
+			selector, externalGroupPrefix, externalTagPrefix,
 		)
 	}
 

@@ -195,3 +195,72 @@ func TestRepositoryFeaturesIncludesDeclarativeNodeSharing(t *testing.T) {
 		t.Errorf("declarative-node-sharing feature = %+v, want %+v", got, want)
 	}
 }
+
+func TestLooksLikeExternalSelector(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		selector string
+		want     bool
+	}{
+		{name: "group", selector: "group://partner/engineering", want: true},
+		{name: "tag", selector: "tag://production/batch", want: true},
+		{name: "malformed but still cross-tailnet", selector: "group://partner", want: true},
+		{name: "empty remainder", selector: "tag://", want: true},
+		{name: "same-tailnet group", selector: "group:engineering", want: false},
+		{name: "same-tailnet tag", selector: "tag:batch", want: false},
+		{name: "unknown scheme", selector: "user://partner/alice", want: false},
+		{name: "leading whitespace", selector: " group://partner/engineering", want: false},
+		{name: "user login", selector: "ada@example.com", want: false},
+		{name: "wildcard", selector: "*", want: false},
+		{name: "empty", selector: "", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := alpha.LooksLikeExternalSelector(test.selector); got != test.want {
+				t.Errorf("LooksLikeExternalSelector(%q) = %t, want %t", test.selector, got, test.want)
+			}
+		})
+	}
+}
+
+// TestLooksLikeExternalSelectorAcceptsEverythingParseAccepts holds recognition
+// and parsing to one grammar: a selector the parser accepts that recognition
+// rejected would be routed to the local vocabulary and silently reported as
+// naming nobody. The converse is allowed by design — recognition also covers
+// malformed cross-tailnet selectors, which is the point of having it.
+func TestLooksLikeExternalSelectorAcceptsEverythingParseAccepts(t *testing.T) {
+	t.Parallel()
+
+	corpus := []string{
+		"group://partner/engineering",
+		"tag://production/batch",
+		"group://partner",
+		"tag://partner/",
+		"group:engineering",
+		"tag:batch",
+		"user://partner/alice",
+		" group://partner/engineering",
+		"ada@example.com",
+		"autogroup:admin",
+		"*",
+		"",
+	}
+
+	for _, selector := range corpus {
+		t.Run(selector, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := alpha.ParseExternalSelector(selector); err != nil {
+				return
+			}
+			if !alpha.LooksLikeExternalSelector(selector) {
+				t.Errorf("ParseExternalSelector(%q) succeeded but LooksLikeExternalSelector reported false", selector)
+			}
+		})
+	}
+}

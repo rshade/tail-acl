@@ -21,12 +21,20 @@ const v4In6PrefixBits = 96
 
 // ExpandAddressSelector resolves a selector through Hosts and IPSets to the
 // concrete addresses or prefixes it names. A value that names neither is
-// returned unchanged.
+// returned unchanged, as is every value when policy is nil: a document that
+// does not exist declares no aliases, so the selector already is the concrete
+// value it names.
 func ExpandAddressSelector(selector string, policy *tailscale.ACL) []string {
 	return expandAddressSelectorSeen(selector, policy, make(map[string]bool))
 }
 
 func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[string]bool) []string {
+	// Guarded here rather than at the call sites because address expansion runs
+	// on every selector that is not a group, so the panic this replaces reached
+	// every caller of Matches.
+	if policy == nil {
+		return []string{selector}
+	}
 	if seen[selector] {
 		return nil
 	}

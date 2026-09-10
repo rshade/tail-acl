@@ -216,7 +216,7 @@ func TestMatcherMatchesTriUsesRosterInsideGroups(t *testing.T) {
 		},
 	}
 	matcher := policycore.Matcher{
-		Policy: policy,
+		Policy: &policycore.Policy{ACL: policy},
 		Roles: map[string]tailscale.UserRole{
 			"ada@example.com": tailscale.UserRoleAdmin,
 			"joe@example.com": tailscale.UserRoleMember,
@@ -426,7 +426,7 @@ func TestRoleAutogroupsAgreeAcrossEveryView(t *testing.T) {
 	t.Parallel()
 
 	withRoster := policycore.Matcher{
-		Policy:    &tailscale.ACL{},
+		Policy:    &policycore.Policy{ACL: &tailscale.ACL{}},
 		Roles:     map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
 		HaveRoles: true,
 	}
@@ -487,7 +487,7 @@ func TestSelectorMatchesTriIsTheZeroRosterMatcher(t *testing.T) {
 		},
 		Hosts: map[string]string{"web": "10.1.0.0/16"},
 	}
-	matcher := policycore.Matcher{Policy: policy}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: policy}}
 
 	singles := []struct {
 		selector string
@@ -502,6 +502,9 @@ func TestSelectorMatchesTriIsTheZeroRosterMatcher(t *testing.T) {
 		{"autogroup:admin", "tag:web"},
 		{"autogroup:tagged", "100.64.0.9"},
 		{"autogroup:shared", "tag:web"},
+		{"group://partner/eng", "alice@example.com"},
+		{"tag://partner/batch", "tag:web"},
+		{"group://partner", "alice@example.com"},
 	}
 	for _, test := range singles {
 		got := policycore.SelectorMatchesTri(test.selector, test.query, policy, source)
@@ -526,6 +529,8 @@ func TestSelectorMatchesTriIsTheZeroRosterMatcher(t *testing.T) {
 		{[]string{"autogroup:admin", "alice@example.com"}, "alice@example.com"},
 		{[]string{"autogroup:admin", "autogroup:shared"}, "ada@example.com"},
 		{[]string{"tag:db", "alice@example.com"}, "tag:web"},
+		{[]string{"tag:db", "group://partner/eng"}, "ada@example.com"},
+		{[]string{"group://partner/eng", "alice@example.com"}, "alice@example.com"},
 	}
 	for _, test := range lists {
 		gotMatch, gotUnresolved := policycore.AnySelectorMatchesTri(

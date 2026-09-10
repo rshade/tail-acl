@@ -674,3 +674,32 @@ func TestEvaluateTestsTreatsUnevaluatableGateAsIndeterminate(t *testing.T) {
 		t.Errorf("Evidence = %q, want it to name via routing", report.Assertions[0].Evidence)
 	}
 }
+
+// A cross-tailnet selector names members of another tailnet, whose roster this
+// policy file cannot supply, so it degrades the verdict the same way an
+// unresolvable autogroup does. Before policycore recognized the grammar this
+// query returned a confident deny, which is the wrong answer rather than a
+// missing one.
+func TestCrossTailnetSourceSelectorIsIndeterminate(t *testing.T) {
+	t.Parallel()
+	policy := grantPolicy(tailscale.Grant{
+		Source:      []string{"group://partner/engineering"},
+		Destination: []string{"tag:web"},
+		IP:          []string{"tcp:443"},
+	})
+
+	got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+
+	if got.Access != aclpolicy.AccessIndeterminate {
+		t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+	}
+	if got.Allowed != nil {
+		t.Errorf(
+			"Allowed = %v, want nil; an indeterminate answer must not claim a boolean",
+			*got.Allowed,
+		)
+	}
+	if !strings.Contains(got.Evidence, "group://partner/engineering") {
+		t.Errorf("Evidence = %q, want it to name the cross-tailnet selector", got.Evidence)
+	}
+}

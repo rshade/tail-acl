@@ -151,8 +151,10 @@ func EvaluateReachability(
 		)
 	}
 
+	// HaveExternalTailnets stays false: this loader does not parse
+	// externalTailnets, so a cross-tailnet selector stays Unresolvable.
 	matcher := policycore.Matcher{
-		Policy:    policy,
+		Policy:    &policycore.Policy{ACL: policy},
 		Roles:     opts.Roster,
 		HaveRoles: opts.Roster != nil,
 	}

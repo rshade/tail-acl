@@ -4,12 +4,14 @@ import (
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
+
+	"github.com/rshade/tailscale-utils/policycore/alpha"
 )
 
 // Matcher resolves policy selectors against a query identity. Policy is the
-// tailnet policy document; Roles and HaveRoles carry the live tailnet fact that
-// document cannot supply — who holds which role, and whether a complete,
-// authoritative roster was read.
+// tailnet policy document and everything declared inside it; Roles and
+// HaveRoles carry the live tailnet fact that document cannot supply — who
+// holds which role, and whether a complete, authoritative roster was read.
 //
 // When HaveRoles is false, role autogroups resolve to nothing and Recognized
 // reports them as unresolved rather than unmatched, so a caller degrades to
@@ -19,7 +21,7 @@ import (
 // nobody. Callers must leave HaveRoles false after a partial, truncated, or
 // failed read. A static policy tool that has no tailnet access leaves it false.
 type Matcher struct {
-	Policy *tailscale.ACL
+	Policy *Policy
 	// Roles maps a user's login name, lowercased, to their tailnet role.
 	Roles map[string]tailscale.UserRole
 	// HaveRoles reports that Roles is a complete and authoritative user roster.
@@ -51,7 +53,7 @@ func (m Matcher) MatchesTri(selector, query, source string) Match {
 	if m.Matches(selector, query, source) {
 		return Matched
 	}
-	if !m.autogroupResolvable(selector, query) {
+	if !m.selectorResolvable(selector, query) {
 		return Unresolvable
 	}
 	return NoMatch
@@ -85,25 +87,36 @@ func (m Matcher) AnyMatchesTri(selectors []string, query, source string) (Match,
 // AutogroupResolvable reports as undecidable. A caller holding a user roster
 // builds a Matcher instead.
 func SelectorMatches(selector, query string, policy *tailscale.ACL, source string) bool {
-	return Matcher{Policy: policy}.Matches(selector, query, source)
+	return Matcher{Policy: &Policy{ACL: policy}}.Matches(selector, query, source)
 }
 
 // Recognized reports whether this matcher understands selector well enough that
 // a non-match means query is genuinely not named, rather than merely
-// unevaluable. Every non-autogroup selector is recognized — tags, users, groups,
-// hosts, ipsets, and addresses all resolve from the policy document alone — as
-// are the autogroup forms this package resolves.
+// unevaluable. Every selector that is neither an autogroup nor a cross-tailnet
+// reference is recognized — tags, users, groups, hosts, ipsets, and addresses
+// all resolve from the policy document alone — as are the autogroup forms this
+// package resolves.
 //
 // Role autogroups are recognized only when the user roster was read. Without
 // that live tailnet fact no caller can decide them, so a non-match must be
 // reported as unresolved rather than as absence of coverage.
 //
+// A cross-tailnet selector is recognized only in the one case whose non-match
+// is conclusive: it is well-formed, this policy's external-tailnet
+// declarations were read, and its alias is not among them, so it is named by
+// nothing here. A declared alias needs the other tailnet's roster, and a
+// malformed selector is an authoring error, so neither is recognized.
+//
 // Every other autogroup defers to KnownAutogroup rather than being re-listed
-// here. Recognized is the roster-aware view of the same question KnownAutogroup
-// answers for callers with no roster, and two copies of that list would drift
-// the moment either learns a new autogroup — the drift this package exists to
-// prevent.
+// here, and the cross-tailnet case defers to crossTailnetSpecFor for the same
+// reason. Recognized is the policy-aware view of questions KnownAutogroup and
+// IsCrossTailnetSelector answer for callers holding less, and a second copy of
+// either list would drift the moment one learned a new form — the drift this
+// package exists to prevent.
 func (m Matcher) Recognized(selector string) bool {
+	if crossSpec, ok := crossTailnetSpecFor(selector); ok {
+		return m.crossTailnetSettles(crossSpec)
+	}
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true
 	}
@@ -111,6 +124,28 @@ func (m Matcher) Recognized(selector string) bool {
 		return m.HaveRoles
 	}
 	return KnownAutogroup(selector)
+}
+
+// acl returns the pinned-SDK document this matcher resolves against, or nil.
+// It is the single nil-safe reach into the policy container, so a zero
+// Matcher, a Matcher holding no Policy, and a Policy wrapping no ACL all
+// behave alike rather than differing by which of the three a caller built.
+func (m Matcher) acl() *tailscale.ACL {
+	if m.Policy == nil {
+		return nil
+	}
+	return m.Policy.ACL
+}
+
+// externalTailnets returns the declared node-sharing relationships and whether
+// they were actually read. Both come from the policy container, so a matcher
+// holding no policy reports none read — which is the truthful answer, not a
+// convenient default.
+func (m Matcher) externalTailnets() (alpha.ExternalTailnets, bool) {
+	if m.Policy == nil {
+		return nil, false
+	}
+	return m.Policy.ExternalTailnets, m.Policy.HaveExternalTailnets
 }
 
 func (m Matcher) matchesSeen(selector, query, source string, seenGroups map[string]bool) bool {
@@ -177,10 +212,11 @@ func (m Matcher) roleMatches(role tailscale.UserRole, query string) bool {
 // literal selector, not on the group: prefix, because that is what Matches
 // resolves against; a nil Policy simply names no groups.
 func (m Matcher) groupMembers(selector string) ([]string, bool) {
-	if m.Policy == nil {
+	acl := m.acl()
+	if acl == nil {
 		return nil, false
 	}
-	members, ok := m.Policy.Groups[selector]
+	members, ok := acl.Groups[selector]
 	return members, ok
 }
 
@@ -200,11 +236,12 @@ func (m Matcher) groupMatches(selector, query, source string, seenGroups map[str
 }
 
 func (m Matcher) addressMatches(selector, query string) bool {
-	selectorValues := ExpandAddressSelector(selector, m.Policy)
-	queryValues := ExpandAddressSelector(query, m.Policy)
+	acl := m.acl()
+	selectorValues := ExpandAddressSelector(selector, acl)
+	queryValues := ExpandAddressSelector(query, acl)
 	for _, selectorValue := range selectorValues {
 		for _, queryValue := range queryValues {
-			if selectorValue == autogroupInternet && IsPublicAddress(queryValue, m.Policy) {
+			if selectorValue == autogroupInternet && IsPublicAddress(queryValue, acl) {
 				return true
 			}
 			if AddressContains(selectorValue, queryValue) {

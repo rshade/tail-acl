@@ -80,7 +80,7 @@ func TestSelectorMatches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			matcher := policycore.Matcher{Policy: policy}
+			matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: policy}}
 			got := matcher.Matches(tt.selector, tt.query, tt.source)
 			if got != tt.want {
 				t.Errorf("Matches(%q, %q) = %v; want %v", tt.selector, tt.query, got, tt.want)
@@ -92,7 +92,7 @@ func TestSelectorMatches(t *testing.T) {
 func TestAnyMatches(t *testing.T) {
 	t.Parallel()
 
-	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
 	if !matcher.AnyMatches([]string{"tag:db", "tag:web"}, "tag:web", "") {
 		t.Error("AnyMatches: want true when one selector matches")
 	}
@@ -139,7 +139,7 @@ func TestMatcherResolvesRoleAutogroups(t *testing.T) {
 		"aud@example.com":  tailscale.UserRoleAuditor,
 		"joe@example.com":  tailscale.UserRoleMember,
 	}
-	matcher := policycore.Matcher{Policy: &tailscale.ACL{}, Roles: roles, HaveRoles: true}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}, Roles: roles, HaveRoles: true}
 	tests := []struct {
 		name     string
 		selector string
@@ -235,7 +235,7 @@ func TestMatcherMatchesTriRoleAutogroupMatrix(t *testing.T) {
 			t.Parallel()
 
 			matcher := policycore.Matcher{
-				Policy:    &tailscale.ACL{},
+				Policy:    &policycore.Policy{ACL: &tailscale.ACL{}},
 				Roles:     roles,
 				HaveRoles: test.haveRoles,
 			}
@@ -251,7 +251,7 @@ func TestMatcherMatchesTriRoleAutogroupMatrix(t *testing.T) {
 func TestMatcherWithoutRolesResolvesNoRoleAutogroup(t *testing.T) {
 	t.Parallel()
 
-	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
 	for _, selector := range roleAutogroupSelectors() {
 		t.Run(selector, func(t *testing.T) {
 			t.Parallel()
@@ -274,9 +274,9 @@ func TestMatcherWithoutRolesResolvesNoRoleAutogroup(t *testing.T) {
 func TestRecognizedTracksRoleResolution(t *testing.T) {
 	t.Parallel()
 
-	withoutRoles := policycore.Matcher{Policy: &tailscale.ACL{}}
+	withoutRoles := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
 	withRoles := policycore.Matcher{
-		Policy:    &tailscale.ACL{},
+		Policy:    &policycore.Policy{ACL: &tailscale.ACL{}},
 		Roles:     map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
 		HaveRoles: true,
 	}
@@ -315,7 +315,7 @@ func TestMatcherRecognizesRoleAutogroupsWithEmptyRoster(t *testing.T) {
 	t.Parallel()
 
 	matcher := policycore.Matcher{
-		Policy:    &tailscale.ACL{},
+		Policy:    &policycore.Policy{ACL: &tailscale.ACL{}},
 		Roles:     map[string]tailscale.UserRole{},
 		HaveRoles: true,
 	}
@@ -342,7 +342,7 @@ func TestMatcherIgnoresRolesWithoutRosterAvailability(t *testing.T) {
 	t.Parallel()
 
 	matcher := policycore.Matcher{
-		Policy: &tailscale.ACL{},
+		Policy: &policycore.Policy{ACL: &tailscale.ACL{}},
 		Roles:  map[string]tailscale.UserRole{"ada@example.com": tailscale.UserRoleAdmin},
 	}
 	if matcher.Recognized("autogroup:admin") {
@@ -361,7 +361,7 @@ func TestMatcherIgnoresRolesWithoutRosterAvailability(t *testing.T) {
 func TestRecognized(t *testing.T) {
 	t.Parallel()
 
-	matcher := policycore.Matcher{Policy: &tailscale.ACL{}}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
 	tests := []struct {
 		name     string
 		selector string
