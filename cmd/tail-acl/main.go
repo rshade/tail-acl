@@ -1144,10 +1144,45 @@ func runDefinitionAdd(
 	if err != nil {
 		return nil, usageError{err}
 	}
+	return finishDefinitionAdd(path, kind, edit, comment, overwriteComment)
+}
+
+func runIPSetAdd(
+	path string,
+	name string,
+	members []aclpolicy.IPSetMemberSpec,
+	comment string,
+	commentSet, overwriteComment bool,
+) (*result, error) {
+	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := loadForEdit(path)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := aclpolicy.AddIPSetMembers(policy, name, members)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	return finishDefinitionAdd(path, aclpolicy.DefinitionIPSet, edit, comment, overwriteComment)
+}
+
+// finishDefinitionAdd applies a validated definition edit plus any comment
+// operation and renders the shared add result for both definition kinds.
+func finishDefinitionAdd(
+	path string,
+	kind aclpolicy.DefinitionKind,
+	edit aclpolicy.DefinitionEdit,
+	comment string,
+	overwriteComment bool,
+) (*result, error) {
 	topLevel := definitionTopLevel(kind)
 	operations := slices.Clone(edit.Operations)
 	if comment != "" {
 		var commentOps []aclpolicy.PatchOperation
+		var err error
 		if edit.Existed {
 			commentOps, err = commentOperations(path, comment, overwriteComment, topLevel, edit.Name)
 		} else {
@@ -1162,7 +1197,7 @@ func runDefinitionAdd(
 	status := statusNoChanges
 	message := fmt.Sprintf("%s %s already has the requested members in %s", kind, edit.Name, path)
 	if len(operations) != 0 {
-		if err = aclpolicy.WritePatch(path, operations...); err != nil {
+		if err := aclpolicy.WritePatch(path, operations...); err != nil {
 			return nil, err
 		}
 		status = statusOK
@@ -3412,8 +3447,10 @@ func commandCatalog() []schemaCommand {
 		},
 		{
 			commandIPSetAdd,
-			"Add CIDR members to an ipset; idempotent and merges into an existing ipset",
-			"ipset add --name ipset:NAME --cidr CIDR [--cidr CIDR ...] [--comment TEXT]",
+			"Add members to an ipset (CIDR, address, range, host:, ipset:, or add/remove operations); " +
+				"a remove requires every member to be an explicit operation; idempotent and merges into an existing ipset",
+			"ipset add --name ipset:NAME (--member MEMBER | --cidr CIDR) [--member MEMBER ...] [--cidr CIDR ...] " +
+				"[--comment TEXT]",
 		},
 		{
 			commandIPSetRemove,
@@ -3632,6 +3669,7 @@ Examples:
   tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
   tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
   tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+  tail-acl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
   tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
   tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
   tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"

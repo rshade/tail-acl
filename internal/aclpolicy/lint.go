@@ -40,6 +40,7 @@ const (
 	LintBroadRuleUntested     = "broad-rule-untested"
 	LintGrantEmpty            = "grant-empty"
 	LintDuplicateGrant        = "duplicate-grant"
+	LintIPSetMixedOperations  = "ipset-mixed-operations"
 	LintUnusedTag             = "unused-tag"
 	LintUnusedGroup           = "unused-group"
 	LintUnusedHost            = "unused-host"
@@ -249,6 +250,11 @@ func LintCatalog() []LintCheck {
 		},
 		{LintGrantEmpty, LintWarn, "a grant has an empty required selector list and can never match"},
 		{LintDuplicateGrant, LintWarn, "a grant is identical to an earlier one"},
+		{
+			LintIPSetMixedOperations,
+			LintError,
+			"an ipset mixes a remove operation with a member that has no add/remove operation",
+		},
 		{LintUnusedTag, LintInfo, "a tag is defined but referenced by no rule"},
 		{LintUnusedGroup, LintInfo, "a group is defined but referenced by no rule"},
 		{LintUnusedHost, LintInfo, "a host alias is defined but referenced by no rule"},
@@ -490,6 +496,7 @@ func evaluateLint(
 		return LintReport{}, err
 	}
 	findings = append(findings, duplicates...)
+	findings = append(findings, lintIPSetOperations(policy)...)
 	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
 
 	report := LintReport{}
@@ -1223,6 +1230,38 @@ func lintDuplicateGrants(policy *tailscale.ACL) ([]LintFinding, error) {
 	return findings, nil
 }
 
+// lintIPSetOperations applies the control plane's explicit-operation rule to
+// every ipset: once any member is a remove, a member with no operation word
+// has no defined position relative to it, and the policy is rejected at
+// upload. The classifier works from the operation word alone, so a set whose
+// targets do not all parse is still reported.
+func lintIPSetOperations(policy *tailscale.ACL) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for name, members := range policy.IPSets {
+		var implicit *policycore.IPSetImplicitMemberError
+		if err := policycore.ValidateIPSetOperations(members); !errors.As(err, &implicit) {
+			continue
+		}
+		locator := "ipsets[" + name + "]"
+		findings = append(findings, LintFinding{
+			ID:       LintIPSetMixedOperations,
+			Severity: LintError,
+			Rule:     locator,
+			Value:    implicit.Member,
+			Evidence: fmt.Sprintf("ipset %s mixes %q, which has no operation, with %q",
+				name, implicit.Member, implicit.Remove),
+			Remediation: fmt.Sprintf("write it as %q; every member must be an explicit add or remove",
+				"add "+implicit.Member),
+			Trace: []string{
+				fmt.Sprintf("%s carries the operation %q", locator, implicit.Remove),
+				fmt.Sprintf("member %q has no add/remove operation", implicit.Member),
+				"once any member is a remove, the control plane requires every member to be an explicit operation",
+			},
+		})
+	}
+	return findings
+}
+
 func lintUnusedDefinitions(
 	policy *tailscale.ACL,
 	sshRules []tailscale.ACLSSH,
@@ -1306,6 +1345,7 @@ func collectReferences(
 	for _, members := range policy.Groups {
 		addReferences(referenced, members)
 	}
+	addIPSetMemberReferences(referenced, policy.IPSets)
 	for _, owners := range policy.TagOwners {
 		addReferences(referenced, owners)
 	}
@@ -1326,6 +1366,20 @@ func collectReferences(
 	addSSHRuleReferences(referenced, sshRules)
 	addSSHTestReferences(referenced, sshTests)
 	return referenced
+}
+
+// addIPSetMemberReferences counts the ipset: and host: references an ipset
+// makes from inside its member list, so a definition used only that way is
+// used, not unused. The removal safety walk in DefinitionReferences reads the
+// same members.
+func addIPSetMemberReferences(referenced map[string]bool, ipsets map[string][]string) {
+	for _, members := range ipsets {
+		for _, member := range members {
+			if definition, ok := ipsetMemberReference(member); ok {
+				addReference(referenced, definition)
+			}
+		}
+	}
 }
 
 func addAutoApproverReferences(referenced map[string]bool, approvers []string) {

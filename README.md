@@ -46,6 +46,7 @@ tail-acl --file acl.json grant remove --index 0
 tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
 tail-acl --file acl.json group remove --name group:eng --force  # only when orphaning is intentional
 tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+tail-acl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
 tail-acl --file acl.json ipset remove --name ipset:office --force  # only when orphaning is intentional
 tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
 tail-acl --file acl.json ssh remove --action check --src autogroup:member --dst tag:server --user root --check-period 12h
@@ -219,7 +220,7 @@ access tokens are refreshed in memory and are not written to disk.
 | `grant remove` | Remove a grant by zero-based `--index` |
 | `group add` | Add repeatable login or `autogroup:` members to `--name group:NAME`; merges and is idempotent (`--comment`) |
 | `group remove` | Remove `--name group:NAME`; refuses referenced groups unless `--force`, naming the referencing sites |
-| `ipset add` | Add repeatable CIDR members to `--name ipset:NAME`; canonicalizes, merges, and is idempotent (`--comment`) |
+| `ipset add` | Add repeatable `--member` values (CIDR, address, range `A-B`, `host:ALIAS`, `ipset:NAME`, or `add`/`remove` + one of those) or CIDR-only `--cidr` values to `--name ipset:NAME`; canonicalizes, merges, and is idempotent; a `remove` requires every member to be an explicit operation (`--comment`) |
 | `ipset remove` | Remove `--name ipset:NAME`; refuses referenced ipsets unless `--force`, naming the referencing sites |
 | `ssh add` | Add an SSH rule with `--action accept\|check`, repeatable `--src`, `--dst`, and `--user`, optional `--check-period`, recorder fields, and `--comment`; selector order is ignored and duplicate rules are a no-op |
 | `ssh remove` | Remove an SSH rule by the same semantic fields, or by zero-based `--index`; omission of `--check-period` is distinct from an explicit period |
@@ -264,6 +265,25 @@ duplicate and prunes an entry when no `attr`, `ipPool`, or `app` data remains.
 `--index` remains available for removing a hand-authored entry directly.
 Existing `app` blocks are preserved as raw HuJSON, including their comments and
 formatting.
+
+`ipset add` accepts every member form the control plane does. `--member` takes
+a CIDR prefix or bare address, an inclusive address range `A-B`, a `host:ALIAS`
+reference, an `ipset:NAME` reference, or `add MEMBER` / `remove MEMBER`
+wrapping any of those; `--cidr` remains as the CIDR-only spelling with its
+original validation and error text, and the two may be combined, appending in
+argument order. Prefixes are masked, addresses and range ends are rendered
+canonically, and `host:`/`ipset:` targets are kept as written, so a member
+already present in any spelling is not appended again and repeating a command
+is a no-op. A `host:` alias must exist in `hosts`, an `ipset:` reference must
+name another existing ipset, and a reference that would close a cycle through
+the existing definitions is refused with the path. Once the resulting set
+carries a `remove`, every member must be an explicit `add` or `remove`; the
+command names the first implicit member and the `add MEMBER` spelling to use,
+and `lint` reports the same shape in a hand-written policy as
+`ipset-mixed-operations`. `check` and `test` do not yet apply operations,
+ranges, or `host:` references inside an ipset, so a set authored with those
+forms resolves to nothing in a local verdict until the shared resolver learns
+the grammar.
 
 `normalize` is the bridge from HuJSON to general-purpose JSON tooling: it is
 read-only and emits the bare standard-JSON policy by default, so its output can
@@ -794,7 +814,8 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `broad-rule-untested` | advice | a blanket source reaches a concrete destination on every port, with no posture/via gate and no deny assertion naming that destination |
 | `grant-empty` | warn | a grant has an empty required selector list and can never match |
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
-| `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule or approver |
+| `ipset-mixed-operations` | error | an ipset carries a `remove` operation beside a member with no `add`/`remove` operation, which the control plane rejects |
+| `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule, approver, or ipset member |
 | `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
 | `svc-in-ssh` | error | a `svc:` service selector is used as an SSH destination or recorder, where a node selector is required |
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |

@@ -98,23 +98,143 @@ func NormalizeIPSetCIDR(cidr string) (string, error) {
 	return prefix.Masked().String(), nil
 }
 
+// IPSetMemberSpec is one requested ipset member together with how it was
+// authored. CIDROnly marks a value from --cidr, which accepts only the CIDR
+// prefix form it always has, so an existing invocation keeps its exact
+// canonicalization and error text; a --member value takes the full grammar.
+type IPSetMemberSpec struct {
+	Value    string
+	CIDROnly bool
+}
+
 // AddDefinition adds every absent member to a group or ipset. Existing
 // members are preserved and duplicate requested members are collapsed in
-// argument order, so repeating the command is a no-op.
+// argument order, so repeating the command is a no-op. An ipset routes
+// through AddIPSetMembers with every member CIDR-only.
 func AddDefinition(policy *Policy, kind DefinitionKind, name string, members []string) (DefinitionEdit, error) {
-	name, members, err := validateDefinitionEdit(kind, name, members)
+	switch kind {
+	case DefinitionIPSet:
+		specs := make([]IPSetMemberSpec, 0, len(members))
+		for _, member := range members {
+			specs = append(specs, IPSetMemberSpec{Value: member, CIDROnly: true})
+		}
+		return AddIPSetMembers(policy, name, specs)
+	case DefinitionGroup:
+		group, logins, err := validateGroupEdit(name, members)
+		if err != nil {
+			return DefinitionEdit{}, err
+		}
+		missing := missingDefinitionMembers(kind, policy.Groups[group], logins)
+		return definitionAddEdit(policy.Groups, definitionGroupsKey, group, missing), nil
+	default:
+		return DefinitionEdit{}, fmt.Errorf("unsupported definition kind %q", kind)
+	}
+}
+
+// AddIPSetMembers adds every absent member to an ipset, accepting each form
+// the control plane does. A --member value is validated against the policy in
+// hand: a host: alias must be defined, an ipset: reference must name another
+// existing ipset, and a reference that would close a cycle through the
+// existing definitions is refused naming the path. The explicit-operation
+// rule is checked on the set the command would write — existing members
+// followed by the new ones — after idempotence filtering, so an already
+// applied command stays a no-op.
+func AddIPSetMembers(policy *Policy, name string, members []IPSetMemberSpec) (DefinitionEdit, error) {
+	name, err := NormalizeIPSetName(name)
 	if err != nil {
 		return DefinitionEdit{}, err
 	}
-	definitions, topLevel, err := definitionMap(policy, kind)
-	if err != nil {
-		return DefinitionEdit{}, err
+	if len(members) == 0 {
+		return DefinitionEdit{}, fmt.Errorf("%s add requires at least one member", DefinitionIPSet)
 	}
+	validated := make([]string, 0, len(members))
+	seen := make(map[string]struct{}, len(members))
+	for _, spec := range members {
+		var member string
+		if spec.CIDROnly {
+			member, err = NormalizeIPSetCIDR(spec.Value)
+		} else {
+			member, err = normalizeIPSetMember(policy, name, spec.Value)
+		}
+		if err != nil {
+			return DefinitionEdit{}, err
+		}
+		if _, duplicate := seen[member]; duplicate {
+			continue
+		}
+		seen[member] = struct{}{}
+		validated = append(validated, member)
+	}
+	existing := policy.IPSets[name]
+	missing := missingDefinitionMembers(DefinitionIPSet, existing, validated)
+	if len(missing) != 0 {
+		if err = policycore.ValidateIPSetOperations(slices.Concat(existing, missing)); err != nil {
+			return DefinitionEdit{}, err
+		}
+	}
+	return definitionAddEdit(policy.IPSets, definitionIPSetsKey, name, missing), nil
+}
+
+// normalizeIPSetMember parses one --member value and checks the references
+// it makes against the policy, returning the canonical spelling to write.
+func normalizeIPSetMember(policy *Policy, name, value string) (string, error) {
+	member, err := policycore.ParseIPSetMember(value)
+	if err != nil {
+		return "", err
+	}
+	value = strings.TrimSpace(value)
+	if alias, ok := member.HostAlias(); ok {
+		if _, defined := policy.Hosts[alias]; !defined {
+			return "", fmt.Errorf("ipset member %q names host alias %q, which is not defined in hosts", value, alias)
+		}
+	}
+	if member.Kind == policycore.IPSetMemberIPSet {
+		if member.Target == name {
+			return "", fmt.Errorf("ipset member %q references %s itself", value, name)
+		}
+		if _, defined := policy.IPSets[member.Target]; !defined {
+			return "", fmt.Errorf("ipset member %q references %s, which is not defined in ipsets", value, member.Target)
+		}
+		if path := ipsetReferencePath(policy.IPSets, member.Target, name, make(map[string]bool)); path != nil {
+			return "", fmt.Errorf("ipset member %q creates a cycle: %s", value,
+				strings.Join(append([]string{name}, path...), " -> "))
+		}
+	}
+	return member.String(), nil
+}
+
+// ipsetReferencePath walks from one ipset through the ipset: members of the
+// existing definitions looking for target, returning the path of names from
+// from to target inclusive, or nil when target is unreachable. Members that
+// do not parse are skipped: a hand-written malformed member is a lint
+// concern, not a reason to refuse an unrelated add.
+func ipsetReferencePath(ipsets map[string][]string, from, target string, visited map[string]bool) []string {
+	if from == target {
+		return []string{from}
+	}
+	if visited[from] {
+		return nil
+	}
+	visited[from] = true
+	for _, raw := range ipsets[from] {
+		member, err := policycore.ParseIPSetMember(raw)
+		if err != nil || member.Kind != policycore.IPSetMemberIPSet {
+			continue
+		}
+		if path := ipsetReferencePath(ipsets, member.Target, target, visited); path != nil {
+			return append([]string{from}, path...)
+		}
+	}
+	return nil
+}
+
+// definitionAddEdit builds the patch that appends missing to name, creating
+// the map or the definition as needed.
+func definitionAddEdit(definitions map[string][]string, topLevel, name string, missing []string) DefinitionEdit {
 	existing, existed := definitions[name]
-	missing := missingDefinitionMembers(kind, existing, members)
 	edit := DefinitionEdit{Name: name, Existed: existed}
 	if len(missing) == 0 {
-		return edit, nil
+		return edit
 	}
 
 	switch {
@@ -135,7 +255,7 @@ func AddDefinition(policy *Policy, kind DefinitionKind, name string, members []s
 				member, topLevel, name, "-"))
 		}
 	}
-	return edit, nil
+	return edit
 }
 
 // RemoveDefinition removes a whole group or ipset definition. A referenced
@@ -183,27 +303,19 @@ func (e *DefinitionReferenceError) Error() string {
 		e.Kind, e.Name, strings.Join(e.References, ", "))
 }
 
-func validateDefinitionEdit(kind DefinitionKind, name string, members []string) (string, []string, error) {
-	name, err := normalizeDefinitionNameForKind(kind, name)
+func validateGroupEdit(name string, members []string) (string, []string, error) {
+	name, err := NormalizeGroupName(name)
 	if err != nil {
 		return "", nil, err
 	}
 	if len(members) == 0 {
-		return "", nil, fmt.Errorf("%s add requires at least one member", kind)
+		return "", nil, fmt.Errorf("%s add requires at least one member", DefinitionGroup)
 	}
 	validated := make([]string, 0, len(members))
 	seen := make(map[string]struct{}, len(members))
 	for _, member := range members {
-		switch kind {
-		case DefinitionGroup:
-			member = strings.TrimSpace(member)
-			err = ValidateGroupMember(member)
-		case DefinitionIPSet:
-			member, err = NormalizeIPSetCIDR(member)
-		default:
-			return "", nil, fmt.Errorf("unsupported definition kind %q", kind)
-		}
-		if err != nil {
+		member = strings.TrimSpace(member)
+		if err = ValidateGroupMember(member); err != nil {
 			return "", nil, err
 		}
 		if _, duplicate := seen[member]; duplicate {
@@ -249,13 +361,22 @@ func missingDefinitionMembers(kind DefinitionKind, existing, wanted []string) []
 	return missing
 }
 
+// definitionMembersEqual compares two members by identity. An ipset member is
+// compared in its canonical spelling so two spellings of one network, range,
+// or operation cannot author two entries; a member that does not parse is
+// compared as written.
 func definitionMembersEqual(kind DefinitionKind, left, right string) bool {
 	if kind != DefinitionIPSet {
 		return left == right
 	}
-	leftCIDR, leftErr := NormalizeIPSetCIDR(left)
-	rightCIDR, rightErr := NormalizeIPSetCIDR(right)
-	return leftErr == nil && rightErr == nil && leftCIDR == rightCIDR
+	return canonicalIPSetMember(left) == canonicalIPSetMember(right)
+}
+
+func canonicalIPSetMember(member string) string {
+	if parsed, err := policycore.ParseIPSetMember(member); err == nil {
+		return parsed.String()
+	}
+	return strings.TrimSpace(member)
 }
 
 // DefinitionReferences returns policy locations that name target. It mirrors
@@ -328,6 +449,13 @@ func DefinitionReferences(policy *Policy, target string) []string {
 	for name, members := range policy.Groups {
 		add("groups["+name+"]", members, false)
 	}
+	for name, members := range policy.IPSets {
+		for index, member := range members {
+			if referenced, ok := ipsetMemberReference(member); ok && referenced == target {
+				references = append(references, fmt.Sprintf("ipsets[%s][%d]", name, index))
+			}
+		}
+	}
 	for name, owners := range policy.TagOwners {
 		add("tagOwners["+name+"]", owners, false)
 	}
@@ -365,4 +493,19 @@ func DefinitionReferences(policy *Policy, target string) []string {
 
 	sort.Strings(references)
 	return slices.Compact(references)
+}
+
+// ipsetMemberReference reports the definition an ipset member names: the
+// ipset: target as written, or the alias behind a host: target, either bare
+// or under an add/remove operation. A literal member names no definition, and
+// neither does one that does not parse.
+func ipsetMemberReference(member string) (string, bool) {
+	parsed, err := policycore.ParseIPSetMember(member)
+	if err != nil {
+		return "", false
+	}
+	if parsed.Kind == policycore.IPSetMemberIPSet {
+		return parsed.Target, true
+	}
+	return parsed.HostAlias()
 }

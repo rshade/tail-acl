@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -248,13 +249,12 @@ func (f *sshRuleFlags) changed(cmd *cobra.Command) bool {
 }
 
 func newDefinitionAddCommand(deps *commandDeps, kind aclpolicy.DefinitionKind) *cobra.Command {
+	if kind == aclpolicy.DefinitionIPSet {
+		return newIPSetAddCommand(deps)
+	}
 	var name, comment string
 	var members stringListFlag
 	var overwriteComment bool
-	memberFlag, memberUsage := "member", "group login or autogroup; may be repeated"
-	if kind == aclpolicy.DefinitionIPSet {
-		memberFlag, memberUsage = "cidr", "CIDR prefix; may be repeated"
-	}
 	cmd := &cobra.Command{
 		Use:   subAdd,
 		Short: "Add members to a " + string(kind) + " definition",
@@ -269,10 +269,70 @@ func newDefinitionAddCommand(deps *commandDeps, kind aclpolicy.DefinitionKind) *
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", string(kind)+" definition name ("+string(kind)+":NAME)")
-	cmd.Flags().Var(&members, memberFlag, memberUsage)
+	cmd.Flags().Var(&members, "member", "group login or autogroup; may be repeated")
 	registerCommentFlags(cmd.Flags(), &comment, &overwriteComment)
 	return cmd
 }
+
+// newIPSetAddCommand registers --member and --cidr on one ordered member
+// list: an ipset with operations is an ordered program, so the two flags
+// must keep their interleaving rather than collecting into two lists.
+func newIPSetAddCommand(deps *commandDeps) *cobra.Command {
+	var name, comment string
+	var members []aclpolicy.IPSetMemberSpec
+	var overwriteComment bool
+	kind := aclpolicy.DefinitionIPSet
+	cmd := &cobra.Command{
+		Use:   subAdd,
+		Short: "Add members to an ipset definition",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out, err := runIPSetAdd(
+				deps.opts.file, name, members, comment,
+				cmd.Flags().Changed(commentFlagName), overwriteComment,
+			)
+			*deps.result = out
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", string(kind)+" definition name ("+string(kind)+":NAME)")
+	cmd.Flags().Var(&ipsetMemberFlag{members: &members}, "member",
+		"CIDR, address, range A-B, host:ALIAS, ipset:NAME, or add|remove MEMBER; may be repeated")
+	cmd.Flags().Var(&ipsetMemberFlag{members: &members, cidrOnly: true}, "cidr",
+		"CIDR prefix; a --member restricted to that form; may be repeated")
+	registerCommentFlags(cmd.Flags(), &comment, &overwriteComment)
+	return cmd
+}
+
+// ipsetMemberFlag appends to a member list shared between --member and
+// --cidr, tagging each value with the flag it came from so --cidr keeps its
+// CIDR-only validation.
+type ipsetMemberFlag struct {
+	members  *[]aclpolicy.IPSetMemberSpec
+	cidrOnly bool
+}
+
+func (f *ipsetMemberFlag) Set(value string) error {
+	if value == "" {
+		return errors.New("value cannot be empty")
+	}
+	*f.members = append(*f.members, aclpolicy.IPSetMemberSpec{Value: value, CIDROnly: f.cidrOnly})
+	return nil
+}
+
+func (f *ipsetMemberFlag) String() string {
+	var values []string
+	for _, member := range *f.members {
+		if member.CIDROnly == f.cidrOnly {
+			values = append(values, member.Value)
+		}
+	}
+	return strings.Join(values, ",")
+}
+
+// Type satisfies pflag.Value. The name appears in --help as the flag's
+// argument placeholder.
+func (f *ipsetMemberFlag) Type() string { return "stringList" }
 
 func newDefinitionRemoveCommand(deps *commandDeps, kind aclpolicy.DefinitionKind) *cobra.Command {
 	var name string
