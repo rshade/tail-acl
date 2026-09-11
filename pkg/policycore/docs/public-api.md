@@ -1,10 +1,10 @@
 # Public API reference
 
-This page describes the exported selector-matching API in `policycore`, the
-shared `policycore/addrspace` address primitives, the `policycore/sanitize`
-output contract, and the `policycore/hujsonedit` comment-preserving document
-editor, plus the `policycore/alpha` inventory and shared policy models for
-features modeled ahead of the pinned SDK.
+This page describes the exported selector-matching API and ipset member
+grammar in `policycore`, the shared `policycore/addrspace` address primitives,
+the `policycore/sanitize` output contract, and the `policycore/hujsonedit`
+comment-preserving document editor, plus the `policycore/alpha` inventory and
+shared policy models for features modeled ahead of the pinned SDK.
 
 ## Alpha feature inventory
 
@@ -281,6 +281,32 @@ Set `HaveRoles` from that distinction, not from the map's length.
   be an address or a prefix.
 - `IsPublicAddress` reports whether a value resolves to a publicly routable
   address, which is what `autogroup:internet` selects.
+
+## ipset member grammar
+
+`ParseIPSetMember` classifies one raw ipset member using the control plane's
+grammar and returns an `IPSetMember{Operation, Kind, Target}`. A member is an
+optional `add` or `remove` operation word followed by one target: a CIDR
+prefix, a bare address, an inclusive range `A-B`, a `host:<alias>` reference,
+or an `ipset:<name>` reference. `Target` is canonical for the address-bearing
+kinds — the prefix masked, an address or a range's ends rendered from their
+parsed form, a bare address never promoted to a `/32` — and kept as written
+for `host:` and `ipset:` references. `IPSetMember.String` renders the
+canonical spelling, which is what an authoring tool compares for idempotence.
+Whether a referenced host or ipset exists is the caller's question; the parser
+has no policy.
+
+`ValidateIPSetOperations` enforces the explicit-operation rule over a raw
+member list: once any member is a `remove`, every member must be an explicit
+`add` or `remove`. It classifies by the operation word alone, so a linter can
+report the rule even when a target does not parse. The
+`IPSetImplicitMemberError` it returns names the first implicit member and the
+first `remove`, and its message says to write the member as `add <member>`.
+
+`ExpandAddressSelector` does not yet apply this grammar: it follows `Hosts`
+by bare alias and `IPSets` by name and passes any other member through
+verbatim, so an operation, a range, or a `host:` reference inside an ipset
+resolves to nothing there.
 
 ## Resolution boundaries
 
