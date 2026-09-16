@@ -280,10 +280,18 @@ the existing definitions is refused with the path. Once the resulting set
 carries a `remove`, every member must be an explicit `add` or `remove`; the
 command names the first implicit member and the `add MEMBER` spelling to use,
 and `lint` reports the same shape in a hand-written policy as
-`ipset-mixed-operations`. `check` and `test` do not yet apply operations,
-ranges, or `host:` references inside an ipset, so a set authored with those
-forms resolves to nothing in a local verdict until the shared resolver learns
-the grammar.
+`ipset-mixed-operations`. `check` and `test` resolve every one of these forms
+the way the control plane enforces them: members apply in order, so a
+`remove` withdraws address space an earlier `add` contributed (a `host:`
+alias's address included) and a later `add` restores it; a range covers
+every address between its ends; and a `host:` reference is the alias's
+address. A defined ipset the resolver cannot materialize — a member that does
+not parse, an implicit member beside a `remove`, a `host:` or `ipset:`
+reference the policy does not define, a cycle, or an expansion past the
+resolver's limits — makes a verdict that reaches it `indeterminate` rather
+than `not reachable`. `autogroup:internet`
+inside an ipset is the one form the control plane accepts that the shared
+grammar does not yet, so a set containing it stays indeterminate.
 
 `normalize` is the bridge from HuJSON to general-purpose JSON tooling: it is
 read-only and emits the bare standard-JSON policy by default, so its output can
@@ -640,12 +648,16 @@ status, count, `skipped` entries, and stderr warnings intact. The flag is
 test-only: `check`'s three-state verdict is its product and always exits `10`
 when it cannot settle the query.
 
-Local evaluation assumes the policy's references are valid. An undefined
-`group:`, host alias, or `ipset:` reference matches nothing locally even though
-the control plane rejects that policy. `tail-acl lint` catches those dangling
-references; it does **not** catch an unreadable port or protocol, so it will not
-predict an exit `10`. Server-side `validate` is the only check that catches
-both. `-strict` checks unreadable network-rule syntax, not dangling references.
+Local evaluation assumes the policy's rule selectors are valid. An undefined
+`group:`, host alias, or `ipset:` *selector* on a rule matches nothing locally
+even though the control plane rejects that policy; an undefined reference
+*inside* a defined ipset is different, because it leaves the set unreadable,
+and a verdict that reaches it is `indeterminate`. `tail-acl lint` catches a
+dangling rule selector; it does **not** yet check the members inside an
+ipset, and it does **not** catch an unreadable port or protocol, so it will
+not predict an exit `10` from either. Server-side `validate` is the only
+check that catches everything. `-strict` checks unreadable network-rule
+syntax, not dangling references.
 
 Trace entries are human-readable evidence, not a stable contract — their wording
 changes as the evaluator learns to name a cause more precisely. Machine

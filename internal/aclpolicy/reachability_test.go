@@ -703,3 +703,131 @@ func TestCrossTailnetSourceSelectorIsIndeterminate(t *testing.T) {
 		t.Errorf("Evidence = %q, want it to name the cross-tailnet selector", got.Evidence)
 	}
 }
+
+// --- ipset member forms (#366) --------------------------------------------
+//
+// The control plane enforces an ipset written with add/remove operations, a
+// range, or a host: reference exactly as written. The resolver used to pass
+// those members through verbatim, so every address inside such a set was a
+// confident false deny. These are the four rows #366 measured.
+
+func issue366Policy() *tailscale.ACL {
+	policy := grantPolicy(tailscale.Grant{
+		Source:      []string{"tag:web"},
+		Destination: []string{"ipset:trimmed", "ipset:rng", "ipset:h"},
+		IP:          []string{"tcp:*"},
+	})
+	policy.Hosts = map[string]string{"gw": "10.9.0.1"}
+	policy.IPSets = map[string][]string{
+		"ipset:base":    {"10.0.0.0/8"},
+		"ipset:trimmed": {"add ipset:base", "remove 10.1.0.0/16"},
+		"ipset:rng":     {"10.5.0.1-10.5.0.9"},
+		"ipset:h":       {"host:gw"},
+	}
+	return policy
+}
+
+func TestIPSetMemberFormsResolveInAVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		target string
+		want   aclpolicy.Access
+	}{
+		{"removed from the set", "10.1.0.5:80", aclpolicy.AccessDeny},
+		{"kept by the add", "10.2.0.5:80", aclpolicy.AccessAllow},
+		{"inside the range", "10.5.0.4:81", aclpolicy.AccessAllow},
+		{"the host alias", "10.9.0.1:82", aclpolicy.AccessAllow},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := evaluate(t, issue366Policy(), "tag:web", testCase.target, aclpolicy.ReachabilityOptions{})
+			if got.Access != testCase.want {
+				t.Fatalf("Access = %q, want %q; evidence: %s", got.Access, testCase.want, got.Evidence)
+			}
+			if got.Access != aclpolicy.AccessAllow {
+				return
+			}
+			if got.Rule == nil || got.Rule.Kind != aclpolicy.RuleGrant || got.Rule.Index != 0 {
+				t.Errorf("Rule = %+v, want the matched grant 0", got.Rule)
+			}
+		})
+	}
+}
+
+// A defined ipset the resolver cannot materialize — here a host: reference to
+// nothing — is a fact the policy file cannot supply, so it clouds the verdict
+// rather than denying it. An undefined ipset: selector, by contrast, still
+// names nothing.
+func TestGrantToAnUnmaterializableIPSetIsIndeterminate(t *testing.T) {
+	t.Parallel()
+	policy := grantPolicy(tailscale.Grant{
+		Source:      []string{"tag:web"},
+		Destination: []string{"ipset:broken"},
+		IP:          []string{"tcp:80"},
+	})
+	policy.IPSets = map[string][]string{"ipset:broken": {"host:missing"}}
+
+	got := evaluate(t, policy, "tag:web", "10.0.0.1:80", aclpolicy.ReachabilityOptions{})
+
+	if got.Access != aclpolicy.AccessIndeterminate {
+		t.Fatalf("Access = %q, want %q; evidence: %s", got.Access, aclpolicy.AccessIndeterminate, got.Evidence)
+	}
+	if got.Allowed != nil {
+		t.Errorf("Allowed = %v, want nil; an indeterminate answer must not claim a boolean", *got.Allowed)
+	}
+	if !strings.Contains(got.Evidence, "ipset:broken") {
+		t.Errorf("Evidence = %q, want it to name ipset:broken", got.Evidence)
+	}
+	if got.Rule == nil || got.Rule.Kind != aclpolicy.RuleGrant || got.Rule.Index != 0 {
+		t.Errorf("Rule = %+v, want the gating grant 0", got.Rule)
+	}
+}
+
+func TestUndefinedIPSetSelectorStillDenies(t *testing.T) {
+	t.Parallel()
+	policy := grantPolicy(tailscale.Grant{
+		Source:      []string{"tag:web"},
+		Destination: []string{"ipset:undefined"},
+		IP:          []string{"tcp:80"},
+	})
+
+	got := evaluate(t, policy, "tag:web", "10.0.0.1:80", aclpolicy.ReachabilityOptions{})
+
+	if got.Access != aclpolicy.AccessDeny {
+		t.Errorf("Access = %q, want %q; evidence: %s", got.Access, aclpolicy.AccessDeny, got.Evidence)
+	}
+}
+
+// A test suite over a trimmed set used to pass a deny of an address the
+// control plane accepts, and could not express the accept at all.
+func TestEvaluateTestsResolvesIPSetMemberForms(t *testing.T) {
+	t.Parallel()
+	policy := grantPolicy(tailscale.Grant{
+		Source:      []string{"tag:web"},
+		Destination: []string{"ipset:trimmed"},
+		IP:          []string{"tcp:80"},
+	})
+	policy.IPSets = map[string][]string{"ipset:trimmed": {"add 10.0.0.0/8", "remove 10.1.0.0/16"}}
+	policy.Tests = []tailscale.ACLTest{
+		{Source: "tag:web", Accept: []string{"10.2.0.5:80"}},
+		{Source: "tag:web", Deny: []string{"10.2.0.5:80"}},
+	}
+
+	report, err := aclpolicy.EvaluateTests(policy, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatalf("EvaluateTests: %v", err)
+	}
+	if len(report.Assertions) != 2 {
+		t.Fatalf("got %d assertions, want 2", len(report.Assertions))
+	}
+	if report.Assertions[0].Status != aclpolicy.AssertionPass {
+		t.Errorf("accept 10.2.0.5:80 = %q, want %q: %s",
+			report.Assertions[0].Status, aclpolicy.AssertionPass, report.Assertions[0].Evidence)
+	}
+	if report.Assertions[1].Status != aclpolicy.AssertionFail {
+		t.Errorf("deny 10.2.0.5:80 = %q, want %q: %s",
+			report.Assertions[1].Status, aclpolicy.AssertionFail, report.Assertions[1].Evidence)
+	}
+}

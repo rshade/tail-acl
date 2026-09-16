@@ -7,7 +7,7 @@
 		"corp-net": "10.20.0.0/16",
 	},
 	"ipsets": {
-		"ipset:corp": ["corp-net"],
+		"ipset:corp": ["host:corp-net"],
 	},
 	"grants": [
 		{

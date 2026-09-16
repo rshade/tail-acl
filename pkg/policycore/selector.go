@@ -95,7 +95,9 @@ func SelectorMatches(selector, query string, policy *tailscale.ACL, source strin
 // unevaluable. Every selector that is neither an autogroup nor a cross-tailnet
 // reference is recognized — tags, users, groups, hosts, ipsets, and addresses
 // all resolve from the policy document alone — as are the autogroup forms this
-// package resolves.
+// package resolves. The one exception among them is an ipset the resolver
+// cannot materialize: its non-match means the set could not be read, so it is
+// reported unrecognized, exactly as MatchesTri reports it Unresolvable.
 //
 // Role autogroups are recognized only when the user roster was read. Without
 // that live tailnet fact no caller can decide them, so a non-match must be
@@ -116,6 +118,9 @@ func SelectorMatches(selector, query string, policy *tailscale.ACL, source strin
 func (m Matcher) Recognized(selector string) bool {
 	if crossSpec, ok := crossTailnetSpecFor(selector); ok {
 		return m.crossTailnetSettles(crossSpec)
+	}
+	if !m.ipsetMaterializes(selector) {
+		return false
 	}
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true

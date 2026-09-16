@@ -275,8 +275,10 @@ Set `HaveRoles` from that distinction, not from the map's length.
   control-plane state settles that, so it belongs to a live-fleet check rather
   than a static advisory.
 - `ExpandAddressSelector` resolves a selector through `Hosts` and `IPSets` to
-  the addresses or prefixes it names. A value that names neither is returned
-  unchanged.
+  the addresses or prefixes it names: a `Hosts` alias is followed
+  transitively, and an `IPSets` entry is materialized through `ResolveIPSet`
+  and rendered as prefix strings, or expands to nothing when it cannot be
+  materialized. A value that names neither is returned unchanged.
 - `AddressContains` reports whether a selector covers a query, where either may
   be an address or a prefix.
 - `IsPublicAddress` reports whether a value resolves to a publicly routable
@@ -303,14 +305,48 @@ report the rule even when a target does not parse. The
 `IPSetImplicitMemberError` it returns names the first implicit member and the
 first `remove`, and its message says to write the member as `add <member>`.
 
-`ExpandAddressSelector` does not yet apply this grammar: it follows `Hosts`
-by bare alias and `IPSets` by name and passes any other member through
-verbatim, so an operation, a range, or a `host:` reference inside an ipset
-resolves to nothing there.
+## ipset materialization
+
+`ResolveIPSet(name, policy)` materializes one `IPSets` entry into the address
+space its members cover and returns it as the minimal sorted prefix covering.
+Members are applied in list order under the grammar above: an implicit member
+and an `add` contribute their target's address space, and a `remove` withdraws
+it from whatever earlier members contributed, so a later `add` re-contributes
+space an earlier `remove` withdrew. A `host:` reference is one `Hosts` lookup
+whose value must be a literal address or prefix, a range contributes every
+address between its ends, and an `ipset:` reference recurses. Nested
+references are memoized within a call, so a set reached through two paths is
+resolved once and is not a cycle. This is the shape the control plane
+enforces: a `remove` withdraws a `host:` alias's address like any other, and a
+node compiles a range into the same covering.
+
+A set that cannot be materialized is an error naming the set and the member,
+never a partial set: a member that does not parse (which includes
+`autogroup:internet` until the grammar learns it), an implicit member beside
+a `remove` (the rule `ValidateIPSetOperations` enforces), a `host:` alias that is
+undefined or whose `Hosts` value names something other than an address or
+prefix, an `ipset:` reference that is undefined or already on the current
+resolution path, nesting deeper than 128 levels, or an expansion past 65536
+prefixes. Dropping an unreadable member would either hide address space or,
+for a failed `remove`, silently widen the set.
+
+`ExpandAddressSelector` materializes an `IPSets` entry through `ResolveIPSet`,
+and `Matcher` treats a set it cannot materialize as undecidable:
+`MatchesTri` reports `Unresolvable` for a selector that names or reaches one,
+and `Recognized` reports `false` for it, so a consumer reports indeterminate
+evidence rather than a confident denial. A set that materializes to no
+address space is decidable — a query against it is `NoMatch`. A bare host
+alias written directly as a member (`"gw"` rather than `"host:gw"`) is not a
+form the control plane accepts, so it makes the set unmaterializable rather
+than resolving by accident.
 
 ## Resolution boundaries
 
 Nested groups, `Hosts`, and `IPSets` are expanded with cycle guards. Undefined
-groups and cycles do not become missing live state. A complete roster can
-settle a user query for a role autogroup, but it cannot map a bare device
-address to its owner; that query remains `Unresolvable`.
+groups and `Hosts` cycles do not become missing live state. An `IPSets` entry
+is the exception: a cycle through `ipset:` references, like any other reason
+the set cannot be materialized, makes every selector that reaches it
+`Unresolvable`, because the alternative is a settled non-match the policy
+does not support. A complete roster can settle a user query for a role
+autogroup, but it cannot map a bare device address to its owner; that query
+remains `Unresolvable`.

@@ -551,3 +551,84 @@ func TestSelectorMatchesTriIsTheZeroRosterMatcher(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchesTriResolvesIPSetMemberForms pins the #366 verdicts through the
+// matcher — every member form the control plane enforces settles as it does
+// on the wire — and the line the resolver draws beside them: a set that
+// materializes to no address space provably names nothing, while one that
+// cannot be materialized could name anything. Matches must agree with
+// MatchesTri on every row, so the boolean callers see the same answer.
+func TestMatchesTriResolvesIPSetMemberForms(t *testing.T) {
+	t.Parallel()
+
+	policy := &tailscale.ACL{
+		Hosts:  map[string]string{"gw": "10.9.0.1"},
+		Groups: map[string][]string{"group:net": {"ipset:broken"}},
+		IPSets: map[string][]string{
+			"ipset:base":    {"10.0.0.0/8"},
+			"ipset:trimmed": {"add ipset:base", "remove 10.1.0.0/16"},
+			"ipset:rng":     {"10.5.0.1-10.5.0.9"},
+			"ipset:h":       {"host:gw"},
+			"ipset:broken":  {"host:missing"},
+			"ipset:empty":   {"add 203.0.113.0/24", "remove 203.0.113.0/24"},
+			"ipset:bare":    {"gw"},
+		},
+	}
+	tests := []struct {
+		name     string
+		selector string
+		query    string
+		want     policycore.Match
+	}{
+		{"kept by the add", "ipset:trimmed", "10.2.0.5", policycore.Matched},
+		{"withdrawn by the remove", "ipset:trimmed", "10.1.0.5", policycore.NoMatch},
+		{"inside the range", "ipset:rng", "10.5.0.4", policycore.Matched},
+		{"the host alias", "ipset:h", "10.9.0.1", policycore.Matched},
+		{"an unmaterializable ipset is unresolvable", "ipset:broken", "203.0.113.7", policycore.Unresolvable},
+		{"an empty ipset is a settled non-match", "ipset:empty", "203.0.113.7", policycore.NoMatch},
+		{"a group containing a broken ipset is unresolvable", "group:net", "10.0.0.1", policycore.Unresolvable},
+		{"a bare alias member breaks the set", "ipset:bare", "10.9.0.1", policycore.Unresolvable},
+		{"an undefined ipset selector names nothing", "ipset:undefined", "10.1.0.5", policycore.NoMatch},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := policycore.SelectorMatchesTri(test.selector, test.query, policy, "")
+			if got != test.want {
+				t.Errorf("SelectorMatchesTri(%q, %q) = %v, want %v", test.selector, test.query, got, test.want)
+			}
+			matched := policycore.SelectorMatches(test.selector, test.query, policy, "")
+			if matched != (got == policycore.Matched) {
+				t.Errorf("SelectorMatches(%q, %q) = %v, disagrees with MatchesTri %v",
+					test.selector, test.query, matched, got)
+			}
+		})
+	}
+}
+
+func TestRecognizedReportsAnUnmaterializableIPSetUnrecognized(t *testing.T) {
+	t.Parallel()
+
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{
+		IPSets: map[string][]string{
+			"ipset:broken":  {"host:missing"},
+			"ipset:trimmed": {"add 10.0.0.0/8", "remove 10.1.0.0/16"},
+		},
+	}}}
+	tests := []struct {
+		selector string
+		want     bool
+	}{
+		{"ipset:broken", false},
+		{"ipset:trimmed", true},
+		{"ipset:undefined", true},
+	}
+	for _, test := range tests {
+		t.Run(test.selector, func(t *testing.T) {
+			t.Parallel()
+			if got := matcher.Recognized(test.selector); got != test.want {
+				t.Errorf("Recognized(%q) = %v, want %v", test.selector, got, test.want)
+			}
+		})
+	}
+}

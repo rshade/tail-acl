@@ -20,7 +20,10 @@ import (
 const v4In6PrefixBits = 96
 
 // ExpandAddressSelector resolves a selector through Hosts and IPSets to the
-// concrete addresses or prefixes it names. A value that names neither is
+// concrete addresses or prefixes it names. A Hosts alias is followed
+// transitively; an IPSets entry is materialized through ResolveIPSet, so
+// operations, ranges, and host: references inside it resolve, and a set that
+// cannot be materialized expands to nothing. A value that names neither is
 // returned unchanged, as is every value when policy is nil: a document that
 // does not exist declares no aliases, so the selector already is the concrete
 // value it names.
@@ -43,12 +46,17 @@ func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[
 		defer delete(seen, selector)
 		return expandAddressSelectorSeen(address, policy, seen)
 	}
-	if values, ok := policy.IPSets[selector]; ok {
-		seen[selector] = true
-		defer delete(seen, selector)
-		expanded := make([]string, 0, len(values))
-		for _, value := range values {
-			expanded = append(expanded, expandAddressSelectorSeen(value, policy, seen)...)
+	if _, ok := policy.IPSets[selector]; ok {
+		// Expanding to nothing is the boolean caller's honest answer — no
+		// address is provably covered — and selectorResolvable reports the
+		// same failure as Unresolvable for the callers that can carry it.
+		prefixes, err := ResolveIPSet(selector, policy)
+		if err != nil {
+			return nil
+		}
+		expanded := make([]string, 0, len(prefixes))
+		for _, prefix := range prefixes {
+			expanded = append(expanded, prefix.String())
 		}
 		return expanded
 	}

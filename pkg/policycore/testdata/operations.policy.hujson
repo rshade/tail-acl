@@ -1,0 +1,10 @@
+{
+  "hosts": {"office": "192.0.2.0/24"},
+  "ipsets": {
+    "ipset:base": ["host:office"],
+    "ipset:trimmed": ["add ipset:base", "remove 192.0.2.128/25"],
+    "ipset:empty": ["add 203.0.113.0/24", "remove 203.0.113.0/24"],
+    "ipset:readded": ["add ipset:empty", "remove 198.51.100.0/24", "add 198.51.100.2-198.51.100.3"],
+  },
+  "grants": [],
+}

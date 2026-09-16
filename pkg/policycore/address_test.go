@@ -1,6 +1,7 @@
 package policycore_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/rshade/tailscale-utils/policycore"
@@ -77,6 +78,48 @@ func TestExpandAddressSelectorTerminatesOnCycle(t *testing.T) {
 	policy := &tailscale.ACL{Hosts: map[string]string{"a": "b", "b": "a"}}
 	if got := policycore.ExpandAddressSelector("a", policy); len(got) != 0 {
 		t.Errorf("cyclic host expansion = %v; want empty", got)
+	}
+}
+
+// TestExpandAddressSelectorMaterializesIPSets pins the #366 fix: an ipset
+// member written with an operation, as a range, or as a host: reference used
+// to pass through verbatim and match nothing.
+func TestExpandAddressSelectorMaterializesIPSets(t *testing.T) {
+	t.Parallel()
+
+	policy := issue366Policy()
+	policy.IPSets["ipset:broken"] = []string{"host:missing"}
+	tests := []struct {
+		name     string
+		selector string
+		want     []string
+	}{
+		{
+			name:     "operations apply in order and merge to a minimal covering",
+			selector: "ipset:trimmed",
+			want: []string{
+				"10.0.0.0/16", "10.2.0.0/15", "10.4.0.0/14", "10.8.0.0/13",
+				"10.16.0.0/12", "10.32.0.0/11", "10.64.0.0/10", "10.128.0.0/9",
+			},
+		},
+		{
+			name:     "a range expands to prefixes",
+			selector: "ipset:rng",
+			want:     []string{"10.5.0.1/32", "10.5.0.2/31", "10.5.0.4/30", "10.5.0.8/31"},
+		},
+		{name: "a host reference renders as a host prefix", selector: "ipset:h", want: []string{"10.9.0.1/32"}},
+		{name: "a fully removed set expands to nothing", selector: "ipset:cut", want: nil},
+		{name: "an unmaterializable set expands to nothing", selector: "ipset:broken", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := policycore.ExpandAddressSelector(tt.selector, policy)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("ExpandAddressSelector(%q) = %v; want %v", tt.selector, got, tt.want)
+			}
+		})
 	}
 }
 

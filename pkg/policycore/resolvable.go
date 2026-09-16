@@ -123,6 +123,10 @@ func (m Matcher) selectorResolvableSeen(
 		return m.crossTailnetSettles(crossSpec)
 	}
 
+	if !m.ipsetMaterializes(selector) {
+		return false
+	}
+
 	if !strings.HasPrefix(selector, autogroupPrefix) {
 		return true
 	}
@@ -134,6 +138,25 @@ func (m Matcher) selectorResolvableSeen(
 		target:    classifyQuery(query),
 		haveRoles: m.HaveRoles,
 	})
+}
+
+// ipsetMaterializes reports whether selector, if it names an IPSets entry,
+// can be materialized; ResolveIPSet documents what stops it. A set that
+// cannot be is undecidable: address expansion yields nothing for it, but that
+// nothing is "could not read the set", not "the set names nothing", and
+// reporting it settled would be the confident wrong answer Match exists to
+// prevent. A set that materializes to no address space at all is decidable.
+// Every selector that is not an IPSets key is unaffected.
+func (m Matcher) ipsetMaterializes(selector string) bool {
+	acl := m.acl()
+	if acl == nil {
+		return true
+	}
+	if _, ok := acl.IPSets[selector]; !ok {
+		return true
+	}
+	_, err := ResolveIPSet(selector, acl)
+	return err == nil
 }
 
 // AutogroupResolvable is the roster-blind view of whether this selector's
