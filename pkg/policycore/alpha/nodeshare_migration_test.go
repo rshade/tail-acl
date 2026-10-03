@@ -5,21 +5,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	tailscale "tailscale.com/client/tailscale/v2"
 )
 
-func TestPinnedSDKDoesNotModelExternalTailnets(t *testing.T) {
-	t.Parallel()
-
-	if field, found := jsonFieldNamed(reflect.TypeFor[tailscale.ACL](), "externalTailnets"); found {
-		t.Fatalf("pinned tailscale v2 ACL field %s now carries externalTailnets; "+
-			"migrate off alpha.ExternalTailnets and make a conscious compatibility decision", field.Name)
-	}
-}
-
 // TestMigrationTripwireDetectsSyntheticSDKSupport is the regression guard for
-// the tripwire itself, and each case is a shape the SDK could plausibly ship.
+// a tripwire's detector, and each case is a shape the SDK could plausibly
+// ship. The externalTailnets tripwire this detector first served fired at
+// tailscale v2.11.0 and was retired with the migration it prompted; the
+// detector stays because the next hand-modeled feature's tripwire calls it.
 //
 // The tripwire matches on the JSON field name alone. Gating it on structural
 // equality with this package's model would invert its purpose: the closer the
@@ -123,8 +115,8 @@ type syntheticExternalTailnetConfig struct {
 // jsonFieldNamed reports the first exported field of aclType whose JSON name
 // matches jsonName, whatever type that field carries. It is deliberately
 // generic: AGENTS.md expects every feature hand-modeled in this package to carry
-// its own migration tripwire, and this is the first, so the next one calls this
-// rather than copying it with one string changed.
+// its own migration tripwire, so the next one's test calls this rather than
+// copying it with one string changed.
 //
 // It uses [reflect.VisibleFields] rather than ranging aclType.Fields() so a
 // field the SDK promotes through an embedded policy struct is still seen; a

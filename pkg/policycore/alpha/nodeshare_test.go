@@ -1,71 +1,12 @@
 package alpha_test
 
 import (
-	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rshade/tailscale-utils/policycore/alpha"
 )
-
-func TestExternalTailnetsUnmarshalVerbatimPolicyShape(t *testing.T) {
-	t.Parallel()
-
-	const document = `{"externalTailnets":{"partner":{"externalID":"tailnet-123","allowIncomingConnections":false,"allowExternalReferencesTo":["group:engineering","tag:batch"]}}}`
-	var decoded struct {
-		ExternalTailnets alpha.ExternalTailnets `json:"externalTailnets"`
-	}
-	if err := json.Unmarshal([]byte(document), &decoded); err != nil {
-		t.Fatalf("json.Unmarshal() = %v, want nil", err)
-	}
-
-	want := alpha.ExternalTailnets{
-		"partner": {
-			ExternalID:                "tailnet-123",
-			AllowIncomingConnections:  false,
-			AllowExternalReferencesTo: []string{"group:engineering", "tag:batch"},
-		},
-	}
-	if !reflect.DeepEqual(decoded.ExternalTailnets, want) {
-		t.Errorf("ExternalTailnets = %#v, want %#v", decoded.ExternalTailnets, want)
-	}
-}
-
-func TestExternalTailnetConfigJSONRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	const document = `{"externalID":"tailnet-123","allowIncomingConnections":false,"allowExternalReferencesTo":["group:engineering","tag:batch"]}`
-	var decoded alpha.ExternalTailnetConfig
-	if err := json.Unmarshal([]byte(document), &decoded); err != nil {
-		t.Fatalf("json.Unmarshal() = %v, want nil", err)
-	}
-
-	encoded, err := json.Marshal(decoded)
-	if err != nil {
-		t.Fatalf("json.Marshal() = %v, want nil", err)
-	}
-	if string(encoded) != document {
-		t.Errorf("round-trip JSON = %s, want %s", encoded, document)
-	}
-}
-
-func TestExternalTailnetConfigAllowsOmittedReferenceList(t *testing.T) {
-	t.Parallel()
-
-	const document = `{"externalID":"tailnet-456","allowIncomingConnections":true}`
-	var config alpha.ExternalTailnetConfig
-	if err := json.Unmarshal([]byte(document), &config); err != nil {
-		t.Fatalf("json.Unmarshal() = %v, want nil", err)
-	}
-	if config.ExternalID != "tailnet-456" || !config.AllowIncomingConnections {
-		t.Errorf("ExternalTailnetConfig = %#v, want ID tailnet-456 with incoming connections allowed", config)
-	}
-	if config.AllowExternalReferencesTo != nil {
-		t.Errorf("AllowExternalReferencesTo = %#v, want nil for an omitted list", config.AllowExternalReferencesTo)
-	}
-}
 
 func TestParseExternalSelector(t *testing.T) {
 	t.Parallel()

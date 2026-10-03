@@ -43,17 +43,15 @@ func TestIsCrossTailnetSelectorAgreesWithTheParser(t *testing.T) {
 func TestKnownExternalTailnetAlias(t *testing.T) {
 	t.Parallel()
 
-	declarations := alpha.ExternalTailnets{
+	declarations := map[string]tailscale.ExternalTailnet{
 		"partner": {ExternalID: "tailnet-456", AllowIncomingConnections: true},
 	}
 	read := policycore.Matcher{Policy: &policycore.Policy{
-		ACL:                  &tailscale.ACL{},
-		ExternalTailnets:     declarations,
+		ACL:                  &tailscale.ACL{ExternalTailnets: declarations},
 		HaveExternalTailnets: true,
 	}}
 	unread := policycore.Matcher{Policy: &policycore.Policy{
-		ACL:              &tailscale.ACL{},
-		ExternalTailnets: declarations,
+		ACL: &tailscale.ACL{ExternalTailnets: declarations},
 	}}
 
 	if !read.KnownExternalTailnetAlias("partner") {
@@ -75,12 +73,11 @@ func TestKnownExternalTailnetAlias(t *testing.T) {
 func TestMatchesTriCrossTailnetDecisionTable(t *testing.T) {
 	t.Parallel()
 
-	declarations := alpha.ExternalTailnets{
+	declarations := map[string]tailscale.ExternalTailnet{
 		"partner": {ExternalID: "tailnet-456", AllowIncomingConnections: true},
 	}
 	read := policycore.Matcher{Policy: &policycore.Policy{
-		ACL:                  &tailscale.ACL{},
-		ExternalTailnets:     declarations,
+		ACL:                  &tailscale.ACL{ExternalTailnets: declarations},
 		HaveExternalTailnets: true,
 	}}
 	unread := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
@@ -142,9 +139,10 @@ func TestMatchesDoesNotMatchACrossTailnetSelector(t *testing.T) {
 	t.Parallel()
 
 	matcher := policycore.Matcher{Policy: &policycore.Policy{
-		ACL: &tailscale.ACL{},
-		ExternalTailnets: alpha.ExternalTailnets{
-			"partner": {ExternalID: "tailnet-456"},
+		ACL: &tailscale.ACL{
+			ExternalTailnets: map[string]tailscale.ExternalTailnet{
+				"partner": {ExternalID: "tailnet-456"},
+			},
 		},
 		HaveExternalTailnets: true,
 	}}
@@ -172,10 +170,14 @@ func TestAGroupsKeySpelledAsACrossTailnetSelectorStillMatchesLocally(t *testing.
 	t.Parallel()
 
 	matcher := policycore.Matcher{Policy: &policycore.Policy{
-		ACL: &tailscale.ACL{Groups: map[string][]string{
-			"group://partner/eng": {"ada@example.com"},
-		}},
-		ExternalTailnets:     alpha.ExternalTailnets{"partner": {ExternalID: "tailnet-456"}},
+		ACL: &tailscale.ACL{
+			Groups: map[string][]string{
+				"group://partner/eng": {"ada@example.com"},
+			},
+			ExternalTailnets: map[string]tailscale.ExternalTailnet{
+				"partner": {ExternalID: "tailnet-456"},
+			},
+		},
 		HaveExternalTailnets: true,
 	}}
 
@@ -193,10 +195,9 @@ func TestAGroupsKeySpelledAsACrossTailnetSelectorStillMatchesLocally(t *testing.
 func TestRecognizedCrossTailnetSelectors(t *testing.T) {
 	t.Parallel()
 
-	declarations := alpha.ExternalTailnets{"partner": {ExternalID: "tailnet-456"}}
+	declarations := map[string]tailscale.ExternalTailnet{"partner": {ExternalID: "tailnet-456"}}
 	read := policycore.Matcher{Policy: &policycore.Policy{
-		ACL:                  &tailscale.ACL{},
-		ExternalTailnets:     declarations,
+		ACL:                  &tailscale.ACL{ExternalTailnets: declarations},
 		HaveExternalTailnets: true,
 	}}
 	unread := policycore.Matcher{Policy: &policycore.Policy{ACL: &tailscale.ACL{}}}
@@ -250,10 +251,12 @@ func TestMatchesTriCrossTailnetInsideGroups(t *testing.T) {
 			// member list must not settle the cross-tailnet reading.
 			"group://partner/eng": {"ada@example.com"},
 		},
+		ExternalTailnets: map[string]tailscale.ExternalTailnet{
+			"partner": {ExternalID: "tailnet-456"},
+		},
 	}
 	matcher := policycore.Matcher{Policy: &policycore.Policy{
 		ACL:                  policy,
-		ExternalTailnets:     alpha.ExternalTailnets{"partner": {ExternalID: "tailnet-456"}},
 		HaveExternalTailnets: true,
 	}}
 
@@ -295,8 +298,11 @@ func TestAnyMatchesTriNamesACrossTailnetSelectorAsTheReason(t *testing.T) {
 	t.Parallel()
 
 	matcher := policycore.Matcher{Policy: &policycore.Policy{
-		ACL:                  &tailscale.ACL{},
-		ExternalTailnets:     alpha.ExternalTailnets{"partner": {ExternalID: "tailnet-456"}},
+		ACL: &tailscale.ACL{
+			ExternalTailnets: map[string]tailscale.ExternalTailnet{
+				"partner": {ExternalID: "tailnet-456"},
+			},
+		},
 		HaveExternalTailnets: true,
 	}}
 

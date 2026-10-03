@@ -58,15 +58,16 @@ so an authoring typo cannot silently become a non-match.
 - **THEN** it returns an error stating the name must omit the `group:`
   prefix
 
-### Requirement: The migration tripwire fails once the pinned SDK models externalTailnets
+### Requirement: A migration tripwire detects an SDK field under any Go shape
 
-A dedicated test SHALL fail as soon as the pinned `tailscale.v2.ACL` type
-carries any exported field whose JSON name is `externalTailnets` — under any
-Go shape (map value, pointer, extra fields, embedding, an untagged field, or
-an opaque `json.RawMessage`) and matched case-insensitively, the same way
-`encoding/json` itself resolves field names — forcing a conscious decision to
-migrate off `alpha.ExternalTailnets` rather than letting the hand-modeled
-type silently diverge from a now-real SDK type.
+A hand-modeled feature's migration tripwire SHALL detect an exported SDK field
+by JSON name under any Go shape (map value, pointer, extra fields, embedding,
+an untagged field, or an opaque `json.RawMessage`) and matched
+case-insensitively — the same way `encoding/json` itself resolves field
+names — so a near-miss SDK shape cannot leave the tripwire silent. The
+externalTailnets tripwire fired at tailscale v2.11.0 and was retired with the
+migration it prompted; the shape-agnostic detector remains for the next
+hand-modeled feature.
 
 #### Scenario: A synthetic SDK field is detected regardless of its shape
 

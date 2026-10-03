@@ -119,8 +119,7 @@ them is missing rather than merely unparsed.
 
 ```go
 matcher := policycore.Matcher{Policy: &policycore.Policy{
-    ACL:                  acl,
-    ExternalTailnets:     declarations,
+    ACL:                  acl, // acl.ExternalTailnets holds the declarations
     HaveExternalTailnets: true,
 }}
 ```
@@ -165,9 +164,12 @@ feature that is alpha or unreleased in the pinned
 alpha feature early instead of waiting for the SDK to catch up. A feature's
 hand-modeled types live with the tool that needs them, or in `policycore/alpha`
 when more than one tool needs the same policy representation. Declarative node
-sharing follows the shared case: `ExternalTailnets` models the policy section,
-`ParseExternalSelector` parses its cross-tailnet group and tag references, and
-`LooksLikeExternalSelector` is the recognition view of the same grammar.
+sharing follows the shared case: the SDK models the policy section itself
+(`tailscale.ACL.ExternalTailnets`, since tailscale.com/client/tailscale/v2
+v2.11.0 — the hand-modeled types here retired when its migration tripwire
+fired), while `ParseExternalSelector` parses its cross-tailnet group and tag
+references and `LooksLikeExternalSelector` is the recognition view of the same
+grammar.
 `Matcher` resolves those references only as far as this tailnet's policy allows
 — see [Cross-tailnet selectors](#cross-tailnet-selectors) — never by confirming
 membership in the other tailnet.

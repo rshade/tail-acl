@@ -2,29 +2,22 @@ package policycore
 
 import (
 	tailscale "tailscale.com/client/tailscale/v2"
-
-	"github.com/rshade/tailscale-utils/policycore/alpha"
 )
 
 // Policy is a tailnet policy document: the pinned SDK's ACL together with the
-// policy fields that SDK does not model. The ACL is embedded, so Groups,
-// Hosts, and IPSets stay promoted and the matching walk reads the document
+// read flags no SDK can carry. The ACL is embedded, so Groups, Hosts, IPSets,
+// and ExternalTailnets stay promoted and the matching walk reads the document
 // exactly as it did when Matcher held a bare *tailscale.ACL.
 //
 // It exists so a hand-modeled policy field has one home rather than widening
-// Matcher each time this repository models another. ExternalTailnets is the
-// first: declarative node sharing is alpha and tailscale.v2.ACL carries no
-// externalTailnets field, a gap alpha's migration tripwire test watches. Once
-// the pinned SDK grows one, the field below shadows the promoted one and that
-// test fails — the deliberate migration prompt it exists to be.
+// Matcher each time this repository models another. ExternalTailnets was the
+// first: declarative node sharing is alpha, and tailscale.v2.ACL carried no
+// externalTailnets field until v2.11.0. The SDK models it now, so the
+// hand-modeled field is gone and the promoted one serves; what stays here is
+// the read flag, which records a fact about the caller rather than the
+// document.
 type Policy struct {
 	*tailscale.ACL
-
-	// ExternalTailnets holds the node-sharing relationships this policy
-	// declares, keyed by the local alias each is declared under. An alias is
-	// a local name, so an alias absent from a map that was actually read is
-	// named by nothing in this policy.
-	ExternalTailnets alpha.ExternalTailnets
 
 	// HaveExternalTailnets reports that ExternalTailnets was read from the
 	// policy document. It draws the distinction HaveRoles draws for the user

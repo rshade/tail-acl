@@ -4,8 +4,6 @@ import (
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
-
-	"github.com/rshade/tailscale-utils/policycore/alpha"
 )
 
 // Matcher resolves policy selectors against a query identity. Policy is the
@@ -143,14 +141,15 @@ func (m Matcher) acl() *tailscale.ACL {
 }
 
 // externalTailnets returns the declared node-sharing relationships and whether
-// they were actually read. Both come from the policy container, so a matcher
-// holding no policy reports none read — which is the truthful answer, not a
-// convenient default.
-func (m Matcher) externalTailnets() (alpha.ExternalTailnets, bool) {
-	if m.Policy == nil {
+// they were actually read. Both come through the policy container, so a
+// matcher holding no policy — or a policy wrapping no ACL — reports none
+// read, which is the truthful answer, not a convenient default.
+func (m Matcher) externalTailnets() (map[string]tailscale.ExternalTailnet, bool) {
+	acl := m.acl()
+	if acl == nil {
 		return nil, false
 	}
-	return m.Policy.ExternalTailnets, m.Policy.HaveExternalTailnets
+	return acl.ExternalTailnets, m.Policy.HaveExternalTailnets
 }
 
 func (m Matcher) matchesSeen(selector, query, source string, seenGroups map[string]bool) bool {

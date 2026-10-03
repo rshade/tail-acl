@@ -4,7 +4,7 @@ This page describes the exported selector-matching API and ipset member
 grammar in `policycore`, the shared `policycore/addrspace` address primitives,
 the `policycore/sanitize` output contract, and the `policycore/hujsonedit`
 comment-preserving document editor, plus the `policycore/alpha` inventory and
-shared policy models for features modeled ahead of the pinned SDK.
+selector grammar for features modeled ahead of the pinned SDK.
 
 ## Alpha feature inventory
 
@@ -27,12 +27,14 @@ a source package pointer must resolve when one exists.
 
 ### Declarative node sharing
 
-`alpha.ExternalTailnets` maps a policy-local alias to an
-`ExternalTailnetConfig`. The config records the other tailnet's stable ID,
-whether incoming connections are allowed, and the local groups or tags that
-tailnet may reference. The alpha docs do not establish an omission default for
-`allowIncomingConnections`; the model preserves an explicit `false` and does
-not assign a semantic default.
+The pinned SDK models the node-sharing relationships: `tailscale.ACL` carries
+`ExternalTailnets map[string]tailscale.ExternalTailnet` since
+tailscale.com/client/tailscale/v2 v2.11.0, keyed by the policy-local alias
+each relationship is declared under. This repository hand-modeled those types
+in `alpha` until the SDK caught up; the migration tripwire fired at v2.11.0
+and the model moved onto the SDK type. What `policycore` adds is the read flag
+`Policy.HaveExternalTailnets`, which distinguishes "the policy declares no
+external tailnets" from "the caller never parsed the field".
 
 `alpha.ParseExternalSelector` parses `group://<alias>/<name>` and
 `tag://<alias>/<name>` into an `ExternalSelector{Kind, Alias, Name}`. Ordinary

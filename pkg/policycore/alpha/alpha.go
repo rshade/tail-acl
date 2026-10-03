@@ -12,8 +12,12 @@
 // pinned module; AlphaHint is editorial evidence against a surface Tailscale
 // itself calls unstable — categorically weaker.
 //
-// Shared hand-modeled policy types can also live here when more than one tool
-// needs an identical representation; declarative node sharing is the first.
+// Shared hand-modeled policy syntax can also live here when more than one
+// tool needs an identical representation; the declarative node-sharing
+// selector grammar is the first. Its relationship data was hand-modeled here
+// too, until tailscale.com/client/tailscale/v2 v2.11.0 grew a real
+// externalTailnets field and the migration tripwire moved the model onto the
+// SDK's type.
 // Each feature is expected to carry its own migration tripwire — a test that
 // fails once the pinned SDK adds real support for the feature, forcing a
 // conscious decision to migrate off the hand-modeled types rather than letting

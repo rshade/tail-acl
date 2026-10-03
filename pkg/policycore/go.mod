@@ -8,7 +8,7 @@ require (
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	tailscale.com v1.102.4
-	tailscale.com/client/tailscale/v2 v2.10.1
+	tailscale.com/client/tailscale/v2 v2.11.0
 )
 
 require (
