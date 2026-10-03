@@ -340,6 +340,40 @@ alias written directly as a member (`"gw"` rather than `"host:gw"`) is not a
 form the control plane accepts, so it makes the set unmaterializable rather
 than resolving by accident.
 
+## Posture expressions
+
+The `posture` subpackage parses and evaluates Tailscale device-posture rule
+expressions. Its grammar covers the `node:`, `custom:`, and `ip:` attribute
+namespaces; the comparison operators `==`, `!=`, `<`, `<=`, `>`, `>=`;
+case-insensitive `IN` / `NOT IN` membership over bracketed literal lists;
+case-insensitive `IS SET` / `NOT SET`; the bare truthy form; and quoted
+string, number, and boolean literals.
+
+`Evaluate(name, rules, facts, now)` ANDs one posture's rules against a
+device's `Facts` with Kleene three-valued logic and returns a `Verdict` whose
+`State` is `Satisfied`, `Unsatisfied`, or `Unknown`. An expression the package
+cannot parse, or an attribute the capture does not carry, is `Unknown` with a
+reason — never folded into a pass or a failure. `ReferencedAttributes(rules)`
+returns the sorted, distinct attribute names a rule list reads.
+
+`Validate(expression)` statically checks one expression without any device
+facts and returns one `Diagnostic` per finding, for lint- and authoring-time
+use. `DiagnosticKind` ranks the findings: `DiagnosticUnparseable` (outside the
+grammar, including the bare truthy form on a known non-boolean attribute) and
+`DiagnosticUnknownValue` (an `ip:country` value outside the recorded
+vocabulary) are error-level (`ErrorLevel` reports true);
+`DiagnosticUnknownAttribute` (a `node:` or `ip:` attribute the known-attribute
+table does not list) is warning-level, because the table is an editorial
+reading of the server that goes stale. `custom:` attributes are user-defined
+and are never checked. `Diagnostic.Reason` mirrors the control plane's own
+message wording where that wording is known from live probes.
+
+The editorial vocabularies are fixtures under `posture/testdata/` with Tier-2
+provenance guard tests: the `ip:country` country list is the control plane's
+own accepted list, captured live on 2026-10-02, and an opt-in
+`//go:build live_verify` test re-derives it from the server and fails on
+drift.
+
 ## Resolution boundaries
 
 Nested groups, `Hosts`, and `IPSets` are expanded with cycle guards. Undefined

@@ -3,8 +3,9 @@
 // "does this selector name this thing?" identically; two tools disagreeing
 // about one policy is worse than the duplication this replaces.
 //
-// Scope is deliberately narrow: entity resolution only. Port, protocol, via,
-// and posture evaluation stay in tail-acl.
+// Scope is deliberately narrow: entity resolution only. Port, protocol, and
+// via evaluation stay in tail-acl; posture expression handling lives in the
+// posture subpackage.
 package policycore
 
 import (

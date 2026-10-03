@@ -26,6 +26,15 @@ The `hujsonedit` subpackage applies schema-agnostic, comment-preserving RFC
 document's fields; `tail-acl` and `tail-ipam` both build their typed edits on
 it.
 
+The `posture` subpackage parses, validates, and evaluates Tailscale
+device-posture rule expressions. It is stdlib-only and three-valued: an
+expression or attribute it cannot read is reported, never folded into a pass
+or a failure. Its grammar and vocabularies (the `ip:country` country list, the
+known-attribute table) are editorial readings of the control plane's behavior,
+each pinned by a Tier-2 provenance guard test against a fixture captured from
+the live server. `tailnet-audit` evaluates devices with it; `tail-acl`
+validates expressions with it.
+
 The `alpha` subpackage is the convention for hand-modeling a Tailscale
 feature that is alpha or unreleased in the pinned SDK — see
 [Alpha feature modeling](#alpha-feature-modeling) below. Shared alpha policy
@@ -47,7 +56,7 @@ names:
 Out of scope — kept in `tail-acl`:
 
 - Port and protocol evaluation
-- `via` routing behavior and posture evaluation
+- `via` routing behavior
 - Policy parsing, merging, and upload
 
 The one shared policy-shape predicate is `ContainsLiteralWildcard`. Both
