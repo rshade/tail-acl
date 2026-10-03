@@ -3,7 +3,9 @@ package aclpolicy
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -11,6 +13,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tailscale-utils/policycore/posture"
 )
 
 // LintSeverity ranks a lint finding. advice < info < warn < error.
@@ -46,6 +49,7 @@ const (
 	LintUnusedHost            = "unused-host"
 	LintUnusedIPSet           = "unused-ipset"
 	LintUnusedPosture         = "unused-posture"
+	LintPostureInvalid        = "posture-invalid"
 	LintServiceInSource       = "svc-in-source"
 	LintServiceInSSH          = "svc-in-ssh"
 	LintServiceUnknown        = "svc-unknown"
@@ -262,6 +266,11 @@ func LintCatalog() []LintCheck {
 		{LintUnusedHost, LintInfo, "a host alias is defined but referenced by no rule"},
 		{LintUnusedIPSet, LintInfo, "an ipset is defined but referenced by no rule"},
 		{LintUnusedPosture, LintInfo, "a posture is defined but no srcPosture or defaultSrcPosture references it"},
+		{
+			LintPostureInvalid,
+			LintError,
+			"a posture expression is unparseable or names an out-of-vocabulary value (unknown attributes warn)",
+		},
 		{
 			LintServiceInSource,
 			LintWarn,
@@ -503,6 +512,7 @@ func evaluateLint(
 	findings = append(findings, duplicates...)
 	findings = append(findings, lintIPSetOperations(policy)...)
 	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
+	findings = append(findings, lintPostureExpressions(policy)...)
 
 	report := LintReport{}
 	report.Summary.SCIMGroupRefs = len(linter.scimRefs)
@@ -1360,6 +1370,52 @@ func lintUnusedDefinitions(
 	return findings
 }
 
+// lintPostureExpressions runs every expression in every postures entry through
+// policycore/posture's validator. The mapping follows the diagnostic's level:
+// unparseable expressions and out-of-vocabulary ip:country values are errors —
+// the control plane rejects the policy over both — while an unknown node: or
+// ip: attribute only warns, because the known-attribute table is editorial and
+// goes stale as the server grows attributes.
+func lintPostureExpressions(policy *tailscale.ACL) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for _, name := range slices.Sorted(maps.Keys(policy.Postures)) {
+		for index, expression := range policy.Postures[name] {
+			for _, diagnostic := range posture.Validate(expression) {
+				findings = append(findings, postureExpressionFinding(name, index, expression, diagnostic))
+			}
+		}
+	}
+	return findings
+}
+
+func postureExpressionFinding(
+	name string, index int, expression string, diagnostic posture.Diagnostic,
+) LintFinding {
+	locator := fmt.Sprintf("postures[%s][%d]", name, index)
+	severity := LintError
+	remediation := "correct the expression; the control plane rejects a policy carrying it"
+	if !diagnostic.Kind.ErrorLevel() {
+		severity = LintWarn
+		remediation = "confirm the attribute name; the known-attribute table is editorial " +
+			"and may be stale, so this is a warning rather than an error"
+	}
+	return LintFinding{
+		ID:          LintPostureInvalid,
+		Severity:    severity,
+		Rule:        locator,
+		Value:       expression,
+		Evidence:    fmt.Sprintf("posture %s expression %q: %s", name, expression, diagnostic.Reason),
+		Remediation: remediation,
+		Trace: []string{
+			fmt.Sprintf("%s defines expression %q", locator, expression),
+			diagnostic.Reason,
+		},
+	}
+}
+
+// destination positions are normalized to their host (port stripped); SSH test
+// destinations remain node selectors. A definition is unused when its name is
+// absent from this set.
 // collectReferences gathers every selector the policy uses anywhere. Network
 // destination positions are normalized to their host (port stripped); SSH test
 // destinations remain node selectors. A definition is unused when its name is

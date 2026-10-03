@@ -27,7 +27,7 @@ const commentAuthoringPolicy = `{
 		"legacy": "100.64.0.9",
 	},
 	"postures": {
-		"posture:keep": ["keep == true"],
+		"posture:keep": ["custom:keep == true"],
 	},
 	"grants": [
 		{"src": ["group:keep"], "dst": ["tag:db"], "ip": ["tcp:5432"]},
@@ -181,7 +181,7 @@ func TestCommentOnExistingValueReportsChange(t *testing.T) {
 		{commandHostSet, []string{"host", "set", "legacy", "100.64.0.9"}, []string{"hosts", "legacy"}},
 		{
 			commandPostureSet,
-			[]string{"posture", "set", "posture:keep", "keep == true"},
+			[]string{"posture", "set", "posture:keep", "custom:keep == true"},
 			[]string{"postures", "posture:keep"},
 		},
 	}
@@ -340,12 +340,16 @@ func TestCommentRejectedByUnsupportedCommands(t *testing.T) {
 	}
 }
 
-// Posture expressions are opaque CLI arguments and may legitimately begin
-// with "-" (a negative operand) or look like a flag altogether. Since
-// posture set now parses flags with pflag instead of a hand-rolled
-// interspersed scanner, such an expression must follow a "--" terminator
-// (POSIX Utility Syntax Guideline 10) to reach the policy literally instead
-// of being parsed as an option; --comment must precede the terminator.
+// Posture expressions are opaque CLI arguments. Since posture set parses
+// flags with pflag instead of a hand-rolled interspersed scanner, an argument
+// beginning with "-" must follow a "--" terminator (POSIX Utility Syntax
+// Guideline 10) to be treated as an expression at all; --comment must precede
+// the terminator. Every valid expression starts with a node:/custom:/ip:
+// namespace, so a dash-prefixed argument is never a valid expression — but
+// the terminator still decides *which* rejection it gets: with it, the
+// argument is validated as an expression and rejected as unparseable; without
+// it, pflag rejects an unrecognized flag (see
+// TestPostureSetRejectsUnrecognizedFlagWithoutTerminator).
 func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 	t.Parallel()
 	t.Run("negative operand", func(t *testing.T) {
@@ -353,18 +357,17 @@ func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		if _, err := runTailACL(t, path, "posture", "set", "posture:lab",
-			"--comment", "allows negative scores", "--", "-1 < custom:score"); err != nil {
-			t.Fatal(err)
+		_, err := runTailACL(t, path, "posture", "set", "posture:lab",
+			"--comment", "allows negative scores", "--", "-1 < custom:score")
+		if code := exitCode(err); code != exitUsage {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 		}
-		policy, err := aclpolicy.Load(path)
-		if err != nil {
-			t.Fatal(err)
+		// The terminator did its job when the rejection is about the
+		// expression, not about an unrecognized flag.
+		if err == nil || !strings.Contains(err.Error(), "expression") {
+			t.Errorf("error = %v, want an expression validation error", err)
 		}
-		if want := []string{"-1 < custom:score"}; !slices.Equal(policy.Postures["posture:lab"], want) {
-			t.Errorf("postures[posture:lab] = %q, want %q", policy.Postures["posture:lab"], want)
-		}
-		assertCommentsOn(t, path, []string{"allows negative scores"}, "postures", "posture:lab")
+		assertFixtureUnchanged(t, path)
 	})
 
 	t.Run("flag-shaped expression", func(t *testing.T) {
@@ -372,16 +375,14 @@ func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		if _, err := runTailACL(t, path, "posture", "set", "posture:lab", "--", "--custom-check"); err != nil {
-			t.Fatal(err)
+		_, err := runTailACL(t, path, "posture", "set", "posture:lab", "--", "--custom-check")
+		if code := exitCode(err); code != exitUsage {
+			t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 		}
-		policy, err := aclpolicy.Load(path)
-		if err != nil {
-			t.Fatal(err)
+		if err == nil || !strings.Contains(err.Error(), "expression") {
+			t.Errorf("error = %v, want an expression validation error", err)
 		}
-		if want := []string{"--custom-check"}; !slices.Equal(policy.Postures["posture:lab"], want) {
-			t.Errorf("postures[posture:lab] = %q, want %q", policy.Postures["posture:lab"], want)
-		}
+		assertFixtureUnchanged(t, path)
 	})
 
 	t.Run("comment is not an expression", func(t *testing.T) {
@@ -467,7 +468,7 @@ func TestHostSetAndPostureSetAreIdempotent(t *testing.T) {
 	t.Parallel()
 	testCases := map[string][]string{
 		commandHostSet:    {"host", "set", "legacy", "100.64.0.9"},
-		commandPostureSet: {"posture", "set", "posture:keep", "keep == true"},
+		commandPostureSet: {"posture", "set", "posture:keep", "custom:keep == true"},
 	}
 	for name, command := range testCases {
 		t.Run(name, func(t *testing.T) {

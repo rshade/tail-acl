@@ -39,6 +39,7 @@ import (
 
 	"github.com/rshade/tailscale-utils/policycore"
 	"github.com/rshade/tailscale-utils/policycore/cliflags"
+	"github.com/rshade/tailscale-utils/policycore/posture"
 	"github.com/rshade/tailscale-utils/policycore/sanitize"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
 	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
@@ -1553,10 +1554,14 @@ func runHostSet(path string, args []string, comment string, commentSet, overwrit
 }
 
 // runPostureSet implements "posture set NAME EXPR [EXPR ...]". See
-// runTagOwnerAdd for why args arrives already parsed. An EXPR beginning with
-// "-" (e.g. "-1 < custom:score") needs a "--" terminator before it, and
-// --comment must precede the terminator.
-func runPostureSet(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
+// runTagOwnerAdd for why args arrives already parsed. An argument beginning
+// with "-" needs a "--" terminator before it to be treated as an EXPR at
+// all, and --comment must precede the terminator; every EXPR is then
+// validated before the file is touched, and an error-level diagnostic fails
+// the command with the file byte-identical.
+func runPostureSet(
+	path string, args []string, comment string, commentSet, overwriteComment bool, stderr io.Writer,
+) (*result, error) {
 	if len(args) < 2 { //nolint:mnd // NAME and at least one EXPR required
 		return nil, usagef("usage: tail-acl posture set NAME EXPR [EXPR ...]")
 	}
@@ -1569,6 +1574,9 @@ func runPostureSet(path string, args []string, comment string, commentSet, overw
 		return nil, usageError{err}
 	}
 	exprs := args[1:]
+	if err = validatePostureExpressions(canonical, exprs, stderr); err != nil {
+		return nil, err
+	}
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
@@ -1600,6 +1608,35 @@ func runPostureSet(path string, args []string, comment string, commentSet, overw
 	}
 	res.File = path
 	return res, nil
+}
+
+// validatePostureExpressions checks each expression a posture set is about to
+// write against policycore/posture's grammar and vocabularies, before the
+// file is touched. An expression the control plane could not parse fails the
+// command as a usageError, so the policy file stays byte-identical, the same
+// contract every other authoring error keeps. Every other diagnostic — an
+// unknown node: or ip: attribute, an out-of-vocabulary ip:country value —
+// prints to stderr and the edit proceeds: both vocabularies are editorial
+// snapshots that go stale, and an authoring command that refuses a value the
+// server accepts is worse than one that warns. lint's posture-invalid rule
+// stays strict about the same values, where rejecting is the point.
+func validatePostureExpressions(name string, exprs []string, stderr io.Writer) error {
+	var invalid []string
+	for _, expr := range exprs {
+		for _, diagnostic := range posture.Validate(expr) {
+			if diagnostic.Kind != posture.DiagnosticUnparseable {
+				fmt.Fprintf(stderr, "tail-acl: warning: posture %s expression %q: %s\n",
+					name, expr, diagnostic.Reason)
+				continue
+			}
+			invalid = append(invalid, fmt.Sprintf("expression %q: %s", expr, diagnostic.Reason))
+		}
+	}
+	if len(invalid) > 0 {
+		return usagef("posture %s has an expression the control plane would reject: %s",
+			name, strings.Join(invalid, "; "))
+	}
+	return nil
 }
 
 func runPostureRemove(path string, args []string) (*result, error) {

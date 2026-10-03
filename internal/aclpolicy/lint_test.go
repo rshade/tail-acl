@@ -977,6 +977,78 @@ func TestEvaluateLintUnusedPosture(t *testing.T) {
 	}
 }
 
+// TestEvaluateLintPostureInvalid pins the posture-invalid rule against the
+// three expressions from the Features/03 write-up, each reproduced against
+// the control plane on 2026-10-02: an out-of-vocabulary ip:country value and
+// an unparseable expression are errors (the server rejects the policy over
+// both), while an unknown node: attribute is a warn, because the
+// known-attribute table is editorial and goes stale.
+func TestEvaluateLintPostureInvalid(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"alice@example.com"}},
+		Postures: map[string][]string{
+			"posture:geo":     {"ip:country NOT IN ['AB', 'CD']"},
+			"posture:garbage": {"this is not an expression"},
+			"posture:bogus":   {"node:bogusattr == 'x'"},
+			"posture:clean":   {"node:os == 'linux'", "custom:madeUp == true", "ip:country IN ['US', 'XK']"},
+		},
+		Grants: []tailscale.Grant{
+			{
+				Source:      []string{"alice@example.com"},
+				Destination: []string{"tag:web"},
+				IP:          []string{"tcp:443"},
+				SrcPosture:  []string{"posture:geo", "posture:garbage", "posture:bogus", "posture:clean"},
+			},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := findingsByID(report, aclpolicy.LintPostureInvalid)
+	want := map[string]struct {
+		severity aclpolicy.LintSeverity
+		evidence []string
+	}{
+		"postures[posture:geo][0]": {
+			aclpolicy.LintError,
+			[]string{"posture:geo", "ip:country NOT IN ['AB', 'CD']", `unexpected value "AB"`},
+		},
+		"postures[posture:garbage][0]": {
+			aclpolicy.LintError,
+			[]string{"posture:garbage", "this is not an expression", "expected an operator", "valid operators are:"},
+		},
+		"postures[posture:bogus][0]": {
+			aclpolicy.LintWarn,
+			[]string{"posture:bogus", "node:bogusattr == 'x'", `attribute "node:bogusattr" does not exist`},
+		},
+	}
+	if len(findings) != len(want) {
+		t.Fatalf("posture-invalid findings = %#v, want one per write-up expression", findings)
+	}
+	for _, finding := range findings {
+		expected, ok := want[finding.Rule]
+		if !ok {
+			t.Errorf("unexpected finding at %s: %#v", finding.Rule, finding)
+			continue
+		}
+		if finding.Severity != expected.severity {
+			t.Errorf("finding at %s has Severity %q, want %q", finding.Rule, finding.Severity, expected.severity)
+		}
+		for _, fragment := range expected.evidence {
+			if !strings.Contains(finding.Evidence, fragment) {
+				t.Errorf("finding at %s has Evidence %q, want it to contain %q",
+					finding.Rule, finding.Evidence, fragment)
+			}
+		}
+		delete(want, finding.Rule)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing findings for %v", want)
+	}
+}
+
 func countByID(report aclpolicy.LintReport, id string) int {
 	return len(findingsByID(report, id))
 }

@@ -846,7 +846,7 @@ func TestPostureSetReplacesExpressionList(t *testing.T) {
 		context.Background(),
 		[]string{
 			"--file", path, "posture", "set", "posture:labCompliant",
-			"new == true", "also == true",
+			"custom:new == true", "custom:also == true",
 		},
 		func(string) string { return "" },
 		http.DefaultClient,
@@ -862,10 +862,138 @@ func TestPostureSetReplacesExpressionList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"new == true", "also == true"}
+	want := []string{"custom:new == true", "custom:also == true"}
 	got := policy.Postures["posture:labCompliant"]
 	if !slices.Equal(got, want) {
 		t.Errorf("Postures[posture:labCompliant] = %#v, want %#v", got, want)
+	}
+}
+
+// TestPostureSetRejectsInvalidExpressions pins the authoring-time validation
+// added with posture-invalid: an expression the control plane could not
+// parse — garbage, or the bare form on a known non-boolean attribute (the
+// exact case the server rejected on 2026-10-02) — fails with exit 2 and
+// leaves the policy byte-identical, the contract every other authoring
+// error keeps. Stale-vocabulary diagnostics only warn; see
+// TestPostureSetWarnsOnStaleVocabulary.
+func TestPostureSetRejectsInvalidExpressions(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		expr     string
+		contains []string
+	}{
+		{
+			name:     "unparseable",
+			expr:     "this is not an expression",
+			contains: []string{"expression", "expected an operator"},
+		},
+		{
+			name:     "bare known non-boolean attribute",
+			expr:     "node:os",
+			contains: []string{`built-in attribute "node:os" can only be compared to string, got bool: true`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertPostureSetRejectsExpression(t, tc.expr, tc.contains)
+		})
+	}
+}
+
+func assertPostureSetRejectsExpression(t *testing.T, expr string, contains []string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl.json")
+	writeTestPolicy(t, path, `{"postures": {"posture:keep": ["custom:keep == true"]}}`)
+	before, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+
+	err := run(
+		context.Background(),
+		[]string{"--file", path, "posture", "set", "posture:lab", expr},
+		func(string) string { return "" },
+		http.DefaultClient,
+		"",
+		io.Discard,
+		io.Discard,
+	)
+	if code := exitCode(err); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
+	}
+	for _, fragment := range contains {
+		if err == nil || !strings.Contains(err.Error(), fragment) {
+			t.Errorf("error = %v, want it to contain %q", err, fragment)
+		}
+	}
+
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("policy changed on a rejected edit:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestPostureSetWarnsOnStaleVocabulary pins the warning path: an unknown
+// node: or ip: attribute, or an ip:country value outside the recorded
+// vocabulary, prints a warning to stderr and the edit proceeds. Both
+// vocabularies are editorial snapshots that go stale — an authoring command
+// that refuses a name or value the server accepts is worse than one that
+// warns. lint's posture-invalid rule stays strict about the same values.
+func TestPostureSetWarnsOnStaleVocabulary(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		expr     string
+		contains string
+	}{
+		{
+			name:     "unknown attribute",
+			expr:     "node:bogusattr == 'x'",
+			contains: `attribute "node:bogusattr" does not exist`,
+		},
+		{
+			name:     "out-of-vocabulary country",
+			expr:     "ip:country NOT IN ['AB', 'CD']",
+			contains: `unexpected value "AB"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "acl.json")
+			writeTestPolicy(t, path, `{}`)
+			var stderr strings.Builder
+
+			err := run(
+				context.Background(),
+				[]string{"--file", path, "posture", "set", "posture:bogus", tc.expr},
+				func(string) string { return "" },
+				http.DefaultClient,
+				"",
+				io.Discard,
+				&stderr,
+			)
+			if err != nil {
+				t.Fatalf("run: %v (stderr %q)", err, stderr.String())
+			}
+			if warning := stderr.String(); !strings.Contains(warning, "warning") ||
+				!strings.Contains(warning, tc.contains) {
+				t.Errorf("stderr = %q, want a warning containing %q", warning, tc.contains)
+			}
+
+			policy, err := aclpolicy.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := policy.Postures["posture:bogus"]; !slices.Equal(got, []string{tc.expr}) {
+				t.Errorf("Postures[posture:bogus] = %#v, want the warned-about expression written", got)
+			}
+		})
 	}
 }
 

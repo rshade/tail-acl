@@ -509,9 +509,8 @@ func newHostSetCommand(deps *commandDeps) *cobra.Command {
 	return cmd
 }
 
-// newPostureSetCommand: see newTagOwnerAddCommand for why an EXPR beginning
-// with "-" (e.g. "-1 < custom:score") needs a "--" terminator, and --comment
-// must precede it.
+// newPostureSetCommand: see newTagOwnerAddCommand for why an argument
+// beginning with "-" needs a "--" terminator, and --comment must precede it.
 func newPostureSetCommand(deps *commandDeps) *cobra.Command {
 	var comment string
 	var overwriteComment bool
@@ -521,6 +520,7 @@ func newPostureSetCommand(deps *commandDeps) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := runPostureSet(
 				deps.opts.file, args, comment, cmd.Flags().Changed(commentFlagName), overwriteComment,
+				deps.stderr,
 			)
 			*deps.result = out
 			return err

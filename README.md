@@ -64,8 +64,10 @@ tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
 tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
 tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
 
-# An expression beginning with a dash needs a `--` terminator, and `--comment`
-# must precede it:
+# An argument beginning with a dash needs a `--` terminator to be treated as an
+# expression at all, and `--comment` must precede it (every valid expression
+# starts with a node:/custom:/ip: namespace, so this one is then rejected as
+# unparseable rather than as an unrecognized flag):
 tail-acl --file acl.json posture set posture:lab --comment "note" -- "-1 < custom:score"
 
 # Author a comment on the entry the command creates:
@@ -608,6 +610,17 @@ meaning and silently inventing one would hide a typo. Authoring does not validat
 that a referenced posture is actually defined — that dangling-reference check is
 `tail-acl lint`'s job (the `undefined-reference` rule), not authoring's.
 
+`posture set` does validate each *expression* before writing, against the
+`policycore/posture` grammar and vocabularies. An expression the control plane
+could not parse is a usage error (exit 2) and the policy file is left
+byte-identical, as with every other authoring error. Anything else — an
+unknown `node:`/`ip:` attribute, or an `ip:country` value outside the recorded
+country list — only prints a warning to stderr and the edit proceeds: both
+vocabularies are editorial snapshots that can lag the server, so an authoring
+command warns rather than refuses a name or value the server might accept.
+`lint`'s `posture-invalid` rule stays strict about the same values, where
+rejecting is the point.
+
 `test` is a pure evaluator over the candidate file's network-level grants and
 legacy ACLs. Each top-level `tests` `accept` or `deny` destination becomes one
 stable assertion result with pass/fail/indeterminate status, evidence, and a
@@ -832,6 +845,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `ipset-mixed-operations` | error | an ipset carries a `remove` operation beside a member with no `add`/`remove` operation, which the control plane rejects |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule, approver, or ipset member |
 | `unused-posture` | info | a posture is defined but no `srcPosture` or `defaultSrcPosture` references it |
+| `posture-invalid` | error | a posture expression is unparseable or names an out-of-vocabulary `ip:country` value (an unknown `node:`/`ip:` attribute only warns, since the known-attribute table can lag the server) |
 | `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
 | `svc-in-ssh` | error | a `svc:` service selector is used as an SSH destination or recorder, where a node selector is required |
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |
