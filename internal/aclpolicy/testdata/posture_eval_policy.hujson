@@ -1,0 +1,89 @@
+// Posture evaluation reference policy (Features write-up 04).
+// Provenance: all seven tests below were confirmed PASSING on the control plane
+// (tailnet example.ts.net) via
+//   pulumi env run example-lab/tailscale -- bin/tail-acl --file <this file> validate
+// on 2026-10-02; the capture lives in this repo's session records
+// (/tmp/posture-probes/captures/f04-reference.txt). Every verdict the local
+// evaluator produces for this file must reproduce those server verdicts exactly.
+{
+    "groups": {
+        "group:aaa": ["alice@example.com"],
+    },
+    "hosts": {
+        "bbb":     "100.64.0.10",
+        "nyc-svc": "100.64.0.20",
+    },
+    "postures": {
+        "posture:steering-not-set": [
+            "custom:subnet_router NOT SET",
+            "ip:country NOT IN ['KP', 'IR']",
+        ],
+        "posture:steering-not-set-geo-unset": [
+            "custom:subnet_router NOT SET",
+            "ip:country NOT SET",
+        ],
+        "posture:nyc": [
+            "custom:subnet_router == 'nyc'",
+            "ip:country NOT IN ['KP', 'IR']",
+        ],
+        "posture:nyc-geo-unset": [
+            "custom:subnet_router == 'nyc'",
+            "ip:country NOT SET",
+        ],
+    },
+    "grants": [
+        {
+            "src":        ["group:aaa"],
+            "dst":        ["bbb"],
+            "ip":         ["*"],
+            "srcPosture": ["posture:steering-not-set", "posture:steering-not-set-geo-unset"],
+        },
+        {
+            "src":        ["group:aaa"],
+            "dst":        ["nyc-svc"],
+            "ip":         ["*"],
+            "srcPosture": ["posture:nyc", "posture:nyc-geo-unset"],
+        },
+    ],
+    "tests": [
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"node:os": "linux", "ip:country": "US"},
+            "accept":          ["bbb:443"],
+            "deny":            ["nyc-svc:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"node:os": "linux"},
+            "accept":          ["bbb:443"],
+            "deny":            ["nyc-svc:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"node:os": "linux", "ip:country": "KP"},
+            "deny":            ["bbb:443", "nyc-svc:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"custom:subnet_router": "nyc", "ip:country": "US"},
+            "accept":          ["nyc-svc:443"],
+            "deny":            ["bbb:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"custom:subnet_router": "nyc"},
+            "accept":          ["nyc-svc:443"],
+            "deny":            ["bbb:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"custom:subnet_router": "nyc", "ip:country": "IR"},
+            "deny":            ["nyc-svc:443", "bbb:443"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"custom:subnet_router": "ldn"},
+            "deny":            ["bbb:443", "nyc-svc:443"],
+        },
+    ],
+}

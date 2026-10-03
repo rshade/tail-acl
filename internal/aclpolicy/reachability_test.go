@@ -230,6 +230,217 @@ func TestUnevaluatableGateIsIndeterminate(t *testing.T) {
 	}
 }
 
+// postureGatePolicy builds a policy with one posture-gated grant and the
+// postures it references, so each case states only the attributes it asks
+// with.
+func postureGatePolicy() *tailscale.ACL {
+	return &tailscale.ACL{
+		Postures: map[string][]string{
+			"posture:steering": {"custom:subnet_router NOT SET", "ip:country NOT IN ['KP', 'IR']"},
+			"posture:geo-free": {"custom:subnet_router NOT SET", "ip:country NOT SET"},
+		},
+		Grants: []tailscale.Grant{{
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+			IP:          []string{"tcp:443"},
+			SrcPosture:  []string{"posture:steering", "posture:geo-free"},
+		}},
+	}
+}
+
+// TestPostureGateEvaluatesWithSuppliedAttrs pins the three outcomes of
+// posture-gate evaluation: a satisfied posture opens the gate (allow), every
+// posture failing closes it decidably (deny, with the trace naming the
+// deciding expression and attribute), and an unevaluable gate keeps the
+// indeterminate verdict with wording distinct from the legacy attr-less gate.
+func TestPostureGateEvaluatesWithSuppliedAttrs(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		attrs        map[string]any
+		complete     bool
+		wantAccess   aclpolicy.Access
+		evidenceHas  []string
+		traceHas     []string
+		traceMissing []string
+	}{
+		{
+			name:        "a satisfied posture opens the gate",
+			attrs:       map[string]any{"ip:country": "US"},
+			complete:    true,
+			wantAccess:  aclpolicy.AccessAllow,
+			evidenceHas: []string{"matched grant 0"},
+			traceHas: []string{
+				"custom:subnet_router is unset",
+				"ip:country US is not in ['KP', 'IR']",
+				"so posture:steering holds",
+			},
+		},
+		{
+			name:        "every posture failing closes the gate decidably",
+			attrs:       map[string]any{"ip:country": "KP"},
+			complete:    true,
+			wantAccess:  aclpolicy.AccessDeny,
+			evidenceHas: []string{"no network grant or ACL matched"},
+			traceHas: []string{
+				"posture gate did not match",
+				"ip:country KP is in ['KP', 'IR'], so posture:steering fails",
+				"ip:country is set, so posture:geo-free fails",
+			},
+		},
+		{
+			name:       "an unsupplied attribute without completeness is indeterminate",
+			attrs:      map[string]any{"ip:country": "KP"},
+			complete:   false,
+			wantAccess: aclpolicy.AccessIndeterminate,
+			evidenceHas: []string{
+				"posture could not be evaluated locally",
+				"custom:subnet_router was not supplied",
+			},
+			traceMissing: []string{"uses unsupported srcPosture"},
+		},
+		{
+			name:       "a partial set that fully decides the gate denies",
+			attrs:      map[string]any{"custom:subnet_router": "nyc", "ip:country": "US"},
+			complete:   false,
+			wantAccess: aclpolicy.AccessDeny,
+			traceHas: []string{
+				"posture gate did not match",
+				"custom:subnet_router is set, so posture:steering fails",
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := evaluate(t, postureGatePolicy(), "alice@example.com", "tag:web:443",
+				aclpolicy.ReachabilityOptions{
+					PostureAttrs:         testCase.attrs,
+					PostureAttrsComplete: testCase.complete,
+				})
+			assertPostureGateOutcome(t, got, testCase)
+		})
+	}
+}
+
+func assertPostureGateOutcome(
+	t *testing.T,
+	got aclpolicy.ReachabilityResult,
+	testCase struct {
+		name         string
+		attrs        map[string]any
+		complete     bool
+		wantAccess   aclpolicy.Access
+		evidenceHas  []string
+		traceHas     []string
+		traceMissing []string
+	},
+) {
+	t.Helper()
+	if got.Access != testCase.wantAccess {
+		t.Errorf("Access = %q, want %q (evidence %q)", got.Access, testCase.wantAccess, got.Evidence)
+	}
+	joined := strings.Join(append([]string{got.Evidence}, got.Trace...), "\n")
+	for _, fragment := range testCase.evidenceHas {
+		if !strings.Contains(joined, fragment) {
+			t.Errorf("evidence/trace does not contain %q:\n%s", fragment, joined)
+		}
+	}
+	trace := strings.Join(got.Trace, "\n")
+	for _, fragment := range testCase.traceHas {
+		if !strings.Contains(trace, fragment) {
+			t.Errorf("trace does not contain %q:\n%s", fragment, trace)
+		}
+	}
+	for _, fragment := range testCase.traceMissing {
+		if strings.Contains(joined, fragment) {
+			t.Errorf("evidence/trace unexpectedly contains %q:\n%s", fragment, joined)
+		}
+	}
+}
+
+// TestPostureGateUnevaluableExpressions pins the always-indeterminate
+// expressions: an unparseable expression (also reported in the policy-scoped
+// skipped list) and a version comparison.
+func TestPostureGateUnevaluableExpressions(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		postures    map[string][]string
+		attrs       map[string]any
+		evidenceHas []string
+		wantSkipped bool
+	}{
+		{
+			name: "unparseable expression",
+			postures: map[string][]string{
+				"posture:broken": {"this is not an expression"},
+			},
+			attrs: map[string]any{"node:os": "linux"},
+			evidenceHas: []string{
+				"posture could not be evaluated locally",
+				"unsupported posture expression",
+			},
+			wantSkipped: true,
+		},
+		{
+			name: "version comparison",
+			postures: map[string][]string{
+				"posture:versioned": {"node:tsVersion >= '1.8'"},
+			},
+			attrs: map[string]any{"node:tsVersion": "1.98.8"},
+			evidenceHas: []string{
+				"posture could not be evaluated locally",
+				"version comparison",
+			},
+		},
+		{
+			name: "undefined posture",
+			postures: map[string][]string{
+				"posture:other": {"node:os == 'linux'"},
+			},
+			attrs: map[string]any{"node:os": "linux"},
+			evidenceHas: []string{
+				"posture could not be evaluated locally",
+				"posture:gated is not defined in postures",
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			policy := &tailscale.ACL{
+				Postures: testCase.postures,
+				Grants: []tailscale.Grant{{
+					Source:      []string{"alice@example.com"},
+					Destination: []string{"tag:web"},
+					IP:          []string{"tcp:443"},
+					SrcPosture:  []string{"posture:broken", "posture:versioned", "posture:gated"},
+				}},
+			}
+			got := evaluate(t, policy, "alice@example.com", "tag:web:443",
+				aclpolicy.ReachabilityOptions{
+					PostureAttrs:         testCase.attrs,
+					PostureAttrsComplete: true,
+				})
+			if got.Access != aclpolicy.AccessIndeterminate {
+				t.Errorf("Access = %q, want %q (evidence %q)",
+					got.Access, aclpolicy.AccessIndeterminate, got.Evidence)
+			}
+			for _, fragment := range testCase.evidenceHas {
+				if !strings.Contains(got.Evidence, fragment) {
+					t.Errorf("Evidence = %q, want it to contain %q", got.Evidence, fragment)
+				}
+			}
+			if testCase.wantSkipped {
+				if len(got.Skipped) != 1 || got.Skipped[0].Rule != "postures[posture:broken][0]" {
+					t.Errorf("Skipped = %#v, want the unparseable posture expression", got.Skipped)
+				}
+			}
+		})
+	}
+}
+
 // defaultSrcPosture gates every rule that does not set its own srcPosture,
 // and the evidence says where the gate came from, since the rule itself
 // carries no posture field a reader could find. A rule with its own

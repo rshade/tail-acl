@@ -118,17 +118,17 @@
     {
       "name": "test add",
       "summary": "Add deny or accept policy assertions without evaluating them; add never renumbers existing assertion IDs",
-      "usage": "test add --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]"
+      "usage": "test add --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...] [--src-posture-attr KEY=VALUE ...]"
     },
     {
       "name": "test remove",
       "summary": "Remove deny or accept policy assertions; removing may renumber later assertion IDs",
-      "usage": "test remove --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]"
+      "usage": "test remove --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...] [--src-posture-attr KEY=VALUE ...]"
     },
     {
       "name": "check",
       "summary": "Answer one reachability question locally",
-      "usage": "check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any]"
+      "usage": "check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any] [--posture-attr KEY=VALUE ...] [--posture-attrs-complete]"
     },
     {
       "name": "lint",

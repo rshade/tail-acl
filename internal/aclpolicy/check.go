@@ -8,6 +8,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tailscale-utils/policycore/posture"
 )
 
 // RuleKind identifies the policy section holding the rule that decided a
@@ -100,6 +101,17 @@ type ReachabilityOptions struct {
 	// set the roster and forget the flag, because there is no separate flag to
 	// forget.
 	Roster map[string]tailscale.UserRole
+	// PostureAttrs carries the posture attributes the query asks with,
+	// keyed as the policy names them ("node:os", "custom:deviceApproved").
+	// A nil map means no attributes were supplied, and a posture gate keeps
+	// the legacy indeterminate behavior.
+	PostureAttrs map[string]any
+	// PostureAttrsComplete asserts PostureAttrs is authoritative: an
+	// attribute it omits is definitely unset, so NOT SET matches it and every
+	// other comparison fails. Without it an omitted attribute the gate needs
+	// is indeterminate — for a question about a real device, "not supplied"
+	// means "not known", not "unset".
+	PostureAttrsComplete bool
 }
 
 // ReachabilityResult is the pure, deterministic answer to one network access
@@ -167,7 +179,10 @@ func EvaluateReachability(
 		)
 	}
 
-	decision := policyAllows(matcher, source, destination, protocol)
+	decision := policyAllows(
+		matcher, source, destination, protocol,
+		posture.Attrs{Map: opts.PostureAttrs, Complete: opts.PostureAttrsComplete},
+	)
 	var allowed *bool
 	if decision.access != AccessIndeterminate {
 		settled := decision.access == AccessAllow

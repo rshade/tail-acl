@@ -480,6 +480,137 @@ func TestEvaluateUnprovenDenyStrictRejectsUnknownProtocol(t *testing.T) {
 	}
 }
 
+// The posture reference policy (testdata/posture_eval_policy.hujson) carries
+// seven tests whose verdicts were all confirmed on the control plane on
+// 2026-10-02 — see the file's header. The local evaluator must reproduce
+// every one of them from the tests' srcPostureAttrs alone, with the decision
+// trace naming the posture, expression, and attribute that decided each gate.
+func TestEvaluatePostureReferenceGolden(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "posture_eval_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGolden(t, "posture_eval_report.golden.json", report)
+
+	if len(report.Assertions) != 14 {
+		t.Fatalf("assertions = %d, want 14", len(report.Assertions))
+	}
+	for _, assertion := range report.Assertions {
+		if assertion.Status != aclpolicy.AssertionPass {
+			t.Errorf("%s: Status = %q, want pass (evidence %q)",
+				assertion.ID, assertion.Status, assertion.Evidence)
+		}
+	}
+	if report.Summary.Passed != len(report.Assertions) {
+		t.Errorf("summary = %#v, want every assertion passed", report.Summary)
+	}
+}
+
+// Flipping one expectation of the reference policy must fail locally with
+// the same verdict the server reports for it: want: Accept, got: Drop.
+// tests[2]'s KP device is denied bbb:443 by both steering postures, so an
+// accept assertion against it fails with evidence naming the deciding
+// country check.
+func TestEvaluatePostureFlippedExpectationFails(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "posture_eval_flipped_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failed *aclpolicy.AssertionResult
+	for index := range report.Assertions {
+		assertion := &report.Assertions[index]
+		if assertion.ID == "tests[2].accept[0]" {
+			failed = assertion
+		}
+		if assertion.ID != "tests[2].accept[0]" && assertion.Status != aclpolicy.AssertionPass {
+			t.Errorf("%s: Status = %q, want pass; only the flipped assertion may fail",
+				assertion.ID, assertion.Status)
+		}
+	}
+	if failed == nil {
+		t.Fatal("tests[2].accept[0] is missing from the report")
+	}
+	if failed.Status != aclpolicy.AssertionFail {
+		t.Errorf("flipped assertion Status = %q, want fail", failed.Status)
+	}
+	if failed.Expected != "accept" || failed.Actual != "deny" {
+		t.Errorf("flipped assertion = want %q got %q; the server reports want: Accept, got: Drop",
+			failed.Expected, failed.Actual)
+	}
+	trace := strings.Join(failed.Trace, "\n")
+	for _, fragment := range []string{
+		"grant 0: posture gate did not match",
+		"ip:country KP is in ['KP', 'IR']",
+		"posture:steering-not-set fails",
+	} {
+		if !strings.Contains(trace, fragment) {
+			t.Errorf("trace does not contain %q:\n%s", fragment, trace)
+		}
+	}
+}
+
+// A posture test must not hide the verdicts of unrelated tests: a file
+// mixing posture and plain tests reports both kinds in one run, definite on
+// both sides.
+func TestEvaluateMixedPostureAndPlainTests(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "posture_eval_mixed_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Assertions) != 3 {
+		t.Fatalf("assertions = %d, want 3", len(report.Assertions))
+	}
+	for _, assertion := range report.Assertions {
+		if assertion.Status != aclpolicy.AssertionPass {
+			t.Errorf("%s: Status = %q, want pass (evidence %q)",
+				assertion.ID, assertion.Status, assertion.Evidence)
+		}
+	}
+}
+
+// An empty srcPostureAttrs object is present, not absent: the map decodes
+// non-nil, so the entry evaluates with a complete (all-unset) attribute set
+// rather than falling back to the indeterminate gate. The SDK type is a plain
+// map, and Load's decode keeps the empty-object/nil distinction, which this
+// test pins.
+func TestEmptySrcPostureAttrsEvaluatesAsComplete(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "posture_eval_empty_attrs_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Tests[0].SrcPostureAttrs == nil {
+		t.Fatal("empty srcPostureAttrs object decoded as nil; presence must survive Load")
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Assertions) != 1 {
+		t.Fatalf("assertions = %d, want 1", len(report.Assertions))
+	}
+	assertion := report.Assertions[0]
+	if assertion.Status != aclpolicy.AssertionPass {
+		t.Errorf("Status = %q, want pass: an empty attribute set satisfies NOT SET (evidence %q)",
+			assertion.Status, assertion.Evidence)
+	}
+}
+
 func TestEvaluateReachabilityGolden(t *testing.T) {
 	t.Parallel()
 	policy, err := aclpolicy.Load(filepath.Join("testdata", "reachability_policy.hujson"))
@@ -525,10 +656,11 @@ func TestEvaluateReachabilityGolden(t *testing.T) {
 	assertGolden(t, "reachability_report.golden.json", results)
 }
 
-// A rule using via or srcPosture is no longer an error from check; see
-// TestUnevaluatableGateIsIndeterminate in reachability_test.go, which asserts
-// the third verdict that replaced it. EvaluateTests still errors, which
-// TestEvaluateTestsStillErrorsOnUnevaluatableRule locks in.
+// A rule using via or an unevaluable posture gate is not an error from test
+// or check; see TestUnevaluatableGateIsIndeterminate in reachability_test.go,
+// which asserts the third verdict. A test carrying srcPostureAttrs is
+// evaluated against that map rather than refused; see
+// TestEvaluatePostureReferenceGolden.
 
 func TestEvaluateReachabilityStrictRejectsMalformedRule(t *testing.T) {
 	t.Parallel()

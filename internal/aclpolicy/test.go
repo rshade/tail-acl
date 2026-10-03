@@ -3,13 +3,16 @@ package aclpolicy
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tailscale-utils/policycore/posture"
 )
 
 // AssertionStatus is the machine-readable outcome of one policy assertion.
@@ -130,16 +133,19 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 		if err != nil {
 			return TestReport{}, err
 		}
-		if len(test.SrcPostureAttrs) != 0 {
-			return TestReport{}, fmt.Errorf(
-				"tests[%d]: srcPostureAttrs is not supported by the local evaluator",
-				testIndex,
-			)
+		// Presence, not length: a srcPostureAttrs key — even an empty object —
+		// is the test's complete attribute set. The server supplies no default
+		// attributes for a test, so what the map omits is unset (verified
+		// against the control plane on 2026-10-02). An entry with no key keeps
+		// the indeterminate posture-gate behavior.
+		var attrs posture.Attrs
+		if test.SrcPostureAttrs != nil {
+			attrs = posture.Attrs{Map: test.SrcPostureAttrs, Complete: true}
 		}
 
 		for assertionIndex, destination := range accept {
 			assertion, assertionErr := evaluateAssertion(
-				matcher, testIndex, assertionIndex, string(TestAccept), source, destination, true,
+				matcher, testIndex, assertionIndex, string(TestAccept), source, destination, true, attrs,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -148,7 +154,7 @@ func EvaluateTests(policy *tailscale.ACL, opts TestOptions) (TestReport, error) 
 		}
 		for assertionIndex, destination := range test.Deny {
 			assertion, assertionErr := evaluateAssertion(
-				matcher, testIndex, assertionIndex, string(TestDeny), source, destination, false,
+				matcher, testIndex, assertionIndex, string(TestDeny), source, destination, false, attrs,
 			)
 			if assertionErr != nil {
 				return TestReport{}, assertionErr
@@ -172,6 +178,31 @@ func scanRules(matcher policycore.Matcher) []RuleSkip {
 	skips := make([]RuleSkip, 0)
 	skips = append(skips, scanGrantRules(matcher.Policy.Grants)...)
 	skips = append(skips, scanACLRules(matcher.Policy.ACLs)...)
+	skips = append(skips, scanPostureRules(matcher.Policy.Postures)...)
+	return skips
+}
+
+// scanPostureRules reports every posture expression the shared parser cannot
+// read. An unparseable expression makes every gate that references the
+// posture unevaluable, so it is policy-scoped like any other skipped
+// element; the grammar warning class (an unknown attribute) is lint's to
+// report, not a skip.
+func scanPostureRules(postures map[string][]string) []RuleSkip {
+	skips := make([]RuleSkip, 0)
+	for _, name := range slices.Sorted(maps.Keys(postures)) {
+		for index, expression := range postures[name] {
+			for _, diagnostic := range posture.Validate(expression) {
+				if diagnostic.Kind == posture.DiagnosticUnparseable {
+					skips = append(skips, RuleSkip{
+						Rule:   fmt.Sprintf("postures[%s][%d]", name, index),
+						Value:  expression,
+						Reason: diagnostic.Reason,
+					})
+					break
+				}
+			}
+		}
+	}
 	return skips
 }
 
@@ -299,6 +330,7 @@ func evaluateAssertion(
 	testIndex, assertionIndex int,
 	expectation, source, destination string,
 	wantAllowed bool,
+	attrs posture.Attrs,
 ) (AssertionResult, error) {
 	target, err := parseTarget(destination)
 	if err != nil {
@@ -308,7 +340,7 @@ func evaluateAssertion(
 	// question. A rule the evaluator cannot decide becomes the assertion's
 	// third verdict; answering accept or deny from an incomplete walk would be
 	// a guess.
-	decision := policyAllows(matcher, source, target, ProtocolAny)
+	decision := policyAllows(matcher, source, target, ProtocolAny, attrs)
 	allowed, evidence, trace := decision.access == AccessAllow, decision.evidence, decision.trace
 
 	// An assertion the evaluator cannot settle is reported as its own status
@@ -446,6 +478,7 @@ func policyAllows(
 	source string,
 	destination target,
 	protocol Protocol,
+	attrs posture.Attrs,
 ) reachability {
 	policy := matcher.Policy
 	if policy.Grants == nil && policy.ACLs == nil {
@@ -472,7 +505,7 @@ func policyAllows(
 	}
 
 	for index, grant := range policy.Grants {
-		outcome := grantAllows(matcher, grant, source, destination, protocol)
+		outcome := grantAllows(matcher, grant, source, destination, protocol, attrs)
 		reference := record(RuleGrant, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -484,7 +517,7 @@ func policyAllows(
 		}
 	}
 	for index, entry := range policy.ACLs {
-		outcome := aclAllows(matcher, entry, source, destination, protocol)
+		outcome := aclAllows(matcher, entry, source, destination, protocol, attrs)
 		reference := record(RuleACL, index, outcome)
 		if outcome.matched {
 			return reachability{
@@ -523,6 +556,7 @@ func grantAllows(
 	source string,
 	destination target,
 	protocol Protocol,
+	attrs posture.Attrs,
 ) ruleOutcome {
 	sourceMatched, sourceGate := anySelectorMatches(grant.Source, source, matcher, source)
 	if !sourceMatched && sourceGate == "" {
@@ -560,10 +594,21 @@ func grantAllows(
 			protocolSuffix(protocol),
 		)}
 	}
+	postureNames, postureFromDefault := policycore.EffectiveSrcPosture(
+		grant.SrcPosture, matcher.Policy.DefaultSourcePosture)
+	postureSatisfied, postureUndecided, postureDetail := evaluatePostureGate(
+		postureNames, postureFromDefault, matcher.Policy.Postures, attrs)
+	if !postureSatisfied && postureUndecided == "" {
+		// Every posture in the gate failed against the supplied attributes, so
+		// the rule decidably does not apply to this query whatever else about
+		// it is unresolved — the same narrowing the source and destination
+		// checks apply above.
+		return ruleOutcome{decision: "posture gate did not match: " + postureDetail}
+	}
 	gate := firstGate(
 		selectorGate("source", sourceMatched, sourceGate, source),
 		selectorGate("destination", destinationMatched, destinationGate, destination.host),
-		postureGate(policycore.EffectiveSrcPosture(grant.SrcPosture, matcher.Policy.DefaultSourcePosture)),
+		postureUndecided,
 		viaGate(grant.Via),
 	)
 	if gate != "" {
@@ -577,7 +622,11 @@ func grantAllows(
 		parseGate := "network capability could not be parsed"
 		return ruleOutcome{decision: "could not evaluate: " + parseGate, gate: parseGate}
 	}
-	return ruleOutcome{matched: true, decision: "source, destination, and network capability matched"}
+	decision := "source, destination, and network capability matched"
+	if postureDetail != "" {
+		decision += "; " + postureDetail
+	}
+	return ruleOutcome{matched: true, decision: decision}
 }
 
 func aclAllows(
@@ -586,6 +635,7 @@ func aclAllows(
 	source string,
 	destination target,
 	protocol Protocol,
+	attrs posture.Attrs,
 ) ruleOutcome {
 	sources := entry.Source
 	if len(sources) == 0 {
@@ -630,11 +680,20 @@ func aclAllows(
 		// of anything unresolved on its source. This is the narrowing rule.
 		return ruleOutcome{decision: "destination or port did not match"}
 	}
+	postureNames, postureFromDefault := policycore.EffectiveSrcPosture(
+		entry.SourcePosture, matcher.Policy.DefaultSourcePosture)
+	postureSatisfied, postureUndecided, postureDetail := evaluatePostureGate(
+		postureNames, postureFromDefault, matcher.Policy.Postures, attrs)
+	if !postureSatisfied && postureUndecided == "" {
+		// Every posture in the gate failed against the supplied attributes, so
+		// the rule decidably does not apply to this query.
+		return ruleOutcome{decision: "posture gate did not match: " + postureDetail}
+	}
 	gate := firstGate(
 		selectorGate("source", sourceMatched, sourceGate, source),
 		selectorGate("destination", destinationMatched, destinationGate, destination.host),
 		protocolGate,
-		postureGate(policycore.EffectiveSrcPosture(entry.SourcePosture, matcher.Policy.DefaultSourcePosture)),
+		postureUndecided,
 		// Legacy ACLEntry has no Via field, so there is no viaGate counterpart
 		// to grantAllows here.
 	)
@@ -647,7 +706,11 @@ func aclAllows(
 		parseGate := "destination could not be parsed"
 		return ruleOutcome{decision: "could not evaluate: " + parseGate, gate: parseGate}
 	}
-	return ruleOutcome{matched: true, decision: "source, destination, and port matched"}
+	decision := "source, destination, and port matched"
+	if postureDetail != "" {
+		decision += "; " + postureDetail
+	}
+	return ruleOutcome{matched: true, decision: decision}
 }
 
 // protocolSuffix names the protocol in a trace line only when the query was
@@ -716,6 +779,91 @@ func postureGate(posture []string, fromDefault bool) string {
 		return "uses unsupported srcPosture (from defaultSrcPosture)"
 	}
 	return "uses unsupported srcPosture"
+}
+
+// evaluatePostureGate decides a rule's effective posture gate against the
+// query's attribute set. Postures in one gate are ORed — the rule matches
+// when any one of them is satisfied — and a posture's expressions are ANDed,
+// the semantics the control plane confirmed on 2026-10-02.
+//
+// The three returns cover the three outcomes: satisfied reports that a
+// posture held and the gate opens (detail says why); gate is the
+// indeterminate reason when no posture held and at least one could not be
+// evaluated, or when no attributes were supplied at all (the legacy
+// postureGate wording, which is a compatibility contract); and when neither
+// is set, every posture decidably failed and detail says why, which the
+// caller reports as a clean non-match.
+func evaluatePostureGate(
+	names []string,
+	fromDefault bool,
+	postures map[string][]string,
+	attrs posture.Attrs,
+) (satisfied bool, gate string, detail string) { //nolint:nonamedreturns // the three outcomes are documented above and the names keep the call sites readable.
+	if len(names) == 0 {
+		return true, "", ""
+	}
+	if !attrs.Supplied() {
+		return false, postureGate(names, fromDefault), ""
+	}
+	failures := make([]string, 0, len(names))
+	unknowns := make([]string, 0, len(names))
+	for _, name := range names {
+		rules, defined := postures[name]
+		if !defined {
+			unknowns = append(unknowns, name+" is not defined in postures")
+			continue
+		}
+		outcome := posture.EvaluatePosture(name, rules, attrs)
+		switch outcome.State() {
+		case posture.Satisfied:
+			return true, "", postureHoldDetail(outcome)
+		case posture.Unsatisfied:
+			failures = append(failures, postureFailDetail(outcome))
+		case posture.Unknown:
+			unknowns = append(unknowns, postureUnknownDetail(outcome))
+		}
+	}
+	// Failures are reported ahead of unknowns: a posture that decidably failed
+	// is a firmer fact than one that could not be read, and the gate reason is
+	// more useful when it names the definite outcomes first.
+	parts := slices.Concat(failures, unknowns)
+	if len(unknowns) > 0 {
+		return false, "posture could not be evaluated locally: " + strings.Join(parts, "; "), ""
+	}
+	return false, "", strings.Join(parts, "; ")
+}
+
+// postureFailDetail renders a failing posture with the fact that decided it:
+// "ip:country KP is in ['KP', 'IR'], so posture:steering-not-set fails".
+func postureFailDetail(outcome posture.Outcome) string {
+	deciding, decided := outcome.DecidingRule()
+	if !decided {
+		return outcome.Posture + " fails"
+	}
+	return deciding.Reason + ", so " + outcome.Posture + " fails"
+}
+
+// postureHoldDetail renders a satisfied posture with every rule's fact, so
+// the trace shows the whole conjunction that opened the gate.
+func postureHoldDetail(outcome posture.Outcome) string {
+	if len(outcome.Rules) == 0 {
+		return outcome.Posture + " holds (it states no requirements)"
+	}
+	facts := make([]string, 0, len(outcome.Rules))
+	for _, rule := range outcome.Rules {
+		facts = append(facts, rule.Reason)
+	}
+	return strings.Join(facts, "; ") + ", so " + outcome.Posture + " holds"
+}
+
+// postureUnknownDetail renders an unevaluable posture with the reason its
+// deciding rule could not be read.
+func postureUnknownDetail(outcome posture.Outcome) string {
+	deciding, decided := outcome.DecidingRule()
+	if !decided {
+		return outcome.Posture + " could not be evaluated"
+	}
+	return outcome.Posture + ": " + deciding.Reason
 }
 
 func viaGate(via []string) string {

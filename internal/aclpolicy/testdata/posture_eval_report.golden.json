@@ -1,0 +1,227 @@
+{
+  "assertions": [
+    {
+      "id": "tests[0].accept[0]",
+      "status": "pass",
+      "test_index": 0,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 0",
+      "trace": [
+        "grant 0: source, destination, and network capability matched; custom:subnet_router is unset; ip:country US is not in ['KP', 'IR'], so posture:steering-not-set holds"
+      ]
+    },
+    {
+      "id": "tests[0].deny[0]",
+      "status": "pass",
+      "test_index": 0,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: posture gate did not match: custom:subnet_router is unset, so posture:nyc fails; custom:subnet_router is unset, so posture:nyc-geo-unset fails",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[1].accept[0]",
+      "status": "pass",
+      "test_index": 1,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 0",
+      "trace": [
+        "grant 0: source, destination, and network capability matched; custom:subnet_router is unset; ip:country is unset, so posture:steering-not-set-geo-unset holds"
+      ]
+    },
+    {
+      "id": "tests[1].deny[0]",
+      "status": "pass",
+      "test_index": 1,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: posture gate did not match: custom:subnet_router is unset, so posture:nyc fails; custom:subnet_router is unset, so posture:nyc-geo-unset fails",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[2].deny[0]",
+      "status": "pass",
+      "test_index": 2,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: posture gate did not match: ip:country KP is in ['KP', 'IR'], so posture:steering-not-set fails; ip:country is set, so posture:steering-not-set-geo-unset fails",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[2].deny[1]",
+      "status": "pass",
+      "test_index": 2,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: posture gate did not match: custom:subnet_router is unset, so posture:nyc fails; custom:subnet_router is unset, so posture:nyc-geo-unset fails",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[3].accept[0]",
+      "status": "pass",
+      "test_index": 3,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 1",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: source, destination, and network capability matched; custom:subnet_router is nyc; ip:country US is not in ['KP', 'IR'], so posture:nyc holds"
+      ]
+    },
+    {
+      "id": "tests[3].deny[0]",
+      "status": "pass",
+      "test_index": 3,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: posture gate did not match: custom:subnet_router is set, so posture:steering-not-set fails; custom:subnet_router is set, so posture:steering-not-set-geo-unset fails",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[4].accept[0]",
+      "status": "pass",
+      "test_index": 4,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "accept",
+      "actual": "accept",
+      "evidence": "matched grant 1",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: source, destination, and network capability matched; custom:subnet_router is nyc; ip:country is unset, so posture:nyc-geo-unset holds"
+      ]
+    },
+    {
+      "id": "tests[4].deny[0]",
+      "status": "pass",
+      "test_index": 4,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: posture gate did not match: custom:subnet_router is set, so posture:steering-not-set fails; custom:subnet_router is set, so posture:steering-not-set-geo-unset fails",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[5].deny[0]",
+      "status": "pass",
+      "test_index": 5,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: posture gate did not match: ip:country IR is in ['KP', 'IR'], so posture:nyc fails; ip:country is set, so posture:nyc-geo-unset fails",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[5].deny[1]",
+      "status": "pass",
+      "test_index": 5,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: posture gate did not match: custom:subnet_router is set, so posture:steering-not-set fails; custom:subnet_router is set, so posture:steering-not-set-geo-unset fails",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[6].deny[0]",
+      "status": "pass",
+      "test_index": 6,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "bbb:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: posture gate did not match: custom:subnet_router is set, so posture:steering-not-set fails; custom:subnet_router is set, so posture:steering-not-set-geo-unset fails",
+        "grant 1: destination did not match",
+        "default deny: no network grant or ACL matched"
+      ]
+    },
+    {
+      "id": "tests[6].deny[1]",
+      "status": "pass",
+      "test_index": 6,
+      "expectation": "deny",
+      "source": "alice@example.com",
+      "destination": "nyc-svc:443",
+      "expected": "deny",
+      "actual": "deny",
+      "evidence": "no network grant or ACL matched",
+      "trace": [
+        "grant 0: destination did not match",
+        "grant 1: posture gate did not match: custom:subnet_router is ldn, not nyc, so posture:nyc fails; custom:subnet_router is ldn, not nyc, so posture:nyc-geo-unset fails",
+        "default deny: no network grant or ACL matched"
+      ]
+    }
+  ],
+  "summary": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0
+  }
+}

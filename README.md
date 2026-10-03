@@ -63,6 +63,10 @@ tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver gr
 tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
 tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
 tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
+# Author a posture test: the attributes are written into the entry's srcPostureAttrs
+tail-acl --file acl.json test add --src alice@example.com \
+  --src-posture-attr node:os=linux --src-posture-attr ip:country=KP \
+  --deny bbb:443 --deny nyc-svc:443
 
 # An argument beginning with a dash needs a `--` terminator to be treated as an
 # expression at all, and `--comment` must precede it (every valid expression
@@ -96,6 +100,9 @@ tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:w
 tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
 tail-acl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
 tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
+# Answer through a posture gate by supplying the device's attributes:
+tail-acl --file acl/acl.generated.json check --src alice@example.com --dst bbb:443 \
+  --posture-attr ip:country=KP --posture-attrs-complete
 
 # Statically lint policy hygiene (no credentials or network):
 tail-acl --file acl/acl.generated.json lint
@@ -234,13 +241,13 @@ access tokens are refreshed in memory and are not written to disk.
 | `posture remove` | Remove a posture definition |
 | `auto-approver add` | Add an `--approver` to a `--route CIDR` approver list or the `--exit-node` list (repeatable, idempotent, merges into an existing route; `--comment`) |
 | `auto-approver remove` | Remove approvers; an emptied route key or `exitNode` member is pruned rather than left as an empty list |
-| `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`; merges by source and never renumbers existing assertion IDs |
-| `test remove` | Remove matching assertions for `--src`, pruning empty keys and entries; may renumber later assertion IDs |
+| `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`, with repeatable `--src-posture-attr KEY=VALUE` for posture tests; merges by source and attribute set and never renumbers existing assertion IDs |
+| `test remove` | Remove matching assertions for `--src` (with `--src-posture-attr` for an exact attribute-set match), pruning empty keys and entries; may renumber later assertion IDs |
 | `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
 | `normalize` | Emit `--file` as standard JSON on stdout for `jq`, `gron`, `fx`, and `yq` (read-only) |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
-| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted) |
+| `check` | Answer whether one `--src` can reach `--dst DST:PORT` locally (`--port PORT` and `--proto tcp\|udp\|sctp\|any` are also accepted; `--posture-attr KEY=VALUE` and `--posture-attrs-complete` evaluate posture gates) |
 | `lint` | Statically report policy-hygiene findings and broad-rule test advisories (`-severity`, `-wildcard`, `-config`, `-scim-domains`, `-strict-scim-groups`, `-online-validation`) |
 | `jq` | Query the policy with the embedded gojq engine; read-only, NDJSON under `-format human` and enveloped under `-format json` (see [Query a policy](#query-a-policy)) |
 | `pull` | Bootstrap `--file` from the deployed policy (`--force` permits an intentional overwrite) |
@@ -638,14 +645,27 @@ network evaluator supports groups, hosts, IP sets, literal IPs/CIDRs, tags and
 other exact selectors, the autogroups `policycore` resolves (see [Resolving role
 autogroups](#resolving-role-autogroups) for which of those need `--roster`), and
 single/list/range port expressions. Application-only capabilities do not grant
-network access. Because posture and `via` routing depend on semantics that
-cannot be reproduced safely from the policy alone, a matching rule that uses
-either makes the assertion indeterminate instead of guessing; use `validate`
-for the authoritative control-plane evaluation in that case. The posture gate
-applies to a rule's *effective* posture: its own `srcPosture` when it sets one,
-otherwise the policy's `defaultSrcPosture`. A gate inherited from the default
-is reported as `uses unsupported srcPosture (from defaultSrcPosture)`, since
-the rule itself carries no posture field to point at.
+network access. `via` routing cannot be reproduced safely from the policy
+alone, so a matching rule that uses it makes the assertion indeterminate
+instead of guessing. Posture is different when the test says what the device
+carries: an entry with a `srcPostureAttrs` key — even an empty object — is
+evaluated against that attribute map, treated as complete (the server
+supplies no default attributes for a test, so what the map omits is unset;
+verified against the control plane on 2026-10-02). Postures in one
+`srcPosture` list are ORed, a posture's expressions are ANDed, and an unset
+attribute fails every comparison except `NOT SET`. A test with no
+`srcPostureAttrs` key keeps the indeterminate gate: the posture gate applies
+to a rule's *effective* posture — its own `srcPosture` when it sets one,
+otherwise the policy's `defaultSrcPosture` — and a gate inherited from the
+default is reported as `uses unsupported srcPosture (from defaultSrcPosture)`,
+since the rule itself carries no posture field to point at. Version
+comparisons (`node:osVersion`, `node:tsVersion` with `<`, `>=`, and so on)
+use a server-side comparison that is not documented closely enough to
+reproduce, so they stay `indeterminate` even with attributes supplied; use
+`validate` for the authoritative control-plane evaluation in that case. The
+decision trace names the posture, expression, and attribute that decided a
+gate — `ip:country KP is in ['KP', 'IR'], so posture:steering-not-set
+fails`.
 
 Rule *syntax* is scanned once up front, before any assertion runs, so the
 result never depends on which assertion happened to reach which rule. An
@@ -707,10 +727,19 @@ evaluator applies rather than restated:
   non-empty — so an edit always targets the member the next run will read. An
   entry carrying an explicitly empty `accept` beside a populated `allow` is
   therefore edited through `allow`.
-- **Posture-qualified entries.** An entry carrying at least one
-  `srcPostureAttrs` attribute is never a merge or removal target, because the
-  local evaluator cannot run it. An empty `srcPostureAttrs` object does run, so
-  it stays editable.
+- **Posture-qualified entries.** A posture test is identified by its source
+  AND its attributes. An edit carrying `--src-posture-attr KEY=VALUE`
+  (repeatable) targets only the entry whose `srcPostureAttrs` is present and
+  deep-equal after value typing — so the same source with a different
+  country is a separate entry, and re-running an add against the entry it
+  created reports `no_changes`. A flag-less edit matches entries with no
+  `srcPostureAttrs` key or an empty one (the flags cannot express an empty
+  set, and the evaluator reads an empty object as a complete all-unset map).
+  Values are typed exactly like `check`'s `--posture-attr` (`flag=true` is a
+  boolean, `flag='true'` a string), so a value written by `test add` is the
+  value `check` asks about. Keys are checked against the known-attribute
+  vocabulary as a stderr warning only: an unknown `node:`/`ip:` key warns
+  and the edit proceeds, and a `custom:` key never warns.
 
 ### Compatibility
 
@@ -778,9 +807,20 @@ the implicit default-allow policy; an explicitly empty section denies access.
 
 ### The safety boundary
 
-A policy file does not contain every fact a verdict can depend on. Device
-posture and `via` routing resolve against control-plane state this evaluator
-never sees.
+A policy file does not contain every fact a verdict can depend on. `via`
+routing resolves against control-plane state this evaluator never sees.
+Device posture is in that class *for questions about real devices* — but it
+can be supplied, the same way the roster is supplied for role autogroups.
+A `tests` entry's `srcPostureAttrs` writes the device's attributes into the
+file and is authoritative: what it omits is unset. For `check`, repeatable
+`--posture-attr KEY=VALUE` supplies attributes and `--posture-attrs-complete`
+asserts the set is complete. Without the completeness flag, an attribute the
+gate reads but the query does not supply stays `indeterminate` — for a real
+device, "not supplied" means "not known", not "unset". Values are typed:
+`flag=true` is the boolean true, `flag='true'` (or `"true"`) is the string
+"true", a JSON number is a number, and anything else is a bare string.
+Version comparisons stay `indeterminate` even with a complete attribute set
+until server fixtures pin the comparison's behavior.
 
 The role autogroups — `autogroup:admin`, `autogroup:owner`, `autogroup:auditor`,
 and the `*-admin` family — also depend on control-plane state, but that state

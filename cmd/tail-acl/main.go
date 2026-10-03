@@ -1806,58 +1806,75 @@ func loadForEdit(path string) (*aclpolicy.Policy, error) {
 	return aclpolicy.Load(path)
 }
 
-func runTestAdd(path, source string, deny, accept []string) (*result, error) {
-	if strings.TrimSpace(source) == "" {
-		return nil, usagef("test add requires --src")
-	}
-	if len(deny) == 0 && len(accept) == 0 {
-		return nil, usagef("test add requires at least one --deny or --accept")
-	}
-	policy, err := loadForEdit(path)
-	if err != nil {
-		return nil, err
-	}
-	edit, err := aclpolicy.AddAssertions(policy, source, deny, accept)
-	if err != nil {
-		return nil, usageError{err}
-	}
-	status := statusNoChanges
-	message := fmt.Sprintf("test assertions already present in %s", path)
-	if edit.Changed() {
-		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
-			return nil, err
-		}
-		status = statusOK
-		message = fmt.Sprintf("added %d test assertion(s) to %s", len(edit.Operations), path)
-	}
-	return testEditResult(commandTestAdd, status, message, path, edit), nil
+func runTestAdd(
+	path, source string, deny, accept []string, postureAttrFlags []string, stderr io.Writer,
+) (*result, error) {
+	return runTestEdit(
+		commandTestAdd, path, source, deny, accept, postureAttrFlags, stderr,
+		aclpolicy.AddAssertions,
+		"test assertions already present in %s",
+		"added %d test assertion(s) to %s",
+	)
 }
 
-func runTestRemove(path, source string, deny, accept []string) (*result, error) {
+func runTestRemove(
+	path, source string, deny, accept []string, postureAttrFlags []string, stderr io.Writer,
+) (*result, error) {
+	return runTestEdit(
+		commandTestRemove, path, source, deny, accept, postureAttrFlags, stderr,
+		aclpolicy.RemoveAssertions,
+		"test assertions not present in %s",
+		"removed %d test assertion(s) from %s",
+	)
+}
+
+// runTestEdit is the shared body of test add and test remove: validate the
+// flags, parse and warn on the posture attributes, apply the edit, and patch
+// the file only when it changed. The apply argument is the one difference
+// between the two commands.
+func runTestEdit(
+	command, path, source string,
+	deny, accept []string,
+	postureAttrFlags []string,
+	stderr io.Writer,
+	apply func(*aclpolicy.Policy, string, []string, []string, map[string]any) (aclpolicy.TestEdit, error),
+	noChangeFormat, changeFormat string,
+) (*result, error) {
 	if strings.TrimSpace(source) == "" {
-		return nil, usagef("test remove requires --src")
+		return nil, usagef("%s requires --src", command)
 	}
 	if len(deny) == 0 && len(accept) == 0 {
-		return nil, usagef("test remove requires at least one --deny or --accept")
+		return nil, usagef("%s requires at least one --deny or --accept", command)
+	}
+	attrs, err := aclpolicy.ParsePostureAttrs(postureAttrFlags)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	for _, warning := range aclpolicy.PostureAttrWarnings(attrs) {
+		fmt.Fprintln(stderr, "tail-acl: warning:", warning)
 	}
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	edit, err := aclpolicy.RemoveAssertions(policy, source, deny, accept)
+	edit, err := apply(policy, source, deny, accept, attrs)
 	if err != nil {
 		return nil, usageError{err}
 	}
 	status := statusNoChanges
-	message := fmt.Sprintf("test assertions not present in %s", path)
+	message := fmt.Sprintf(noChangeFormat, path)
 	if edit.Changed() {
 		if err = aclpolicy.WritePatch(path, edit.Operations...); err != nil {
 			return nil, err
 		}
 		status = statusOK
-		message = fmt.Sprintf("removed %d test assertion(s) from %s", len(edit.AssertionIDs), path)
+		count := len(edit.Operations)
+		if command == commandTestRemove {
+			count = len(edit.AssertionIDs)
+		}
+		message = fmt.Sprintf(changeFormat, count, path)
 	}
-	return testEditResult(commandTestRemove, status, message, path, edit), nil
+	return testEditResult(command, status, message, path, edit), nil
 }
 
 func testEditResult(command, status, message, path string, edit aclpolicy.TestEdit) *result {
@@ -2555,6 +2572,8 @@ func runCheck(
 	opts options,
 	source, target string,
 	protocol aclpolicy.Protocol,
+	postureAttrs map[string]any,
+	postureAttrsComplete bool,
 	logger *slog.Logger,
 ) (*result, error) {
 	policy, err := aclpolicy.Load(opts.file)
@@ -2572,7 +2591,13 @@ func runCheck(
 		&policy.ACL,
 		source,
 		target,
-		aclpolicy.ReachabilityOptions{Strict: opts.strict, Protocol: protocol, Roster: roster},
+		aclpolicy.ReachabilityOptions{
+			Strict:               opts.strict,
+			Protocol:             protocol,
+			Roster:               roster,
+			PostureAttrs:         postureAttrs,
+			PostureAttrsComplete: postureAttrsComplete,
+		},
 	)
 	if err != nil {
 		return nil, usagef("could not evaluate reachability: %v", err)
@@ -3544,17 +3569,20 @@ func commandCatalog() []schemaCommand {
 		{
 			commandTestAdd,
 			"Add deny or accept policy assertions without evaluating them; add never renumbers existing assertion IDs",
-			"test add --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]",
+			"test add --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...] " +
+				"[--src-posture-attr KEY=VALUE ...]",
 		},
 		{
 			commandTestRemove,
 			"Remove deny or accept policy assertions; removing may renumber later assertion IDs",
-			"test remove --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...]",
+			"test remove --src SRC (--deny DST:PORT | --accept DST:PORT) [--deny DST:PORT ...] [--accept DST:PORT ...] " +
+				"[--src-posture-attr KEY=VALUE ...]",
 		},
 		{
 			cmdCheck,
 			"Answer one reachability question locally",
-			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any]",
+			"check --src SRC (--dst DST:PORT | --dst DST --port PORT) [--proto tcp|udp|sctp|any] " +
+				"[--posture-attr KEY=VALUE ...] [--posture-attrs-complete]",
 		},
 		{
 			cmdLint,

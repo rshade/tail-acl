@@ -1,0 +1,29 @@
+// An empty srcPostureAttrs object is present, not absent: the test evaluates
+// with a complete (all-unset) attribute set, so NOT SET is satisfied and the
+// gate opens.
+{
+    "groups": {
+        "group:aaa": ["alice@example.com"],
+    },
+    "hosts": {
+        "bbb": "100.64.0.10",
+    },
+    "postures": {
+        "posture:geo-unset": ["ip:country NOT SET"],
+    },
+    "grants": [
+        {
+            "src":        ["group:aaa"],
+            "dst":        ["bbb"],
+            "ip":         ["*"],
+            "srcPosture": ["posture:geo-unset"],
+        },
+    ],
+    "tests": [
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {},
+            "accept":          ["bbb:443"],
+        },
+    ],
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -71,19 +72,26 @@ func AddAssertion(
 ) (TestEdit, error) {
 	switch expectation {
 	case TestDeny:
-		return AddAssertions(policy, source, []string{destination}, nil)
+		return AddAssertions(policy, source, []string{destination}, nil, nil)
 	case TestAccept:
-		return AddAssertions(policy, source, nil, []string{destination})
+		return AddAssertions(policy, source, nil, []string{destination}, nil)
 	default:
 		return TestEdit{}, fmt.Errorf("unknown test expectation %q", expectation)
 	}
 }
 
 // AddAssertions adds every semantically absent assertion, merging into the
-// first plain entry for source. An entry carrying srcPostureAttrs is never a
-// merge target because the local evaluator cannot run it. Existing assertions
-// are returned in AssertionIDs too, making a no_changes result useful to CI.
-func AddAssertions(policy *Policy, source string, deny, accept []string) (TestEdit, error) {
+// first entry for source whose attribute set matches attrs. A posture test is
+// identified by its source AND its attributes: an add carrying attrs merges
+// only with an entry whose srcPostureAttrs is present and deep-equal after
+// typing, so two tests with the same source and different countries stay
+// separate entries. A flag-less add (attrs nil) targets only entries with no
+// srcPostureAttrs key or an empty one — the length-based editability the
+// runner has always had. Existing assertions are returned in AssertionIDs
+// too, making a no_changes result useful to CI.
+func AddAssertions(
+	policy *Policy, source string, deny, accept []string, attrs map[string]any,
+) (TestEdit, error) {
 	source, deny, accept, err := validateTestEditInput(source, deny, accept)
 	if err != nil {
 		return TestEdit{}, err
@@ -106,7 +114,7 @@ func AddAssertions(policy *Policy, source string, deny, accept []string) (TestEd
 			seen[key] = struct{}{}
 
 			index, assertionID, operation := addOneAssertion(
-				policy, source, assertion.expectation, destination,
+				policy, source, assertion.expectation, destination, attrs,
 			)
 			if edit.TestIndex < 0 {
 				edit.TestIndex = index
@@ -130,18 +138,24 @@ func RemoveAssertion(
 ) (TestEdit, error) {
 	switch expectation {
 	case TestDeny:
-		return RemoveAssertions(policy, source, []string{destination}, nil)
+		return RemoveAssertions(policy, source, []string{destination}, nil, nil)
 	case TestAccept:
-		return RemoveAssertions(policy, source, nil, []string{destination})
+		return RemoveAssertions(policy, source, nil, []string{destination}, nil)
 	default:
 		return TestEdit{}, fmt.Errorf("unknown test expectation %q", expectation)
 	}
 }
 
 // RemoveAssertions removes matching assertions, their now-empty assertion
-// keys, and entries that carry no assertions afterward. Operations are emitted
-// from the end of tests toward the beginning so array indexes remain valid.
-func RemoveAssertions(policy *Policy, source string, deny, accept []string) (TestEdit, error) {
+// keys, and entries that carry no assertions afterward, targeting only
+// entries whose attribute set matches attrs under the same rule
+// AddAssertions uses: attrs targets an exact srcPostureAttrs match, and a
+// flag-less removal (attrs nil) targets entries with no key or an empty one.
+// Operations are emitted from the end of tests toward the beginning so array
+// indexes remain valid.
+func RemoveAssertions(
+	policy *Policy, source string, deny, accept []string, attrs map[string]any,
+) (TestEdit, error) {
 	source, deny, accept, err := validateTestEditInput(source, deny, accept)
 	if err != nil {
 		return TestEdit{}, err
@@ -151,7 +165,7 @@ func RemoveAssertions(policy *Policy, source string, deny, accept []string) (Tes
 		TestAccept: destinationSet(source, TestAccept, accept),
 	}
 
-	edit, removals := collectTestRemovals(policy, source, requested)
+	edit, removals := collectTestRemovals(policy, source, requested, attrs)
 	for _, removal := range slices.Backward(removals) {
 		edit.Operations = append(edit.Operations, applyTestRemoval(policy, removal)...)
 	}
@@ -172,11 +186,12 @@ func collectTestRemovals(
 	policy *Policy,
 	source string,
 	requested map[TestExpectation]map[string]struct{},
+	attrs map[string]any,
 ) (TestEdit, []testEntryRemoval) {
 	edit := TestEdit{TestIndex: -1}
 	var removals []testEntryRemoval
 	for testIndex, test := range policy.Tests {
-		if !editableTestMatches(test, source) {
+		if !editableTestMatches(test, source, attrs) {
 			continue
 		}
 		if edit.TestIndex < 0 {
@@ -307,11 +322,12 @@ func addOneAssertion(
 	source string,
 	expectation TestExpectation,
 	destination string,
+	attrs map[string]any,
 ) (int, string, *PatchOperation) {
 	target := -1
 	for testIndex := range policy.Tests {
 		test := policy.Tests[testIndex]
-		if !editableTestMatches(test, source) {
+		if !editableTestMatches(test, source, attrs) {
 			continue
 		}
 		if target < 0 {
@@ -328,6 +344,9 @@ func addOneAssertion(
 
 	if target < 0 {
 		test := tailscale.ACLTest{Source: source}
+		if attrs != nil {
+			test.SrcPostureAttrs = attrs
+		}
 		if expectation == TestDeny {
 			test.Deny = []string{destination}
 		} else {
@@ -360,13 +379,11 @@ func addOneAssertion(
 	return target, assertionID(target, expectation, len(values)-1), &operation
 }
 
-func editableTestMatches(test tailscale.ACLTest, source string) bool {
-	// Length, not presence: EvaluateTests refuses an entry only when it carries
-	// at least one posture attribute, so an entry spelling an empty
-	// srcPostureAttrs object still runs and must stay editable. Gating on
-	// presence would leave its assertions unremovable while the runner reports
-	// them, and would fork a duplicate entry on the next add.
-	if len(test.SrcPostureAttrs) != 0 {
+// editableTestMatches reports whether test is the entry an edit naming source
+// and attrs targets. Source matching is unchanged; the attribute rule is
+// postureAttrsMatch's.
+func editableTestMatches(test tailscale.ACLTest, source string, attrs map[string]any) bool {
+	if !postureAttrsMatch(test.SrcPostureAttrs, attrs) {
 		return false
 	}
 	normalized := test.Source
@@ -374,6 +391,22 @@ func editableTestMatches(test tailscale.ACLTest, source string) bool {
 		normalized = test.User
 	}
 	return strings.TrimSpace(normalized) == source
+}
+
+// postureAttrsMatch identifies an entry's attribute set against the set an
+// edit carries. A posture test is identified by its source AND its
+// attributes: a requested set (non-nil, as the --src-posture-attr flags
+// build it) matches only an entry whose srcPostureAttrs is present and
+// deep-equal after typing, so the same source with a different country is a
+// different entry. A flag-less edit (requested nil) matches an entry with no
+// srcPostureAttrs key or an empty one — the length-based editability the
+// runner has always had, which keeps an empty-{} entry's assertions
+// removable and its entries mergeable rather than forked.
+func postureAttrsMatch(existing map[string]any, requested map[string]any) bool {
+	if requested == nil {
+		return len(existing) == 0
+	}
+	return existing != nil && reflect.DeepEqual(existing, requested)
 }
 
 func assertionValues(test tailscale.ACLTest, expectation TestExpectation) (string, []string) {

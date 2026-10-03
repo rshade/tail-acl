@@ -663,13 +663,16 @@ func newTestCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 
 func newTestAddCommand(deps *commandDeps) *cobra.Command {
 	var source string
-	var deny, accept stringListFlag
+	var deny, accept, postureAttrFlags stringListFlag
 	cmd := &cobra.Command{
 		Use:   subAdd,
 		Short: "Add deny or accept policy test assertions without evaluating them",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			out, err := runTestAdd(deps.opts.file, source, []string(deny), []string(accept))
+			out, err := runTestAdd(
+				deps.opts.file, source, []string(deny), []string(accept),
+				[]string(postureAttrFlags), deps.stderr,
+			)
 			*deps.result = out
 			return err
 		},
@@ -677,18 +680,23 @@ func newTestAddCommand(deps *commandDeps) *cobra.Command {
 	cmd.Flags().StringVar(&source, "src", "", "assertion source")
 	cmd.Flags().Var(&deny, "deny", "denied destination in DST:PORT form; may be repeated")
 	cmd.Flags().Var(&accept, "accept", "accepted destination in DST:PORT form; may be repeated")
+	cmd.Flags().Var(&postureAttrFlags, "src-posture-attr",
+		"posture attribute KEY=VALUE for the test entry; may be repeated. Typed like check's --posture-attr")
 	return cmd
 }
 
 func newTestRemoveCommand(deps *commandDeps) *cobra.Command {
 	var source string
-	var deny, accept stringListFlag
+	var deny, accept, postureAttrFlags stringListFlag
 	cmd := &cobra.Command{
 		Use:   subRemove,
 		Short: "Remove deny or accept policy test assertions; may renumber later assertion IDs",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			out, err := runTestRemove(deps.opts.file, source, []string(deny), []string(accept))
+			out, err := runTestRemove(
+				deps.opts.file, source, []string(deny), []string(accept),
+				[]string(postureAttrFlags), deps.stderr,
+			)
 			*deps.result = out
 			return err
 		},
@@ -696,12 +704,16 @@ func newTestRemoveCommand(deps *commandDeps) *cobra.Command {
 	cmd.Flags().StringVar(&source, "src", "", "assertion source")
 	cmd.Flags().Var(&deny, "deny", "denied destination in DST:PORT form; may be repeated")
 	cmd.Flags().Var(&accept, "accept", "accepted destination in DST:PORT form; may be repeated")
+	cmd.Flags().Var(&postureAttrFlags, "src-posture-attr",
+		"target only the entry whose srcPostureAttrs matches exactly; may be repeated")
 	return cmd
 }
 
 func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	var source, destination, protocol string
 	var port int
+	var postureAttrFlags stringListFlag
+	var postureAttrsComplete bool
 	cmd := &cobra.Command{
 		Use:   cmdCheck,
 		Short: "Answer one reachability question locally",
@@ -713,7 +725,13 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := runCheck(ctx, *deps.opts, src, target, proto, deps.logger())
+			postureAttrs, err := aclpolicy.ParsePostureAttrs([]string(postureAttrFlags))
+			if err != nil {
+				return usageError{err}
+			}
+			out, err := runCheck(
+				ctx, *deps.opts, src, target, proto, postureAttrs, postureAttrsComplete, deps.logger(),
+			)
 			*deps.result = out
 			return err
 		},
@@ -723,6 +741,11 @@ func newCheckCommand(ctx context.Context, deps *commandDeps) *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", -1, "destination port (alternative to including it in --dst)")
 	cmd.Flags().StringVar(&protocol, "proto", string(aclpolicy.ProtocolAny),
 		"IP protocol to ask about: tcp|udp|sctp|any")
+	cmd.Flags().Var(&postureAttrFlags, "posture-attr",
+		"posture attribute KEY=VALUE; may be repeated. Values are typed: true/false are booleans, "+
+			"JSON numbers are numbers, 'quoted' and \"quoted\" are strings, anything else is a bare string")
+	cmd.Flags().BoolVar(&postureAttrsComplete, "posture-attrs-complete", false,
+		"assert the --posture-attr set is complete: attributes it omits are unset")
 	return cmd
 }
 

@@ -1,0 +1,41 @@
+// Mixed posture and non-posture tests in one file: the plain test must report
+// its verdict alongside the posture test's — a posture test no longer hides
+// the other tests in the file. Grant 0 is posture-gated on every port; grant 1
+// is a plain tcp:22 grant. The posture test's KP device fails the geo gate
+// (deny bbb:443 passes) while the plain grant still accepts bbb:22.
+{
+    "groups": {
+        "group:aaa": ["alice@example.com"],
+    },
+    "hosts": {
+        "bbb": "100.64.0.10",
+    },
+    "postures": {
+        "posture:geo-open": ["ip:country NOT IN ['KP', 'IR']"],
+    },
+    "grants": [
+        {
+            "src":        ["group:aaa"],
+            "dst":        ["bbb"],
+            "ip":         ["*"],
+            "srcPosture": ["posture:geo-open"],
+        },
+        {
+            "src": ["group:aaa"],
+            "dst": ["bbb"],
+            "ip":  ["tcp:22"],
+        },
+    ],
+    "tests": [
+        {
+            "src":    "alice@example.com",
+            "accept": ["bbb:22"],
+        },
+        {
+            "src":             "alice@example.com",
+            "srcPostureAttrs": {"ip:country": "KP"},
+            "accept":          ["bbb:22"],
+            "deny":            ["bbb:443"],
+        },
+    ],
+}

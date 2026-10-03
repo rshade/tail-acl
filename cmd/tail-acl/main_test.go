@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -994,6 +995,309 @@ func TestPostureSetWarnsOnStaleVocabulary(t *testing.T) {
 				t.Errorf("Postures[posture:bogus] = %#v, want the warned-about expression written", got)
 			}
 		})
+	}
+}
+
+// postureAddSeedPolicy is the reference policy's grants and postures with an
+// empty tests list, so a test add builds the entry from scratch.
+const postureAddSeedPolicy = `{
+	"groups": {"group:aaa": ["alice@example.com"]},
+	"hosts": {"bbb": "100.64.0.10", "nyc-svc": "100.64.0.20"},
+	"postures": {
+		"posture:steering-not-set": [
+			"custom:subnet_router NOT SET",
+			"ip:country NOT IN ['KP', 'IR']",
+		],
+		"posture:steering-not-set-geo-unset": [
+			"custom:subnet_router NOT SET",
+			"ip:country NOT SET",
+		],
+	},
+	"grants": [
+		{
+			"src": ["group:aaa"], "dst": ["bbb"], "ip": ["*"],
+			"srcPosture": ["posture:steering-not-set", "posture:steering-not-set-geo-unset"],
+		},
+	],
+	"tests": [],
+}
+`
+
+// postureAddKPArgs is the write-up's acceptance command (after --file PATH).
+var postureAddKPArgs = []string{ //nolint:gochecknoglobals // a fixed command fixture shared by two tests; test files forbid package-level mutation, and this slice is only read.
+	"test",
+	"add",
+	"--src",
+	"alice@example.com",
+	"--src-posture-attr",
+	"node:os=linux",
+	"--src-posture-attr",
+	"ip:country=KP",
+	"--deny",
+	"bbb:443",
+	"--deny",
+	"nyc-svc:443",
+}
+
+// The write-up acceptance: the flags build the reference policy's tests[2]
+// entry (same source, same attributes, same denies), and a re-run reports
+// no_changes.
+func TestTestAddWithPostureAttrsBuildsReferenceEntry(t *testing.T) {
+	t.Parallel()
+	referencePath := filepath.Join(
+		"..", "..", "internal", "aclpolicy", "testdata", "posture_eval_policy.hujson")
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, postureAddSeedPolicy)
+
+	if err := run(
+		context.Background(),
+		append([]string{"--file", path}, postureAddKPArgs...),
+		func(string) string { return "" },
+		http.DefaultClient, "", io.Discard, io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	reference, err := aclpolicy.Load(referencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(built.Tests) != 1 {
+		t.Fatalf("tests = %#v, want the one built entry", built.Tests)
+	}
+	want := reference.Tests[2]
+	got := built.Tests[0]
+	if got.Source != want.Source ||
+		!reflect.DeepEqual(got.SrcPostureAttrs, want.SrcPostureAttrs) ||
+		!slices.Equal(got.Deny, want.Deny) {
+		t.Errorf("built entry = %#v, want it to match the reference tests[2] %#v", got, want)
+	}
+
+	// Re-running the same command reports no_changes.
+	var stdout strings.Builder
+	if err = run(
+		context.Background(),
+		append([]string{"--file", path, "-format", "json"}, postureAddKPArgs...),
+		func(string) string { return "" },
+		http.DefaultClient, "", &stdout, io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if status := decodeStatus(t, stdout.String()); status != statusNoChanges {
+		t.Errorf("re-run status = %q, want %q", status, statusNoChanges)
+	}
+}
+
+// The same source with a different country forks a second entry rather than
+// merging.
+func TestTestAddWithDifferentPostureAttrsForks(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, postureAddSeedPolicy)
+	for _, args := range [][]string{
+		postureAddKPArgs,
+		{
+			"test", "add", "--src", "alice@example.com",
+			"--src-posture-attr", "node:os=linux",
+			"--src-posture-attr", "ip:country=IR",
+			"--deny", "bbb:443", "--deny", "nyc-svc:443",
+		},
+	} {
+		if err := run(
+			context.Background(),
+			append([]string{"--file", path}, args...),
+			func(string) string { return "" },
+			http.DefaultClient, "", io.Discard, io.Discard,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	built, err := aclpolicy.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(built.Tests) != 2 {
+		t.Fatalf("tests = %#v, want two entries (the IR add must fork, not merge)", built.Tests)
+	}
+	if !reflect.DeepEqual(
+		built.Tests[1].SrcPostureAttrs, map[string]any{"node:os": "linux", "ip:country": "IR"}) {
+		t.Errorf("forked entry attrs = %#v", built.Tests[1].SrcPostureAttrs)
+	}
+}
+
+// TestTestRemoveWithPostureAttrs pins exact-match removal: only the entry
+// whose attribute map matches is touched, and a removal naming attrs no
+// entry carries changes nothing.
+func TestTestRemoveWithPostureAttrs(t *testing.T) {
+	t.Parallel()
+	const seed = `{
+	"tests": [
+		{
+			"src": "alice@example.com",
+			"srcPostureAttrs": {"node:os": "linux", "ip:country": "KP"},
+			"deny": ["bbb:443"],
+		},
+		{
+			"src": "alice@example.com",
+			"srcPostureAttrs": {"node:os": "linux", "ip:country": "IR"},
+			"deny": ["bbb:443"],
+		},
+	],
+}
+`
+	t.Run("exact match removes only the targeted entry", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.hujson")
+		writeTestPolicy(t, path, seed)
+		if err := run(
+			context.Background(),
+			[]string{
+				"--file", path, "test", "remove", "--src", "alice@example.com",
+				"--src-posture-attr", "node:os=linux", "--src-posture-attr", "ip:country=KP",
+				"--deny", "bbb:443",
+			},
+			func(string) string { return "" },
+			http.DefaultClient, "", io.Discard, io.Discard,
+		); err != nil {
+			t.Fatal(err)
+		}
+		built, err := aclpolicy.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(built.Tests) != 1 ||
+			!reflect.DeepEqual(built.Tests[0].SrcPostureAttrs, map[string]any{
+				"node:os": "linux", "ip:country": "IR",
+			}) {
+			t.Errorf("tests = %#v, want only the IR entry left", built.Tests)
+		}
+	})
+
+	t.Run("no exact match reports no_changes", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "acl.hujson")
+		writeTestPolicy(t, path, seed)
+		var stdout strings.Builder
+		if err := run(
+			context.Background(),
+			[]string{
+				"--file", path, "-format", "json", "test", "remove", "--src", "alice@example.com",
+				"--src-posture-attr", "node:os=linux", "--src-posture-attr", "ip:country=RU",
+				"--deny", "bbb:443",
+			},
+			func(string) string { return "" },
+			http.DefaultClient, "", &stdout, io.Discard,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if status := decodeStatus(t, stdout.String()); status != statusNoChanges {
+			t.Errorf("status = %q, want %q", status, statusNoChanges)
+		}
+	})
+}
+
+// TestTestAddPostureAttrWarnings pins the key check: unknown node:/ip: keys
+// and namespace-less keys warn on stderr and the edit proceeds; a custom:
+// key, misspelled or not, never warns.
+func TestTestAddPostureAttrWarnings(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		attr        string
+		warningHas  []string
+		warningFree bool
+	}{
+		{
+			name:       "unknown node attribute warns",
+			attr:       "node:bogusattr=x",
+			warningHas: []string{"warning", `attribute "node:bogusattr" does not exist`},
+		},
+		{
+			name:       "namespace-less key warns",
+			attr:       "foo=bar",
+			warningHas: []string{"warning", `unsupported attribute "foo"`},
+		},
+		{
+			name:        "a misspelled custom key never warns",
+			attr:        "custom:totallyMadeUp=x",
+			warningFree: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			assertPostureAttrWarning(t, testCase.attr, testCase.warningHas, testCase.warningFree)
+		})
+	}
+}
+
+func assertPostureAttrWarning(t *testing.T, attr string, warningHas []string, warningFree bool) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"tests": []}`)
+	var stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{
+			"--file", path, "test", "add", "--src", "alice@example.com",
+			"--src-posture-attr", attr, "--deny", "bbb:443",
+		},
+		func(string) string { return "" },
+		http.DefaultClient, "", io.Discard, &stderr,
+	)
+	if err != nil {
+		t.Fatalf("run: %v (stderr %q)", err, stderr.String())
+	}
+	for _, fragment := range warningHas {
+		if !strings.Contains(stderr.String(), fragment) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), fragment)
+		}
+	}
+	if warningFree && stderr.String() != "" {
+		t.Errorf("stderr = %q, want no warning for a custom: key", stderr.String())
+	}
+	built, loadErr := aclpolicy.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(built.Tests) != 1 {
+		t.Errorf("tests = %#v, want the warned-about attribute written", built.Tests)
+	}
+}
+
+// TestTestAddRejectsDuplicatePostureAttr pins that repeating a key is a
+// usage error rather than a silent override.
+func TestTestAddRejectsDuplicatePostureAttr(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{"tests": []}`)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := run(
+		context.Background(),
+		[]string{
+			"--file", path, "test", "add", "--src", "alice@example.com",
+			"--src-posture-attr", "ip:country=KP", "--src-posture-attr", "ip:country=IR",
+			"--deny", "bbb:443",
+		},
+		func(string) string { return "" },
+		http.DefaultClient, "", io.Discard, io.Discard,
+	)
+	if code := exitCode(runErr); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, runErr)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("policy changed on a rejected edit:\nbefore: %s\nafter: %s", before, after)
 	}
 }
 
@@ -2217,6 +2521,59 @@ func TestCheckIndeterminateIsExitTen(t *testing.T) {
 			}
 			if !strings.Contains(stdout.String(), "grant 0") {
 				t.Errorf("stdout = %q, want it to name the gating grant", stdout.String())
+			}
+		})
+	}
+}
+
+// TestCheckPostureAttrEvaluation pins the posture-attribute probes against
+// the reference policy (internal/aclpolicy/testdata/posture_eval_policy.hujson,
+// whose verdicts were server-confirmed on 2026-10-02). With a complete
+// attribute set the KP device's reachability of bbb:443 is decidably denied;
+// without --posture-attrs-complete the omitted custom:subnet_router is
+// unknown rather than unset, so the answer stays indeterminate.
+func TestCheckPostureAttrEvaluation(t *testing.T) {
+	t.Parallel()
+	policyPath := filepath.Join(
+		"..", "..", "internal", "aclpolicy", "testdata", "posture_eval_policy.hujson")
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{
+			name: "complete attribute set denies the KP device",
+			args: []string{
+				"--posture-attr", "ip:country=KP", "--posture-attrs-complete",
+			},
+			want: exitFailed,
+		},
+		{
+			name: "without the completeness flag the omitted attribute is indeterminate",
+			args: []string{"--posture-attr", "ip:country=KP"},
+			want: exitIndeterminate,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout strings.Builder
+			args := append([]string{
+				"--file", policyPath, cmdCheck,
+				"--src", "alice@example.com", "--dst", "bbb:443",
+			}, testCase.args...)
+			err := run(
+				context.Background(),
+				args,
+				func(string) string { return "" },
+				nil,
+				"",
+				&stdout,
+				io.Discard,
+			)
+			if code := exitCode(err); code != testCase.want {
+				t.Fatalf("exit code = %d, want %d (error %v, stdout %q)",
+					code, testCase.want, err, stdout.String())
 			}
 		})
 	}
