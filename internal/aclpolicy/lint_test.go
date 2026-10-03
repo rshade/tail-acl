@@ -870,27 +870,35 @@ func TestLintSeverityHelpers(t *testing.T) {
 	}
 }
 
-// TestEvaluateLintDoesNotFlagSrcPostureOrPostures is a scope-boundary guard: a
-// grant's srcPosture naming an undeclared posture, and a postures entry
-// referenced by no grant, must produce zero lint findings. Dangling/unused
-// posture validation is issue #17's job, not this issue's — see the plan's
-// Risks section. This must fail loudly if a future change wires
-// postures/srcPosture into undefinedReferenceReason or the unused-definition
-// checks prematurely.
-func TestEvaluateLintDoesNotFlagSrcPostureOrPostures(t *testing.T) {
+// TestEvaluateLintPostureReferences pins the posture half of
+// undefined-reference: a srcPosture or defaultSrcPosture entry naming a
+// posture the policy does not define is a dangling reference like any other,
+// and the finding names the position it came from. Names resolve with
+// NormalizePostureName, so a bare name lint accepts is the name posture set
+// writes.
+func TestEvaluateLintPostureReferences(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{
 		TagOwners: map[string][]string{"tag:web": {"group:dev"}},
 		Groups:    map[string][]string{"group:dev": {"alice@example.com"}},
 		Postures: map[string][]string{
-			"posture:unused": {"custom:unused == true"},
+			"posture:defined": {"custom:defined == true"},
 		},
+		DefaultSourcePosture: []string{"posture:missing-default"},
 		Grants: []tailscale.Grant{
 			{
 				Source:      []string{"group:dev"},
 				Destination: []string{"tag:web"},
 				IP:          []string{"tcp:443"},
-				SrcPosture:  []string{"posture:undeclared"},
+				SrcPosture:  []string{"posture:missing-grant", "posture:defined"},
+			},
+		},
+		ACLs: []tailscale.ACLEntry{
+			{
+				Action:        "accept",
+				Source:        []string{"alice@example.com"},
+				Destination:   []string{"tag:web:443"},
+				SourcePosture: []string{"posture:missing-acl"},
 			},
 		},
 	}
@@ -898,8 +906,74 @@ func TestEvaluateLintDoesNotFlagSrcPostureOrPostures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Summary.Total != 0 {
-		t.Errorf("findings = %#v, want none (srcPosture/postures are out of lint's scope)", report.Findings)
+	findings := findingsByID(report, aclpolicy.LintUndefinedReference)
+	if len(findings) != 3 {
+		t.Fatalf("undefined-reference findings = %#v, want one per missing posture", findings)
+	}
+	wantRules := map[string]string{
+		"grants[0].srcPosture[0]": "posture:missing-grant",
+		"acls[0].srcPosture[0]":   "posture:missing-acl",
+		"defaultSrcPosture[0]":    "posture:missing-default",
+	}
+	for _, finding := range findings {
+		want, ok := wantRules[finding.Rule]
+		if !ok {
+			t.Errorf("unexpected finding at %s", finding.Rule)
+			continue
+		}
+		if finding.Value != want {
+			t.Errorf("finding at %s has Value %q, want %q", finding.Rule, finding.Value, want)
+		}
+		if finding.Severity != aclpolicy.LintError {
+			t.Errorf("finding at %s has Severity %q, want error", finding.Rule, finding.Severity)
+		}
+		delete(wantRules, finding.Rule)
+	}
+	if len(wantRules) != 0 {
+		t.Errorf("missing findings for %v", wantRules)
+	}
+	if countByID(report, aclpolicy.LintUnusedPosture) != 0 {
+		t.Errorf("unused-posture findings = %#v, want none: posture:defined is referenced by the grant",
+			findingsByID(report, aclpolicy.LintUnusedPosture))
+	}
+}
+
+// TestEvaluateLintUnusedPosture pins the unused-posture rule, including the
+// defaultSrcPosture exemption: a posture referenced only by the tailnet-wide
+// default is used, or a policy gating everything through the default would
+// flag every posture it uses.
+func TestEvaluateLintUnusedPosture(t *testing.T) {
+	t.Parallel()
+	policy := &tailscale.ACL{
+		TagOwners: map[string][]string{"tag:web": {"alice@example.com"}},
+		Postures: map[string][]string{
+			"posture:unused":           {"custom:unused == true"},
+			"posture:defaulted":        {"custom:defaulted == true"},
+			"posture:grant-referenced": {"custom:used == true"},
+		},
+		DefaultSourcePosture: []string{"posture:defaulted"},
+		Grants: []tailscale.Grant{
+			{
+				Source:      []string{"alice@example.com"},
+				Destination: []string{"tag:web"},
+				IP:          []string{"tcp:443"},
+				SrcPosture:  []string{"posture:grant-referenced"},
+			},
+		},
+	}
+	report, err := aclpolicy.EvaluateLint(policy, aclpolicy.LintOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := findingsByID(report, aclpolicy.LintUnusedPosture)
+	if len(findings) != 1 {
+		t.Fatalf("unused-posture findings = %#v, want only posture:unused", findings)
+	}
+	if findings[0].Value != "posture:unused" {
+		t.Errorf("unused-posture Value = %q, want posture:unused", findings[0].Value)
+	}
+	if findings[0].Severity != aclpolicy.LintInfo {
+		t.Errorf("unused-posture Severity = %q, want info", findings[0].Severity)
 	}
 }
 

@@ -605,9 +605,8 @@ subcommand itself establishes the postures namespace, so a bare name is
 unambiguous; `--src-posture` is a *reference* sitting alongside other
 fully-qualified selector flags (`--src`, `--dst`), where the prefix carries
 meaning and silently inventing one would hide a typo. Authoring does not validate
-that a referenced posture is actually defined — and neither does `lint`, which
-has no posture handling at all. A typo'd `posture:` name passes authoring and
-passes `lint`; server-side `validate` is what catches it.
+that a referenced posture is actually defined — that dangling-reference check is
+`tail-acl lint`'s job (the `undefined-reference` rule), not authoring's.
 
 `test` is a pure evaluator over the candidate file's network-level grants and
 legacy ACLs. Each top-level `tests` `accept` or `deny` destination becomes one
@@ -824,7 +823,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 
 | Finding | Severity | Fires when |
 | --- | --- | --- |
-| `undefined-reference` | error | a `src`/`dst`, `ssh[].recorder`, `sshTests[].src`/`dst`, or `autoApprovers.services` entry names an undefined selector, or a route/exit-node auto-approver is unsupported or names an undefined `group:`/`tag:` |
+| `undefined-reference` | error | a `src`/`dst`, `ssh[].recorder`, `sshTests[].src`/`dst`, or `autoApprovers.services` entry names an undefined selector, a route/exit-node auto-approver is unsupported or names an undefined `group:`/`tag:`, or a `srcPosture`/`defaultSrcPosture` entry names an undefined posture |
 | `dst-tag-no-owner` | error | a destination `tag:` has no `tagOwners` entry, so no node can carry it |
 | `overbroad-wildcard` | warn | an over-broad `*` (see `-wildcard`) |
 | `broad-rule-untested` | advice | a blanket source reaches a concrete destination on every port, with no posture/via gate and no deny assertion naming that destination |
@@ -832,6 +831,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `ipset-mixed-operations` | error | an ipset carries a `remove` operation beside a member with no `add`/`remove` operation, which the control plane rejects |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule, approver, or ipset member |
+| `unused-posture` | info | a posture is defined but no `srcPosture` or `defaultSrcPosture` references it |
 | `svc-in-source` | warn | a `svc:` service selector is used as a rule source; Tailscale services are destination-only |
 | `svc-in-ssh` | error | a `svc:` service selector is used as an SSH destination or recorder, where a node selector is required |
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |

@@ -297,6 +297,11 @@
       "severity": "info"
     },
     {
+      "description": "a posture is defined but no srcPosture or defaultSrcPosture references it",
+      "id": "unused-posture",
+      "severity": "info"
+    },
+    {
       "description": "a svc: service selector used as a rule source; Tailscale services are destination-only",
       "id": "svc-in-source",
       "severity": "warn"

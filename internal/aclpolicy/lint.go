@@ -45,6 +45,7 @@ const (
 	LintUnusedGroup           = "unused-group"
 	LintUnusedHost            = "unused-host"
 	LintUnusedIPSet           = "unused-ipset"
+	LintUnusedPosture         = "unused-posture"
 	LintServiceInSource       = "svc-in-source"
 	LintServiceInSSH          = "svc-in-ssh"
 	LintServiceUnknown        = "svc-unknown"
@@ -88,10 +89,11 @@ const rankUnknown = -1
 // Locator field names, kept as constants (with the leading dot) so the "acls[i]"
 // and "grants[i]" locators share one spelling.
 const (
-	fieldSrc   = ".src"
-	fieldUsers = ".users"
-	fieldDst   = ".dst"
-	fieldPorts = ".ports"
+	fieldSrc        = ".src"
+	fieldUsers      = ".users"
+	fieldDst        = ".dst"
+	fieldPorts      = ".ports"
+	fieldSrcPosture = ".srcPosture"
 )
 
 func lintSeverityRank(s LintSeverity) int {
@@ -259,6 +261,7 @@ func LintCatalog() []LintCheck {
 		{LintUnusedGroup, LintInfo, "a group is defined but referenced by no rule"},
 		{LintUnusedHost, LintInfo, "a host alias is defined but referenced by no rule"},
 		{LintUnusedIPSet, LintInfo, "an ipset is defined but referenced by no rule"},
+		{LintUnusedPosture, LintInfo, "a posture is defined but no srcPosture or defaultSrcPosture references it"},
 		{
 			LintServiceInSource,
 			LintWarn,
@@ -289,8 +292,8 @@ func LintCatalog() []LintCheck {
 
 // EvaluateLint statically checks a policy for hygiene problems derivable from
 // the policy alone — no control-plane access. It reports dead grants, undefined
-// tag/group/host/ipset references, destination tags with no owner, over-broad
-// wildcards, duplicate grants, and definitions referenced by nothing.
+// tag/group/host/ipset/posture references, destination tags with no owner,
+// over-broad wildcards, duplicate grants, and definitions referenced by nothing.
 //
 // It is deliberately node-blind: whether a definition is used by a real device
 // is a control-plane coverage question that belongs to tailnet-audit, not here.
@@ -486,6 +489,8 @@ func evaluateLint(
 	findings = append(findings, linter.lintGrants(wildcard)...)
 	findings = append(findings, lintBroadRuleUntested(policy, opts.AllowBroadDestinations)...)
 	findings = append(findings, linter.lintACLs(wildcard)...)
+	findings = append(findings,
+		linter.postureReferenceFindings("defaultSrcPosture", policy.DefaultSourcePosture)...)
 	linter.countTestServiceReferences(policy.Tests)
 	findings = append(findings, linter.lintSSHRules(sshRules)...)
 	findings = append(findings, linter.lintSSHTests(sshTests)...)
@@ -592,6 +597,7 @@ func (l *refLinter) lintGrants(wildcard WildcardPolicy) []LintFinding {
 			locator, grant.Source, grant.Destination, wildcard)...)
 		findings = append(findings, l.sourceReferenceFindings(locator+fieldSrc, grant.Source)...)
 		findings = append(findings, l.nodeDestinationReferenceFindings(locator+fieldDst, grant.Destination)...)
+		findings = append(findings, l.postureReferenceFindings(locator+fieldSrcPosture, grant.SrcPosture)...)
 	}
 	return findings
 }
@@ -613,6 +619,7 @@ func (l *refLinter) lintACLs(wildcard WildcardPolicy) []LintFinding {
 			locator, sources, destinationHosts(destinations), wildcard)...)
 		findings = append(findings, l.sourceReferenceFindings(locator+sourceField, sources)...)
 		findings = append(findings, l.destinationReferenceFindings(locator+destinationField, destinations)...)
+		findings = append(findings, l.postureReferenceFindings(locator+fieldSrcPosture, entry.SourcePosture)...)
 	}
 	return findings
 }
@@ -956,6 +963,31 @@ func (l *refLinter) destinationReferenceFinding(
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
 	return LintFinding{}, false
+}
+
+// postureReferenceFindings validates srcPosture and defaultSrcPosture entries
+// against the policy's postures map. Names resolve with NormalizePostureName,
+// the function posture set and posture remove already share, so lint and
+// authoring agree on what a name refers to.
+func (l *refLinter) postureReferenceFindings(locator string, postures []string) []LintFinding {
+	findings := make([]LintFinding, 0)
+	for index, name := range postures {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		normalized, err := NormalizePostureName(name)
+		if err != nil {
+			findings = append(findings, undefinedReferenceFinding(rule, name, err.Error()))
+			continue
+		}
+		if _, ok := l.policy.Postures[normalized]; !ok {
+			findings = append(findings,
+				undefinedReferenceFinding(rule, normalized, "is not defined in postures"))
+		}
+	}
+	return findings
 }
 
 func serviceInSourceFinding(rule, selector string) LintFinding {
@@ -1305,6 +1337,26 @@ func lintUnusedDefinitions(
 			add(LintUnusedIPSet, "ipset", ipset, "ipsets")
 		}
 	}
+	for posture := range policy.Postures {
+		if referenced[posture] {
+			continue
+		}
+		findings = append(findings, LintFinding{
+			ID:       LintUnusedPosture,
+			Severity: LintInfo,
+			Rule:     fmt.Sprintf("postures[%s]", posture),
+			Value:    posture,
+			Evidence: fmt.Sprintf(
+				"posture %s is defined but no srcPosture or defaultSrcPosture references it",
+				posture,
+			),
+			Remediation: "reference " + posture + ", or remove the definition",
+			Trace: []string{
+				fmt.Sprintf("posture %s is defined in postures", posture),
+				"no srcPosture or defaultSrcPosture references " + posture,
+			},
+		})
+	}
 	return findings
 }
 
@@ -1318,6 +1370,7 @@ func collectReferences(
 	sshTests []SSHTest,
 ) map[string]bool {
 	referenced := make(map[string]bool)
+	addPostureReferences(referenced, policy)
 	for _, grant := range policy.Grants {
 		addReferences(referenced, grant.Source)
 		addReferences(referenced, grant.Destination)
@@ -1366,6 +1419,31 @@ func collectReferences(
 	addSSHRuleReferences(referenced, sshRules)
 	addSSHTestReferences(referenced, sshTests)
 	return referenced
+}
+
+// addPostureReferences marks every posture a rule's srcPosture or the
+// tailnet-wide default names as used. Names normalize the way lint's
+// reference walk resolves them, so both walks agree on what a reference
+// points at.
+func addPostureReferences(referenced map[string]bool, policy *tailscale.ACL) {
+	add := func(name string) {
+		if normalized, err := NormalizePostureName(strings.TrimSpace(name)); err == nil {
+			referenced[normalized] = true
+		}
+	}
+	for _, grant := range policy.Grants {
+		for _, posture := range grant.SrcPosture {
+			add(posture)
+		}
+	}
+	for _, entry := range policy.ACLs {
+		for _, posture := range entry.SourcePosture {
+			add(posture)
+		}
+	}
+	for _, posture := range policy.DefaultSourcePosture {
+		add(posture)
+	}
 }
 
 // addIPSetMemberReferences counts the ipset: and host: references an ipset
