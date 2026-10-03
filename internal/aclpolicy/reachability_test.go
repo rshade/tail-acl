@@ -230,6 +230,78 @@ func TestUnevaluatableGateIsIndeterminate(t *testing.T) {
 	}
 }
 
+// defaultSrcPosture gates every rule that does not set its own srcPosture,
+// and the evidence says where the gate came from, since the rule itself
+// carries no posture field a reader could find. A rule with its own
+// srcPosture replaces the default rather than adding to it.
+func TestDefaultSrcPostureGatesRulesWithoutTheirOwn(t *testing.T) {
+	t.Parallel()
+	defaultPolicy := func() *tailscale.ACL {
+		return &tailscale.ACL{
+			DefaultSourcePosture: []string{"posture:linux"},
+			Grants: []tailscale.Grant{{
+				Source:      []string{"alice@example.com"},
+				Destination: []string{"tag:web"},
+				IP:          []string{"tcp:443"},
+			}},
+		}
+	}
+
+	t.Run("grant gated by the default names its origin", func(t *testing.T) {
+		t.Parallel()
+		got := evaluate(t, defaultPolicy(), "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+		if !strings.Contains(got.Evidence, "uses unsupported srcPosture (from defaultSrcPosture)") {
+			t.Errorf("Evidence = %q, want the default-origin gate text", got.Evidence)
+		}
+	})
+
+	t.Run("own srcPosture replaces the default", func(t *testing.T) {
+		t.Parallel()
+		policy := defaultPolicy()
+		policy.Grants[0].SrcPosture = []string{"posture:own"}
+		got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if !strings.Contains(got.Evidence, "uses unsupported srcPosture") {
+			t.Errorf("Evidence = %q, want the posture gate", got.Evidence)
+		}
+		if strings.Contains(got.Evidence, "from defaultSrcPosture") {
+			t.Errorf("Evidence = %q, want no default origin for a rule's own posture", got.Evidence)
+		}
+	})
+
+	t.Run("acl entry gated by the default names its origin", func(t *testing.T) {
+		t.Parallel()
+		policy := aclEntryPolicy(tailscale.ACLEntry{
+			Action:      "accept",
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web:443"},
+		})
+		policy.DefaultSourcePosture = []string{"posture:linux"}
+		got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessIndeterminate {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessIndeterminate)
+		}
+		if !strings.Contains(got.Evidence, "uses unsupported srcPosture (from defaultSrcPosture)") {
+			t.Errorf("Evidence = %q, want the default-origin gate text", got.Evidence)
+		}
+	})
+
+	t.Run("no default keeps the definite verdict", func(t *testing.T) {
+		t.Parallel()
+		policy := grantPolicy(tailscale.Grant{
+			Source:      []string{"alice@example.com"},
+			Destination: []string{"tag:web"},
+			IP:          []string{"tcp:443"},
+		})
+		got := evaluate(t, policy, "alice@example.com", "tag:web:443", aclpolicy.ReachabilityOptions{})
+		if got.Access != aclpolicy.AccessAllow {
+			t.Errorf("Access = %q, want %q", got.Access, aclpolicy.AccessAllow)
+		}
+	})
+}
+
 // A protocol-qualified query must distinguish udp:5432 from tcp:5432. The
 // default, ProtocolAny, keeps the protocol-agnostic behaviour that native
 // policy tests rely on.

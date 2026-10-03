@@ -1,0 +1,58 @@
+{
+  "assertions": [
+    {
+      "id": "tests[0].accept[0]",
+      "status": "indeterminate",
+      "test_index": 0,
+      "expectation": "accept",
+      "source": "alice@example.com",
+      "destination": "web:443",
+      "expected": "accept",
+      "actual": "indeterminate",
+      "evidence": "grant 0 uses unsupported srcPosture (from defaultSrcPosture)",
+      "trace": [
+        "grant 0: could not evaluate: uses unsupported srcPosture (from defaultSrcPosture)",
+        "grant 1: source did not match",
+        "acl 0: source did not match"
+      ]
+    },
+    {
+      "id": "tests[1].accept[0]",
+      "status": "indeterminate",
+      "test_index": 1,
+      "expectation": "accept",
+      "source": "bob@example.com",
+      "destination": "web:443",
+      "expected": "accept",
+      "actual": "indeterminate",
+      "evidence": "grant 1 uses unsupported srcPosture",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: could not evaluate: uses unsupported srcPosture",
+        "acl 0: source did not match"
+      ]
+    },
+    {
+      "id": "tests[2].deny[0]",
+      "status": "indeterminate",
+      "test_index": 2,
+      "expectation": "deny",
+      "source": "carol@example.com",
+      "destination": "web:443",
+      "expected": "deny",
+      "actual": "indeterminate",
+      "evidence": "acl 0 uses unsupported srcPosture (from defaultSrcPosture)",
+      "trace": [
+        "grant 0: source did not match",
+        "grant 1: source did not match",
+        "acl 0: could not evaluate: uses unsupported srcPosture (from defaultSrcPosture)"
+      ]
+    }
+  ],
+  "summary": {
+    "total": 3,
+    "passed": 0,
+    "failed": 0,
+    "indeterminate": 3
+  }
+}

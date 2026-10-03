@@ -428,6 +428,45 @@ func TestEvaluateUnprovenDenyGolden(t *testing.T) {
 	}
 }
 
+// defaultSrcPosture gates every rule without its own srcPosture. The fixture
+// pairs a default-gated grant, a grant with its own posture (which replaces
+// the default), and a default-gated legacy ACL entry; every assertion is
+// indeterminate, and the default-gated ones say so. The policy file's header
+// comment records the server verdicts these local verdicts must never
+// contradict.
+func TestEvaluateDefaultPostureGolden(t *testing.T) {
+	t.Parallel()
+	policy, err := aclpolicy.Load(filepath.Join("testdata", "default_posture_policy.hujson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := aclpolicy.EvaluateTests(&policy.ACL, aclpolicy.TestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGolden(t, "default_posture_report.golden.json", report)
+
+	if len(report.Assertions) != 3 {
+		t.Fatalf("assertions = %d, want 3", len(report.Assertions))
+	}
+	for index, assertion := range report.Assertions {
+		if assertion.Status != aclpolicy.AssertionIndeterminate {
+			t.Errorf("assertions[%d].Status = %q, want %q",
+				index, assertion.Status, aclpolicy.AssertionIndeterminate)
+		}
+	}
+	for _, index := range []int{0, 2} {
+		if !strings.Contains(report.Assertions[index].Evidence, "from defaultSrcPosture") {
+			t.Errorf("assertions[%d].Evidence = %q, want the default-origin gate",
+				index, report.Assertions[index].Evidence)
+		}
+	}
+	if strings.Contains(report.Assertions[1].Evidence, "from defaultSrcPosture") {
+		t.Errorf("assertions[1].Evidence = %q, want no default origin for a rule's own posture",
+			report.Assertions[1].Evidence)
+	}
+}
+
 func TestEvaluateUnprovenDenyStrictRejectsUnknownProtocol(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{Grants: []tailscale.Grant{{

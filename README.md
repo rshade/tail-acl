@@ -629,7 +629,11 @@ single/list/range port expressions. Application-only capabilities do not grant
 network access. Because posture and `via` routing depend on semantics that
 cannot be reproduced safely from the policy alone, a matching rule that uses
 either makes the assertion indeterminate instead of guessing; use `validate`
-for the authoritative control-plane evaluation in that case.
+for the authoritative control-plane evaluation in that case. The posture gate
+applies to a rule's *effective* posture: its own `srcPosture` when it sets one,
+otherwise the policy's `defaultSrcPosture`. A gate inherited from the default
+is reported as `uses unsupported srcPosture (from defaultSrcPosture)`, since
+the rule itself carries no posture field to point at.
 
 Rule *syntax* is scanned once up front, before any assertion runs, so the
 result never depends on which assertion happened to reach which rule. An

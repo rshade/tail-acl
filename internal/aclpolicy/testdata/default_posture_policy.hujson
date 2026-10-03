@@ -1,0 +1,54 @@
+{
+	// Provenance: both rule forms were validated against the control plane
+	// (example.ts.net) on 2026-10-02 with `tail-acl validate`. The grant
+	// form's accept assertion failed server-side (want: Accept, got: Drop); the
+	// acls form's deny assertion held (policy valid). Locally every assertion is
+	// indeterminate until posture expressions evaluate offline
+	// (local-posture-evaluation): the evaluator must never report the accept the
+	// server contradicts.
+	"defaultSrcPosture": ["posture:linux"],
+	"hosts": {
+		"web": "100.64.0.10",
+	},
+	"postures": {
+		"posture:linux": ["node:os == 'linux'"],
+	},
+	"grants": [
+		// No srcPosture of its own: gated by defaultSrcPosture.
+		{
+			"src": ["alice@example.com"],
+			"dst": ["web"],
+			"ip": ["tcp:443"],
+		},
+		// A rule's own srcPosture replaces the default, so this gate carries
+		// no default-origin suffix.
+		{
+			"src": ["bob@example.com"],
+			"dst": ["web"],
+			"ip": ["tcp:443"],
+			"srcPosture": ["posture:linux"],
+		},
+	],
+	"acls": [
+		// The legacy form is gated by the default the same way.
+		{
+			"action": "accept",
+			"src": ["carol@example.com"],
+			"dst": ["web:443"],
+		},
+	],
+	"tests": [
+		{
+			"src": "alice@example.com",
+			"accept": ["web:443"],
+		},
+		{
+			"src": "bob@example.com",
+			"accept": ["web:443"],
+		},
+		{
+			"src": "carol@example.com",
+			"deny": ["web:443"],
+		},
+	],
+}

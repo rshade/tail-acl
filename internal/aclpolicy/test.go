@@ -563,7 +563,7 @@ func grantAllows(
 	gate := firstGate(
 		selectorGate("source", sourceMatched, sourceGate, source),
 		selectorGate("destination", destinationMatched, destinationGate, destination.host),
-		postureGate(grant.SrcPosture),
+		postureGate(policycore.EffectiveSrcPosture(grant.SrcPosture, matcher.Policy.DefaultSourcePosture)),
 		viaGate(grant.Via),
 	)
 	if gate != "" {
@@ -634,7 +634,7 @@ func aclAllows(
 		selectorGate("source", sourceMatched, sourceGate, source),
 		selectorGate("destination", destinationMatched, destinationGate, destination.host),
 		protocolGate,
-		postureGate(entry.SourcePosture),
+		postureGate(policycore.EffectiveSrcPosture(entry.SourcePosture, matcher.Policy.DefaultSourcePosture)),
 		// Legacy ACLEntry has no Via field, so there is no viaGate counterpart
 		// to grantAllows here.
 	)
@@ -705,10 +705,15 @@ func selectorGate(field string, matched bool, selector, query string) string {
 }
 
 // postureGate and viaGate keep the wording of the errors these conditions used
-// to raise, so EvaluateTests still reports them exactly as it always has.
-func postureGate(posture []string) string {
+// to raise, so EvaluateTests still reports them exactly as it always has. A
+// posture gate inherited from defaultSrcPosture says so, since the rule itself
+// carries no srcPosture field a reader could find.
+func postureGate(posture []string, fromDefault bool) string {
 	if len(posture) == 0 {
 		return ""
+	}
+	if fromDefault {
+		return "uses unsupported srcPosture (from defaultSrcPosture)"
 	}
 	return "uses unsupported srcPosture"
 }
