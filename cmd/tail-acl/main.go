@@ -111,30 +111,32 @@ const (
 const (
 	toolName = "tail-acl"
 
-	cmdGrant        = "grant"
-	cmdGroup        = "group"
-	cmdIPSet        = "ipset"
-	cmdSSH          = "ssh"
-	cmdNodeAttr     = "nodeattr"
-	cmdTagOwner     = "tag-owner"
-	cmdHost         = "host"
-	cmdPosture      = "posture"
-	cmdAutoApprover = "auto-approver"
-	cmdInit         = "init"
-	cmdMerge        = "merge"
-	cmdNormalize    = "normalize"
-	cmdValidate     = "validate"
-	cmdTest         = "test"
-	cmdCheck        = "check"
-	cmdLint         = "lint"
-	cmdJQ           = "jq"
-	cmdPull         = "pull"
-	cmdPlan         = "plan"
-	cmdUpload       = "upload"
+	cmdGrant           = "grant"
+	cmdGroup           = "group"
+	cmdIPSet           = "ipset"
+	cmdSSH             = "ssh"
+	cmdNodeAttr        = "nodeattr"
+	cmdTagOwner        = "tag-owner"
+	cmdHost            = "host"
+	cmdPosture         = "posture"
+	cmdAutoApprover    = "auto-approver"
+	cmdExternalTailnet = "external-tailnet"
+	cmdInit            = "init"
+	cmdMerge           = "merge"
+	cmdNormalize       = "normalize"
+	cmdValidate        = "validate"
+	cmdTest            = "test"
+	cmdCheck           = "check"
+	cmdLint            = "lint"
+	cmdJQ              = "jq"
+	cmdPull            = "pull"
+	cmdPlan            = "plan"
+	cmdUpload          = "upload"
 
 	subAdd    = "add"
 	subRemove = "remove"
 	subSet    = "set"
+	subList   = "list"
 
 	formatHuman = "human"
 	formatJSON  = "json"
@@ -143,25 +145,28 @@ const (
 	indeterminateWarn   = "warn"
 	indeterminateIgnore = "ignore"
 
-	commandGrantAdd           = "grant add"
-	commandGrantRemove        = "grant remove"
-	commandGroupAdd           = "group add"
-	commandGroupRemove        = "group remove"
-	commandIPSetAdd           = "ipset add"
-	commandIPSetRemove        = "ipset remove"
-	commandSSHAdd             = "ssh add"
-	commandSSHRemove          = "ssh remove"
-	commandNodeAttrAdd        = "nodeattr add"
-	commandNodeAttrRemove     = "nodeattr remove"
-	commandTagOwnerAdd        = "tag-owner add"
-	commandHostSet            = "host set"
-	commandPostureSet         = "posture set"
-	commandPostureRemove      = "posture remove"
-	commandAutoApproverAdd    = "auto-approver add"
-	commandAutoApproverRemove = "auto-approver remove"
-	commandTestAdd            = "test add"
-	commandTestRemove         = "test remove"
-	nodeAttrsTopLevel         = "nodeAttrs"
+	commandGrantAdd              = "grant add"
+	commandGrantRemove           = "grant remove"
+	commandGroupAdd              = "group add"
+	commandGroupRemove           = "group remove"
+	commandIPSetAdd              = "ipset add"
+	commandIPSetRemove           = "ipset remove"
+	commandSSHAdd                = "ssh add"
+	commandSSHRemove             = "ssh remove"
+	commandNodeAttrAdd           = "nodeattr add"
+	commandNodeAttrRemove        = "nodeattr remove"
+	commandTagOwnerAdd           = "tag-owner add"
+	commandHostSet               = "host set"
+	commandPostureSet            = "posture set"
+	commandPostureRemove         = "posture remove"
+	commandAutoApproverAdd       = "auto-approver add"
+	commandAutoApproverRemove    = "auto-approver remove"
+	commandExternalTailnetAdd    = "external-tailnet add"
+	commandExternalTailnetRemove = "external-tailnet remove"
+	commandExternalTailnetList   = "external-tailnet list"
+	commandTestAdd               = "test add"
+	commandTestRemove            = "test remove"
+	nodeAttrsTopLevel            = "nodeAttrs"
 
 	// lintSummary is shared by commandCatalog and newLintCommand's Short text
 	// so the two descriptions of "lint" cannot drift.
@@ -311,6 +316,10 @@ type result struct {
 	// fail at warn) from an explicit -severity warn (show and fail at warn). It is
 	// presentation state, not part of the versioned JSON envelope.
 	LintSeverityExplicit bool `json:"-"`
+	// EditedAlias is the externalTailnets alias an add or remove named. Only
+	// Message carries it, so it exists for the sanitizer to register; list
+	// reports aliases through ExternalTailnets instead.
+	EditedAlias string `json:"-"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
 	// that matched nothing still emits "results": [], which a consumer can tell
@@ -320,6 +329,10 @@ type result struct {
 	Local      *localTestComponent       `json:"local,omitempty"`
 	Server     *serverTestComponent      `json:"server,omitempty"`
 	Agreement  string                    `json:"agreement,omitempty"`
+	// ExternalTailnets is set only by external-tailnet list. The pointer keeps
+	// an empty section as "external_tailnets": [] and lets every other command
+	// omit the field.
+	ExternalTailnets *[]aclpolicy.ExternalTailnetEntry `json:"external_tailnets,omitempty"`
 }
 
 type localTestComponent struct {
@@ -3558,6 +3571,22 @@ func commandCatalog() []schemaCommand {
 				"left as an empty list",
 			"auto-approver remove (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...]",
 		},
+		{
+			commandExternalTailnetAdd,
+			"Add an externalTailnets alias; repeating the same arguments is a no-op",
+			"external-tailnet add ALIAS --external-id ID [--allow-incoming] " +
+				"[--allow-external-references-to SELECTOR ...] [--comment TEXT]",
+		},
+		{
+			commandExternalTailnetRemove,
+			"Remove an externalTailnets alias; a referenced alias requires --force",
+			"external-tailnet remove ALIAS [--force]",
+		},
+		{
+			commandExternalTailnetList,
+			"List externalTailnets aliases",
+			"external-tailnet list",
+		},
 		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
 		{cmdNormalize, "Emit the policy as standard JSON for general-purpose JSON tools", cmdNormalize},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
@@ -3740,6 +3769,7 @@ Examples:
   tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
   tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng --comment "Lab subnet routers"
   tail-acl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
+  tail-acl --file acl.hujson external-tailnet add partner --external-id tn-123 --allow-incoming
   tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
   tail-acl --file acl.json host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
   tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant

@@ -64,7 +64,47 @@ func sanitizeResultEnvelope(input *result, output *sanitize.Sanitizer) *result {
 		Local:                 sanitizeLocal(input.Local, output),
 		Server:                sanitizeServer(input.Server, output),
 		Agreement:             input.Agreement,
+		ExternalTailnets:      sanitizeExternalTailnets(input.ExternalTailnets, output),
 	}
+}
+
+func registerExternalTailnetIdentities(values *[]aclpolicy.ExternalTailnetEntry, output *sanitize.Sanitizer) {
+	if values == nil {
+		return
+	}
+	for _, entry := range *values {
+		output.Value("alias", entry.Alias)
+		output.Value("tailnet", entry.ExternalID)
+		for _, ref := range entry.AllowExternalReferencesTo {
+			registerSelector(ref, output)
+		}
+	}
+}
+
+func sanitizeExternalTailnets(
+	values *[]aclpolicy.ExternalTailnetEntry,
+	output *sanitize.Sanitizer,
+) *[]aclpolicy.ExternalTailnetEntry {
+	if values == nil {
+		return nil
+	}
+	result := make([]aclpolicy.ExternalTailnetEntry, len(*values))
+	for index, entry := range *values {
+		var refs []string
+		if len(entry.AllowExternalReferencesTo) > 0 {
+			refs = make([]string, len(entry.AllowExternalReferencesTo))
+			for refIndex, ref := range entry.AllowExternalReferencesTo {
+				refs[refIndex] = sanitizeSelector(ref, output)
+			}
+		}
+		result[index] = aclpolicy.ExternalTailnetEntry{
+			Alias:                     output.Value("alias", entry.Alias),
+			ExternalID:                output.Value("tailnet", entry.ExternalID),
+			AllowIncomingConnections:  entry.AllowIncomingConnections,
+			AllowExternalReferencesTo: refs,
+		}
+	}
+	return &result
 }
 
 func registerResultIdentities(input *result, output *sanitize.Sanitizer) {
@@ -88,6 +128,8 @@ func registerResultIdentities(input *result, output *sanitize.Sanitizer) {
 		registerValidationIdentities(input.Server.Validation, output)
 	}
 	registerSkipIdentities(input.Skipped, output)
+	registerExternalTailnetIdentities(input.ExternalTailnets, output)
+	output.Value("alias", input.EditedAlias)
 }
 
 func registerAssertionIdentities(values *[]aclpolicy.AssertionResult, output *sanitize.Sanitizer) {

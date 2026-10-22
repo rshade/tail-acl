@@ -83,8 +83,19 @@ func addSubcommands(ctx context.Context, root *cobra.Command, deps *commandDeps)
 	}
 	autoApprover.AddCommand(newAutoApproverAddCommand(deps), newAutoApproverRemoveCommand(deps))
 
+	externalTailnet := &cobra.Command{
+		Use:   cmdExternalTailnet,
+		Short: "Manage externalTailnets aliases",
+		RunE:  runParentCommand,
+	}
+	externalTailnet.AddCommand(
+		newExternalTailnetAddCommand(deps),
+		newExternalTailnetRemoveCommand(deps),
+		newExternalTailnetListCommand(deps),
+	)
+
 	root.AddCommand(
-		grant, group, ipset, ssh, nodeAttr, tagOwner, host, posture, autoApprover,
+		grant, group, ipset, ssh, nodeAttr, tagOwner, host, posture, autoApprover, externalTailnet,
 		newInitCommand(deps),
 		newMergeCommand(deps),
 		newNormalizeCommand(deps),

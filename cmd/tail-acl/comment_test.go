@@ -89,6 +89,11 @@ func authoringTargets() []commentTarget {
 			[]string{"nodeattr", "add", "--target", "tag:app", "--attr", "funnel"},
 			[]string{"nodeAttrs", "-"},
 		},
+		{
+			commandExternalTailnetAdd,
+			[]string{"external-tailnet", "add", "partner", "--external-id", "tn-123"},
+			[]string{"externalTailnets", "partner"},
+		},
 	}
 }
 

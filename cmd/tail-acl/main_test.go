@@ -3064,6 +3064,7 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	for _, name := range []string{
 		commandGrantAdd, commandGroupAdd, commandIPSetAdd, commandSSHAdd,
 		commandTagOwnerAdd, commandHostSet, commandPostureSet, commandAutoApproverAdd,
+		commandExternalTailnetAdd,
 	} {
 		if !slices.ContainsFunc(doc.Commands, func(command schemaCommand) bool {
 			return command.Name == name && strings.Contains(command.Usage, "[--comment TEXT]")

@@ -33,6 +33,7 @@ func TestSanitizedOutputTypesRequireExplicitFieldDecisions(t *testing.T) {
 		"Allowed", "Source", "Destination", "Port", "Protocol", "Evidence", "Trace", "Assertions",
 		"Skipped", "SSHTestsSkipped", "TestSummary", "Policy", "Findings", "LintSummary",
 		"LintThreshold", "LintSeverityExplicit", "Results", "Validation", "Local", "Server", "Agreement",
+		"ExternalTailnets", "EditedAlias",
 	))
 	assertHandled("AssertionResult", sanitize.UnhandledFields[aclpolicy.AssertionResult](
 		"ID", "Status", "TestIndex", "Expectation", "Source", "Destination", "Expected", "Actual",
@@ -59,6 +60,9 @@ func TestSanitizedOutputTypesRequireExplicitFieldDecisions(t *testing.T) {
 	))
 	assertHandled("serverTestComponent", sanitize.UnhandledFields[serverTestComponent](
 		"Status", "Validation", "Unavailable", "HTTPStatus", "RetryAfter", "Message",
+	))
+	assertHandled("ExternalTailnetEntry", sanitize.UnhandledFields[aclpolicy.ExternalTailnetEntry](
+		"Alias", "ExternalID", "AllowIncomingConnections", "AllowExternalReferencesTo",
 	))
 }
 
@@ -109,6 +113,8 @@ func TestSanitizedRenderedOutputPassesIdentityLeakScan(t *testing.T) {
 		"10.215.0.0/16",
 		"Validator.LeakScan@Example.com",
 		"Skipped.LeakScan.Example",
+		"AliasLeakScanPartner",
+		"tn-LeakScanPartner215",
 	}
 	strictIdentityValues := []string{
 		"sha256-LeakScanPolicyDigest215",
@@ -174,6 +180,13 @@ func TestSanitizedRenderedOutputPassesIdentityLeakScan(t *testing.T) {
 	input.Server = &serverTestComponent{
 		Status: statusFailed, Validation: validation, Message: identityProse,
 	}
+	externalTailnets := []aclpolicy.ExternalTailnetEntry{{
+		Alias:                     "AliasLeakScanPartner",
+		ExternalID:                "tn-LeakScanPartner215",
+		AllowIncomingConnections:  true,
+		AllowExternalReferencesTo: []string{"group:LeakScanEngineering"},
+	}}
+	input.ExternalTailnets = &externalTailnets
 
 	for _, level := range []sanitize.Level{sanitize.Identity, sanitize.Strict} {
 		t.Run(string(level), func(t *testing.T) {

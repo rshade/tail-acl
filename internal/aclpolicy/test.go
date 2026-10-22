@@ -259,7 +259,7 @@ func scanACLRules(entries []tailscale.ACLEntry) []RuleSkip {
 		}
 		field, destinations := policyDestinationField, entry.Destination
 		if len(destinations) == 0 {
-			field, destinations = "ports", entry.Ports
+			field, destinations = policyPortsField, entry.Ports
 		}
 		for destinationIndex, destination := range destinations {
 			reason := scanDestination(destination)

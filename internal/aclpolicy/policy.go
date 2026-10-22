@@ -64,6 +64,8 @@ func WriteRaw(path string, data []byte) error {
 const (
 	policySourceField      = "src"
 	policyDestinationField = "dst"
+	policyUsersField       = "users"
+	policyPortsField       = "ports"
 	// policyAppField is typed under nodeAttrs and opaque under grants, so the
 	// merge normalizer has to tell the two apart by section.
 	policyAppField = "app"

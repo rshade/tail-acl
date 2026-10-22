@@ -221,7 +221,7 @@ func isNodeAttrsSection(section string) bool {
 // are ordinary English words a capability payload may also use.
 func isUnorderedSelectorField(key, section string) bool {
 	switch key {
-	case policySourceField, policyDestinationField, "ip", "users", "srcPosture", "via":
+	case policySourceField, policyDestinationField, "ip", policyUsersField, "srcPosture", "via":
 		return true
 	case "target", nodeAttrAttrKey, nodeAttrIPPoolKey, "connectors", "domains":
 		return isNodeAttrsSection(section)

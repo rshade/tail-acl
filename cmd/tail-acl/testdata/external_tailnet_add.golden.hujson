@@ -1,0 +1,10 @@
+{
+	// keep the grant comment
+	"grants": [],
+	"externalTailnets": {
+		"partner": {
+			"externalID":               "tn-123",
+			"allowIncomingConnections": true,
+		},
+	},
+}

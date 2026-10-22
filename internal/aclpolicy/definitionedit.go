@@ -438,11 +438,11 @@ func DefinitionReferences(policy *Policy, target string) []string {
 	for index, entry := range policy.ACLs {
 		sources, sourceField := entry.Source, policySourceField
 		if len(sources) == 0 {
-			sources, sourceField = entry.Users, "users"
+			sources, sourceField = entry.Users, policyUsersField
 		}
 		destinations, destinationField := entry.Destination, policyDestinationField
 		if len(destinations) == 0 {
-			destinations, destinationField = entry.Ports, "ports"
+			destinations, destinationField = entry.Ports, policyPortsField
 		}
 		add(fmt.Sprintf("acls[%d].%s", index, sourceField), sources, false)
 		add(fmt.Sprintf("acls[%d].%s", index, destinationField), destinations, true)

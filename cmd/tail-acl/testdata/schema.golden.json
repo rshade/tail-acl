@@ -96,6 +96,21 @@
       "usage": "auto-approver remove (--route CIDR | --exit-node) --approver SELECTOR [--approver SELECTOR ...]"
     },
     {
+      "name": "external-tailnet add",
+      "summary": "Add an externalTailnets alias; repeating the same arguments is a no-op",
+      "usage": "external-tailnet add ALIAS --external-id ID [--allow-incoming] [--allow-external-references-to SELECTOR ...] [--comment TEXT]"
+    },
+    {
+      "name": "external-tailnet remove",
+      "summary": "Remove an externalTailnets alias; a referenced alias requires --force",
+      "usage": "external-tailnet remove ALIAS [--force]"
+    },
+    {
+      "name": "external-tailnet list",
+      "summary": "List externalTailnets aliases",
+      "usage": "external-tailnet list"
+    },
+    {
       "name": "merge",
       "summary": "Compile ACL sources in directories into one policy",
       "usage": "merge --dir DIR [--dir DIR ...]"
