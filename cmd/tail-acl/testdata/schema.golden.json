@@ -330,6 +330,11 @@
       "description": "a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
       "id": "scim-group-unsynced",
       "severity": "warn"
+    },
+    {
+      "description": "a group:// or tag:// selector names an alias that externalTailnets does not declare",
+      "id": "external-tailnet-alias-unknown",
+      "severity": "error"
     }
   ],
   "name": "tail-acl",

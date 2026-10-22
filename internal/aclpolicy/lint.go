@@ -13,6 +13,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tailscale-utils/policycore/alpha"
 	"github.com/rshade/tailscale-utils/policycore/posture"
 )
 
@@ -37,24 +38,25 @@ const (
 // Lint finding IDs. Each is a stable, machine-consumable identifier for one
 // class of static policy-hygiene problem.
 const (
-	LintUndefinedReference    = "undefined-reference"
-	LintDstTagNoOwner         = "dst-tag-no-owner"
-	LintOverbroadWildcard     = "overbroad-wildcard"
-	LintBroadRuleUntested     = "broad-rule-untested"
-	LintGrantEmpty            = "grant-empty"
-	LintDuplicateGrant        = "duplicate-grant"
-	LintIPSetMixedOperations  = "ipset-mixed-operations"
-	LintUnusedTag             = "unused-tag"
-	LintUnusedGroup           = "unused-group"
-	LintUnusedHost            = "unused-host"
-	LintUnusedIPSet           = "unused-ipset"
-	LintUnusedPosture         = "unused-posture"
-	LintPostureInvalid        = "posture-invalid"
-	LintServiceInSource       = "svc-in-source"
-	LintServiceInSSH          = "svc-in-ssh"
-	LintServiceUnknown        = "svc-unknown"
-	LintSCIMGroupShadowsLocal = "scim-group-shadows-local"
-	LintSCIMGroupUnknown      = "scim-group-unsynced"
+	LintUndefinedReference          = "undefined-reference"
+	LintDstTagNoOwner               = "dst-tag-no-owner"
+	LintOverbroadWildcard           = "overbroad-wildcard"
+	LintBroadRuleUntested           = "broad-rule-untested"
+	LintGrantEmpty                  = "grant-empty"
+	LintDuplicateGrant              = "duplicate-grant"
+	LintIPSetMixedOperations        = "ipset-mixed-operations"
+	LintUnusedTag                   = "unused-tag"
+	LintUnusedGroup                 = "unused-group"
+	LintUnusedHost                  = "unused-host"
+	LintUnusedIPSet                 = "unused-ipset"
+	LintUnusedPosture               = "unused-posture"
+	LintPostureInvalid              = "posture-invalid"
+	LintServiceInSource             = "svc-in-source"
+	LintServiceInSSH                = "svc-in-ssh"
+	LintServiceUnknown              = "svc-unknown"
+	LintSCIMGroupShadowsLocal       = "scim-group-shadows-local"
+	LintSCIMGroupUnknown            = "scim-group-unsynced"
+	LintExternalTailnetAliasUnknown = "external-tailnet-alias-unknown"
 )
 
 // scimNotSyncingMarker is the stable substring of the control-plane validation
@@ -295,6 +297,11 @@ func LintCatalog() []LintCheck {
 			LintSCIMGroupUnknown,
 			LintWarn,
 			"a group: reference the control plane reports is not syncing from SCIM (requires --online-validation)",
+		},
+		{
+			LintExternalTailnetAliasUnknown,
+			LintError,
+			"a group:// or tag:// selector names an alias that externalTailnets does not declare",
 		},
 	}
 }
@@ -728,6 +735,14 @@ func (l *refLinter) autoApproverReferenceFindings(
 			findings = append(findings, invalidAutoApproverSelectorFinding(rule, approver))
 			continue
 		}
+		// group:// and tag:// match the group: and tag: prefixes above. Stop
+		// here so a declared alias is not an undefined local group.
+		if finding, recognized := l.externalSelectorFinding(rule, approver); recognized {
+			if finding.ID != "" {
+				findings = append(findings, finding)
+			}
+			continue
+		}
 		if reason := l.undefinedReferenceReason(rule, approver); reason != "" {
 			findings = append(findings, undefinedReferenceFinding(rule, approver, reason))
 		}
@@ -879,6 +894,12 @@ func (l *refLinter) sourceReferenceFinding(rule, selector string) (LintFinding, 
 	if l.countServiceReference(selector) {
 		return serviceInSourceFinding(rule, selector), true
 	}
+	if finding, recognized := l.externalSelectorFinding(rule, selector); recognized {
+		if finding.ID == "" {
+			return LintFinding{}, false
+		}
+		return finding, true
+	}
 	if reason := l.undefinedReferenceReason(rule, selector); reason != "" {
 		return undefinedReferenceFinding(rule, selector, reason), true
 	}
@@ -914,11 +935,20 @@ func (l *refLinter) sshNodeReferenceFindings(
 func (l *refLinter) destinationReferenceFindings(locator string, destinations []string) []LintFinding {
 	findings := make([]LintFinding, 0)
 	for index, destination := range destinations {
+		// Recognize group:// and tag:// before destinationHost. That helper
+		// splits on the last colon, and these selectors contain one.
+		selector := strings.TrimSpace(destination)
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		if finding, recognized := l.externalSelectorFinding(rule, selector); recognized {
+			if finding.ID != "" {
+				findings = append(findings, finding)
+			}
+			continue
+		}
 		host := destinationHost(destination)
 		if host == "" || host == "*" {
 			continue
 		}
-		rule := fmt.Sprintf("%s[%d]", locator, index)
 		if finding, ok := l.destinationReferenceFinding(rule, host); ok {
 			findings = append(findings, finding)
 		}
@@ -952,6 +982,14 @@ func (l *refLinter) destinationReferenceFinding(
 	selector string,
 ) (LintFinding, bool) {
 	policy := l.policy
+	// tag:// has the prefix tag:. Classify it before the local tagOwners check
+	// or a cross-tailnet destination is reported as dst-tag-no-owner.
+	if finding, recognized := l.externalSelectorFinding(rule, selector); recognized {
+		if finding.ID == "" {
+			return LintFinding{}, false
+		}
+		return finding, true
+	}
 	if strings.HasPrefix(selector, "tag:") {
 		if _, ok := policy.TagOwners[selector]; !ok {
 			return LintFinding{
@@ -1026,6 +1064,45 @@ func serviceInSSHFinding(rule, selector string) LintFinding {
 		Trace: []string{
 			rule + " references " + selector,
 			"SSH destinations and recorders require node selectors; svc: names a Tailscale Service",
+		},
+	}
+}
+
+// externalSelectorFinding reports whether selector is a cross-tailnet
+// group:// or tag:// form. The bool means "recognized", not "emit".
+// A declared alias yields a zero finding and the caller must stop: the
+// same text also has a local group: or tag: prefix. An unknown alias or a
+// form that does not parse yields external-tailnet-alias-unknown.
+func (l *refLinter) externalSelectorFinding(rule, selector string) (LintFinding, bool) {
+	selector = strings.TrimSpace(selector)
+	if !alpha.LooksLikeExternalSelector(selector) {
+		return LintFinding{}, false
+	}
+	parsed, err := alpha.ParseExternalSelector(selector)
+	if err != nil {
+		return externalTailnetAliasFinding(rule, selector, err.Error()), true
+	}
+	if _, ok := l.policy.ExternalTailnets[parsed.Alias]; ok {
+		return LintFinding{}, true
+	}
+	return externalTailnetAliasFinding(
+		rule,
+		selector,
+		fmt.Sprintf("alias %q is not declared in externalTailnets", parsed.Alias),
+	), true
+}
+
+func externalTailnetAliasFinding(rule, selector, reason string) LintFinding {
+	return LintFinding{
+		ID:          LintExternalTailnetAliasUnknown,
+		Severity:    LintError,
+		Rule:        rule,
+		Value:       selector,
+		Evidence:    selector + " " + reason,
+		Remediation: "declare the alias in externalTailnets, or correct the selector",
+		Trace: []string{
+			rule + " references " + selector,
+			selector + " " + reason,
 		},
 	}
 }
