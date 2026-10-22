@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0 (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **policycore:** `Matcher.Policy` is now `*policycore.Policy`, a container embedding `*tailscale.ACL` alongside the policy fields the pinned SDK does not model. `policycore` is not enrolled in release-please and carries no tag, so no released version is stranded; both in-repo consumers are updated here and leave `HaveExternalTailnets` false until their loaders land.
+
+### Features
+
+* add tail-ipam module and sanitize output levels
+* **policycore:** resolve cross-tailnet selectors
+* **tail-acl:** accept every ipset member form in ipset add
+* **tail-acl:** authenticate with scoped OAuth credentials
+* **tail-acl:** evaluate posture locally in test and check
+* **tail-acl:** lint posture references and unused postures
+* **tail-acl:** nodeattr authoring and reference-walk fix
+* **tail-acl:** validate posture expressions offline
+
+
+### Bug Fixes
+
+* **deps:** update go4.org/netipx digest to 3075585
+* **deps:** update module github.com/jaxxstorm/tscli to v0.10.0
+* **deps:** update module golang.org/x/oauth2 to v0.37.0
+* **deps:** update module golang.org/x/term to v0.46.0
+* **deps:** update module golang.org/x/term to v0.47.0
+* **deps:** update module tailscale.com to v1.102.3
+* **deps:** update module tailscale.com to v1.102.4
+* **deps:** update module tailscale.com to v1.102.5
+* **deps:** update module tailscale.com/client/tailscale/v2 to v2.11.0
+* **policycore:** resolve ipset ops, ranges, and host: refs
+* **tail-acl:** honor defaultSrcPosture in local evaluation
+* **tailnet-audit:** sweep ACL port hosts from sanitized prose
+
 ## 0.2.0 (2026-08-12)
 
 
