@@ -891,6 +891,7 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `svc-unknown` | warn | a `svc:` destination names a service not found in the tailnet (requires `-online-validation`) |
 | `scim-group-shadows-local` | warn | a SCIM-shaped `group:<name>@<domain>` reference has the same name half as a declared local `group:<name>` |
 | `scim-group-unsynced` | warn | a `group:` reference the control plane reports is not syncing from SCIM (requires `-online-validation`) |
+| `autoapprover-route-overlap` | warn | two `autoApprovers.routes` keys mask to the same CIDR or overlap; a pair of 4via6 via prefixes is excluded |
 
 Without `-severity`, `lint` prints every finding in human output and uses `warn`
 as the failure floor: `warn` and `error` make the run fail, while visible `info`

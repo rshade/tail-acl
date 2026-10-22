@@ -58,6 +58,7 @@ const (
 	LintSCIMGroupUnknown                = "scim-group-unsynced"
 	LintExternalTailnetAliasUnknown     = "external-tailnet-alias-unknown"
 	LintExternalTailnetIncomingDisabled = "external-tailnet-incoming-disabled"
+	LintAutoApproverRouteOverlap        = "autoapprover-route-overlap"
 )
 
 // scimNotSyncingMarker is the stable substring of the control-plane validation
@@ -309,6 +310,11 @@ func LintCatalog() []LintCheck {
 			LintWarn,
 			"a grant names a declared external tailnet whose allowIncomingConnections is not true",
 		},
+		{
+			LintAutoApproverRouteOverlap,
+			LintWarn,
+			"two autoApprovers.routes CIDRs mask to the same prefix or overlap; via-prefix pairs are excluded",
+		},
 	}
 }
 
@@ -518,6 +524,7 @@ func evaluateLint(
 	findings = append(findings, linter.lintSSHRules(sshRules)...)
 	findings = append(findings, linter.lintSSHTests(sshTests)...)
 	findings = append(findings, linter.lintAutoApprovers()...)
+	findings = append(findings, lintAutoApproverRouteOverlap(policy)...)
 	findings = append(findings, linter.sideFindings...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {

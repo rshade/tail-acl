@@ -340,6 +340,11 @@
       "description": "a grant names a declared external tailnet whose allowIncomingConnections is not true",
       "id": "external-tailnet-incoming-disabled",
       "severity": "warn"
+    },
+    {
+      "description": "two autoApprovers.routes CIDRs mask to the same prefix or overlap; via-prefix pairs are excluded",
+      "id": "autoapprover-route-overlap",
+      "severity": "warn"
     }
   ],
   "name": "tail-acl",
