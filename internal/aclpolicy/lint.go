@@ -38,25 +38,26 @@ const (
 // Lint finding IDs. Each is a stable, machine-consumable identifier for one
 // class of static policy-hygiene problem.
 const (
-	LintUndefinedReference          = "undefined-reference"
-	LintDstTagNoOwner               = "dst-tag-no-owner"
-	LintOverbroadWildcard           = "overbroad-wildcard"
-	LintBroadRuleUntested           = "broad-rule-untested"
-	LintGrantEmpty                  = "grant-empty"
-	LintDuplicateGrant              = "duplicate-grant"
-	LintIPSetMixedOperations        = "ipset-mixed-operations"
-	LintUnusedTag                   = "unused-tag"
-	LintUnusedGroup                 = "unused-group"
-	LintUnusedHost                  = "unused-host"
-	LintUnusedIPSet                 = "unused-ipset"
-	LintUnusedPosture               = "unused-posture"
-	LintPostureInvalid              = "posture-invalid"
-	LintServiceInSource             = "svc-in-source"
-	LintServiceInSSH                = "svc-in-ssh"
-	LintServiceUnknown              = "svc-unknown"
-	LintSCIMGroupShadowsLocal       = "scim-group-shadows-local"
-	LintSCIMGroupUnknown            = "scim-group-unsynced"
-	LintExternalTailnetAliasUnknown = "external-tailnet-alias-unknown"
+	LintUndefinedReference              = "undefined-reference"
+	LintDstTagNoOwner                   = "dst-tag-no-owner"
+	LintOverbroadWildcard               = "overbroad-wildcard"
+	LintBroadRuleUntested               = "broad-rule-untested"
+	LintGrantEmpty                      = "grant-empty"
+	LintDuplicateGrant                  = "duplicate-grant"
+	LintIPSetMixedOperations            = "ipset-mixed-operations"
+	LintUnusedTag                       = "unused-tag"
+	LintUnusedGroup                     = "unused-group"
+	LintUnusedHost                      = "unused-host"
+	LintUnusedIPSet                     = "unused-ipset"
+	LintUnusedPosture                   = "unused-posture"
+	LintPostureInvalid                  = "posture-invalid"
+	LintServiceInSource                 = "svc-in-source"
+	LintServiceInSSH                    = "svc-in-ssh"
+	LintServiceUnknown                  = "svc-unknown"
+	LintSCIMGroupShadowsLocal           = "scim-group-shadows-local"
+	LintSCIMGroupUnknown                = "scim-group-unsynced"
+	LintExternalTailnetAliasUnknown     = "external-tailnet-alias-unknown"
+	LintExternalTailnetIncomingDisabled = "external-tailnet-incoming-disabled"
 )
 
 // scimNotSyncingMarker is the stable substring of the control-plane validation
@@ -303,6 +304,11 @@ func LintCatalog() []LintCheck {
 			LintError,
 			"a group:// or tag:// selector names an alias that externalTailnets does not declare",
 		},
+		{
+			LintExternalTailnetIncomingDisabled,
+			LintWarn,
+			"a grant names a declared external tailnet whose allowIncomingConnections is not true",
+		},
 	}
 }
 
@@ -503,6 +509,7 @@ func evaluateLint(
 
 	findings := make([]LintFinding, 0)
 	findings = append(findings, linter.lintGrants(wildcard)...)
+	findings = append(findings, lintExternalTailnetIncoming(policy)...)
 	findings = append(findings, lintBroadRuleUntested(policy, opts.AllowBroadDestinations)...)
 	findings = append(findings, linter.lintACLs(wildcard)...)
 	findings = append(findings,
@@ -1090,6 +1097,62 @@ func (l *refLinter) externalSelectorFinding(rule, selector string) (LintFinding,
 		selector,
 		fmt.Sprintf("alias %q is not declared in externalTailnets", parsed.Alias),
 	), true
+}
+
+// lintExternalTailnetIncoming warns when a grant names a declared alias that
+// does not allow incoming connections. Unknown and unparsed selectors are
+// left to external-tailnet-alias-unknown. ACL, SSH, and auto-approver
+// positions are out of scope.
+func lintExternalTailnetIncoming(policy *tailscale.ACL) []LintFinding {
+	if policy == nil {
+		return nil
+	}
+	var findings []LintFinding
+	for index, grant := range policy.Grants {
+		findings = append(findings, incomingDisabledFindings(
+			policy, fmt.Sprintf("grants[%d].src", index), grant.Source,
+		)...)
+		findings = append(findings, incomingDisabledFindings(
+			policy, fmt.Sprintf("grants[%d].dst", index), grant.Destination,
+		)...)
+	}
+	return findings
+}
+
+func incomingDisabledFindings(policy *tailscale.ACL, locator string, selectors []string) []LintFinding {
+	var findings []LintFinding
+	for index, raw := range selectors {
+		selector := strings.TrimSpace(raw)
+		if !alpha.LooksLikeExternalSelector(selector) {
+			continue
+		}
+		parsed, err := alpha.ParseExternalSelector(selector)
+		if err != nil {
+			continue
+		}
+		declaration, ok := policy.ExternalTailnets[parsed.Alias]
+		if !ok || declaration.AllowIncomingConnections {
+			continue
+		}
+		rule := fmt.Sprintf("%s[%d]", locator, index)
+		reason := fmt.Sprintf(
+			"names alias %q, whose externalTailnets entry does not set allowIncomingConnections",
+			parsed.Alias,
+		)
+		findings = append(findings, LintFinding{
+			ID:          LintExternalTailnetIncomingDisabled,
+			Severity:    LintWarn,
+			Rule:        rule,
+			Value:       selector,
+			Evidence:    selector + " " + reason,
+			Remediation: "set externalTailnets." + parsed.Alias + ".allowIncomingConnections to true, or remove the grant selector",
+			Trace: []string{
+				rule + " references " + selector,
+				"externalTailnets[" + parsed.Alias + "].allowIncomingConnections is not true",
+			},
+		})
+	}
+	return findings
 }
 
 func externalTailnetAliasFinding(rule, selector, reason string) LintFinding {

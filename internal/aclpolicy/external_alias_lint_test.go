@@ -39,7 +39,7 @@ func TestLintDeclaredExternalTailnetAliasIsClean(t *testing.T) {
 	t.Parallel()
 	policy := &tailscale.ACL{
 		ExternalTailnets: map[string]tailscale.ExternalTailnet{
-			"partner": {ExternalID: "tn-123"},
+			"partner": {ExternalID: "tn-123", AllowIncomingConnections: true},
 		},
 		Grants: []tailscale.Grant{{
 			Source:      []string{"group://partner/eng"},

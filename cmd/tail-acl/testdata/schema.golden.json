@@ -335,6 +335,11 @@
       "description": "a group:// or tag:// selector names an alias that externalTailnets does not declare",
       "id": "external-tailnet-alias-unknown",
       "severity": "error"
+    },
+    {
+      "description": "a grant names a declared external tailnet whose allowIncomingConnections is not true",
+      "id": "external-tailnet-incoming-disabled",
+      "severity": "warn"
     }
   ],
   "name": "tail-acl",
