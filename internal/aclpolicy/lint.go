@@ -1322,7 +1322,7 @@ func lintUnusedDefinitions(
 			Trace: []string{
 				fmt.Sprintf("%s %s is defined in %s", kind, name, container),
 				"no grant, acl, ssh, group, tagOwner, autoApprovers, nodeAttr (target and app connectors), " +
-					"test, or sshTest references " +
+					"externalTailnets, test, or sshTest references " +
 					name,
 			},
 		})
@@ -1474,7 +1474,18 @@ func collectReferences(
 	addTestReferences(referenced, policy.Tests)
 	addSSHRuleReferences(referenced, sshRules)
 	addSSHTestReferences(referenced, sshTests)
+	addExternalTailnetReferences(referenced, policy.ExternalTailnets)
 	return referenced
+}
+
+// addExternalTailnetReferences counts selectors an external tailnet is
+// allowed to name. A group or tag that appears only in
+// allowExternalReferencesTo is in use: omitting it is the path that reports
+// the definition unused and then lets group remove delete it without --force.
+func addExternalTailnetReferences(referenced map[string]bool, tailnets map[string]tailscale.ExternalTailnet) {
+	for _, declaration := range tailnets {
+		addReferences(referenced, declaration.AllowExternalReferencesTo)
+	}
 }
 
 // addPostureReferences marks every posture a rule's srcPosture or the

@@ -3,6 +3,7 @@ package aclpolicy
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -489,6 +490,12 @@ func DefinitionReferences(policy *Policy, target string) []string {
 	for index, test := range policy.SSHTests {
 		addScalar(fmt.Sprintf("sshTests[%d].%s", index, policySourceField), test.Source, false)
 		add(fmt.Sprintf("sshTests[%d].%s", index, policyDestinationField), test.Destination, false)
+	}
+	// Same field collectReferences reads. A definition named only here is in
+	// use, so removal without --force must refuse it.
+	for _, alias := range slices.Sorted(maps.Keys(policy.ExternalTailnets)) {
+		add(fmt.Sprintf("externalTailnets[%s].allowExternalReferencesTo", alias),
+			policy.ExternalTailnets[alias].AllowExternalReferencesTo, false)
 	}
 
 	sort.Strings(references)
