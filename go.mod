@@ -15,7 +15,7 @@ require (
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	tailscale.com v1.104.2
-	tailscale.com/client/tailscale/v2 v2.11.0
+	tailscale.com/client/tailscale/v2 v2.12.0
 )
 
 require (
