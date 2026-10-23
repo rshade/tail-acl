@@ -1,0 +1,9 @@
+{
+	"groups": {"group:eng": ["alice@example.com"]},
+	"autoApprovers": {
+		"routes": {
+			"fd7a:115c:a1e0:b1a:0:2a:a00:0/120": ["group:eng"],
+			"fd7a:115c:a1e0:b1a:0:2a:a01:0/120": ["group:eng"],
+		},
+	},
+}

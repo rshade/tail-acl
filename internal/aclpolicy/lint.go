@@ -59,6 +59,7 @@ const (
 	LintExternalTailnetAliasUnknown     = "external-tailnet-alias-unknown"
 	LintExternalTailnetIncomingDisabled = "external-tailnet-incoming-disabled"
 	LintAutoApproverRouteOverlap        = "autoapprover-route-overlap"
+	LintAutoApproverSiteIDCollision     = "autoapprover-siteid-collision"
 )
 
 // scimNotSyncingMarker is the stable substring of the control-plane validation
@@ -315,6 +316,11 @@ func LintCatalog() []LintCheck {
 			LintWarn,
 			"two autoApprovers.routes CIDRs mask to the same prefix or overlap; via-prefix pairs are excluded",
 		},
+		{
+			LintAutoApproverSiteIDCollision,
+			LintAdvice,
+			"via-prefix autoApprovers.routes entries share a site ID across different subnets; confirm they are the same site",
+		},
 	}
 }
 
@@ -525,6 +531,7 @@ func evaluateLint(
 	findings = append(findings, linter.lintSSHTests(sshTests)...)
 	findings = append(findings, linter.lintAutoApprovers()...)
 	findings = append(findings, lintAutoApproverRouteOverlap(policy)...)
+	findings = append(findings, lintAutoApproverSiteIDCollision(policy)...)
 	findings = append(findings, linter.sideFindings...)
 	duplicates, err := lintDuplicateGrants(policy)
 	if err != nil {

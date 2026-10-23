@@ -360,6 +360,11 @@
       "description": "two autoApprovers.routes CIDRs mask to the same prefix or overlap; via-prefix pairs are excluded",
       "id": "autoapprover-route-overlap",
       "severity": "warn"
+    },
+    {
+      "description": "via-prefix autoApprovers.routes entries share a site ID across different subnets; confirm they are the same site",
+      "id": "autoapprover-siteid-collision",
+      "severity": "advice"
     }
   ],
   "name": "tail-acl",
