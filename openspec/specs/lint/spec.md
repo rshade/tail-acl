@@ -108,3 +108,292 @@ The lint capability's unused-definition checks SHALL treat an `ipset:` or
 - **WHEN** `ipset:base` is referenced only as `add ipset:base` inside an
   ipset that a grant names
 - **THEN** lint reports no `unused-ipset` finding for `ipset:base`
+
+### Requirement: Posture expressions are validated statically
+
+The lint capability SHALL run every expression of every `postures` entry
+through the shared `policycore/posture` validator and SHALL report a
+`posture-invalid` finding per diagnostic. An unparseable expression and an
+`ip:country` value outside the recorded vocabulary SHALL be error findings,
+because the control plane rejects the policy over both; an unknown `node:`
+or `ip:` attribute SHALL be a warn finding, because the known-attribute
+table is editorial and can lag the server. The finding SHALL name the
+posture, the expression, and the reason, located as
+`postures[posture:name][index]`.
+
+#### Scenario: An out-of-vocabulary country is an error
+
+- **WHEN** `postures` defines `posture:geo` with the expression
+  `ip:country NOT IN ['AB', 'CD']`
+- **THEN** lint reports a `posture-invalid` error at
+  `postures[posture:geo][0]` naming `posture:geo`, the expression, and
+  `unexpected value "AB"`
+
+#### Scenario: An unparseable expression is an error
+
+- **WHEN** `postures` defines a posture with the expression `this is not an
+  expression`
+- **THEN** lint reports a `posture-invalid` error naming the expression and
+  the valid operator list
+
+#### Scenario: An unknown attribute only warns
+
+- **WHEN** `postures` defines a posture with the expression
+  `node:bogusattr == 'x'`
+- **THEN** lint reports a `posture-invalid` warn naming the attribute,
+  because the known-attribute table is editorial and goes stale
+
+### Requirement: External tailnet allow-lists count as uses
+
+The lint capability's unused-definition checks SHALL treat every selector in
+`externalTailnets[<alias>].allowExternalReferencesTo` as a reference to that
+definition. A group or tag named only there SHALL NOT be reported unused.
+The unused-definition decision trace SHALL name `externalTailnets` among the
+fields that were searched.
+
+#### Scenario: A group exposed only to an external tailnet is used
+
+- **WHEN** `group:eng` is defined and the only reference to it is
+  `externalTailnets.partner.allowExternalReferencesTo`
+- **THEN** lint reports no `unused-group` finding for `group:eng`
+
+#### Scenario: The unused-definition trace names externalTailnets
+
+- **WHEN** lint reports an unused definition
+- **THEN** that finding's decision trace says the search included
+  `externalTailnets`
+
+### Requirement: Overlapping auto-approver routes warn
+
+Lint SHALL report one `autoapprover-route-overlap` warning for each pair of
+`autoApprovers.routes` keys that, after `NormalizeAutoApproverRoute`, name
+the same CIDR or name two CIDRs whose ranges overlap. The finding SHALL
+name both keys. A key that is not a CIDR SHALL be ignored by this check.
+The check SHALL NOT call the control plane.
+
+#### Scenario: Two spellings of one CIDR warn
+
+- **WHEN** the routes are `10.0.0.1/8` and `10.0.0.0/8`
+- **THEN** lint reports one `autoapprover-route-overlap` warning naming
+  both keys
+
+#### Scenario: Two overlapping CIDRs warn
+
+- **WHEN** the routes are `10.0.0.0/24` and `10.0.0.128/25`
+- **THEN** lint reports one `autoapprover-route-overlap` warning naming
+  both keys
+
+#### Scenario: Disjoint routes are clean
+
+- **WHEN** the routes are `10.0.0.0/24` and `10.1.0.0/24`
+- **THEN** lint reports no `autoapprover-route-overlap` finding
+
+### Requirement: Via-prefix pairs are excluded
+
+Lint SHALL NOT report `autoapprover-route-overlap` for a pair of keys that
+both parse as 4via6 via prefixes.
+
+#### Scenario: Two via prefixes do not use this finding
+
+- **WHEN** both route keys are via prefixes, even if their ranges overlap
+- **THEN** lint reports no `autoapprover-route-overlap` finding
+
+#### Scenario: A via prefix beside an IPv4 route is not this finding
+
+- **WHEN** one key is a via prefix and the other is `10.0.0.0/8`
+- **THEN** lint reports no `autoapprover-route-overlap` finding
+
+### Requirement: Shared via site IDs are advice
+
+Lint SHALL report one `autoapprover-siteid-collision` advice finding when
+two or more `autoApprovers.routes` via prefixes share a site ID and their
+embedded IPv4 prefixes differ. The finding SHALL name each of those routes
+and SHALL ask the reader to confirm they are the same site. It SHALL NOT
+call the control plane, and it SHALL NOT use warn or error severity.
+
+#### Scenario: One site ID covers two subnets
+
+- **WHEN** two via prefixes share a site ID and decode to different IPv4
+  prefixes
+- **THEN** lint reports one advice finding that names both routes and asks
+  to confirm they are the same site
+
+#### Scenario: Different site IDs are quiet
+
+- **WHEN** two via prefixes have different site IDs
+- **THEN** lint reports no `autoapprover-siteid-collision` finding
+
+#### Scenario: Ordinary routes are quiet
+
+- **WHEN** the route keys are ordinary IPv4 CIDRs
+- **THEN** lint reports no `autoapprover-siteid-collision` finding
+
+### Requirement: Unknown external tailnet aliases are errors
+
+The lint capability SHALL report `external-tailnet-alias-unknown` at
+`error` severity when a source or destination selector uses
+`group://<alias>/<name>` or `tag://<alias>/<name>` and `<alias>` is not a
+key of `externalTailnets`. The finding SHALL name the selector position.
+A declared alias SHALL NOT produce that finding and SHALL NOT be reported
+as an undefined local group or an unowned destination tag. A selector
+that uses that syntax but does not parse SHALL produce the same finding.
+
+#### Scenario: An unknown alias on a grant source is reported
+
+- **WHEN** a grant source is `group://unknown-alias/eng` and
+  `externalTailnets` has no `unknown-alias` key
+- **THEN** lint reports one `external-tailnet-alias-unknown` error at
+  `grants[0].src[0]`
+
+#### Scenario: A declared alias is clean
+
+- **WHEN** a grant source is `group://partner/eng` and `externalTailnets`
+  declares `partner`
+- **THEN** lint reports no `external-tailnet-alias-unknown` finding and no
+  `undefined-reference` finding for that selector
+
+#### Scenario: An auto-approver with a declared alias is not an undefined group
+
+- **WHEN** `autoApprovers.exitNode` contains `group://partner/eng` and
+  `externalTailnets` declares `partner`
+- **THEN** lint reports no `undefined-reference` finding for that approver
+
+#### Scenario: A cross-tailnet tag is not an unowned local tag
+
+- **WHEN** a grant destination is `tag://unknown/device` and
+  `externalTailnets` has no `unknown` key
+- **THEN** lint reports `external-tailnet-alias-unknown` for that
+  destination and does not report `dst-tag-no-owner`
+
+### Requirement: Grants against a closed external tailnet warn
+
+The lint capability SHALL report `external-tailnet-incoming-disabled` at
+`warn` severity when a grant source or destination uses
+`group://<alias>/<name>` or `tag://<alias>/<name>`, `<alias>` is declared
+in `externalTailnets`, and `allowIncomingConnections` is not true. The
+finding SHALL name the grant position and SHALL explain that the grant
+and the alias flag must both be set. An alias that is not declared SHALL
+NOT produce this finding.
+
+#### Scenario: An omitted flag warns
+
+- **WHEN** a grant source is `group://partner/eng` and `externalTailnets`
+  declares `partner` without `allowIncomingConnections`
+- **THEN** lint reports one `external-tailnet-incoming-disabled` warning
+  at `grants[0].src[0]`
+
+#### Scenario: An enabled flag is clean
+
+- **WHEN** the same grant names an alias with
+  `allowIncomingConnections` true
+- **THEN** lint reports no `external-tailnet-incoming-disabled` finding
+
+#### Scenario: An unknown alias is not also this warning
+
+- **WHEN** a grant source is `group://missing/eng` and `externalTailnets`
+  has no `missing` key
+- **THEN** lint reports no `external-tailnet-incoming-disabled` finding
+
+### Requirement: Invalid ipset members are errors
+
+Lint SHALL report one `ipset-member-invalid` error when an ipset member
+does not parse. The finding SHALL name the set and the member. It SHALL
+NOT call the control plane.
+
+#### Scenario: A bare name is not a member
+
+- **WHEN** an ipset member is `gw` and a host named `gw` exists
+- **THEN** lint reports one `ipset-member-invalid` error naming that set
+  and `gw`
+
+### Requirement: Missing ipset references are errors
+
+Lint SHALL report one `ipset-reference-undefined` error when a parsed
+`host:` or `ipset:` member names a definition that is absent.
+
+#### Scenario: A missing host alias
+
+- **WHEN** a member is `host:missing` and hosts has no `missing` entry
+- **THEN** lint reports one `ipset-reference-undefined` error naming the
+  member
+
+#### Scenario: A missing ipset
+
+- **WHEN** a member is `ipset:nope` and ipsets has no `ipset:nope` entry
+- **THEN** lint reports one `ipset-reference-undefined` error naming the
+  member
+
+### Requirement: Ipset cycles are one error
+
+Lint SHALL report one `ipset-reference-cycle` error when ipset references
+form a cycle, and SHALL name the path. It SHALL use the existing reference
+walk.
+
+#### Scenario: Two sets refer to each other
+
+- **WHEN** `ipset:p` contains `ipset:q` and `ipset:q` contains `ipset:p`
+- **THEN** lint reports one `ipset-reference-cycle` error naming both sets
+
+### Requirement: Host values must be addresses
+
+Lint SHALL report one `host-not-address` error when a hosts value is
+neither an address nor a prefix.
+
+#### Scenario: A host value is a tag
+
+- **WHEN** host `gw` is `tag:web`
+- **THEN** lint reports one `host-not-address` error naming `gw` and
+  `tag:web`
+
+### Requirement: Valid ipsets stay quiet
+
+Lint SHALL NOT report these four findings for members that parse and
+resolve, including an address, a prefix, a defined `host:` alias, and an
+`ipset:` reference that does not cycle. `ipset-mixed-operations` SHALL
+still report a remove beside a member with no operation.
+
+#### Scenario: A resolved set is quiet
+
+- **WHEN** every ipset member parses and every reference exists
+- **THEN** lint reports none of the four new findings
+
+### Requirement: Posture references resolve against the postures map
+
+The lint capability SHALL report an `undefined-reference` error when a
+`srcPosture` entry in a grant or ACL entry, or a `defaultSrcPosture` entry,
+names a posture absent from the policy's `postures` map. Reference names
+SHALL be resolved with the same normalization the authoring commands use,
+so a name `posture set` accepts is the name lint resolves.
+
+#### Scenario: A grant's srcPosture names an undefined posture
+
+- **WHEN** a grant carries `srcPosture: ["posture:missing"]` and `postures`
+  defines no such posture
+- **THEN** lint reports one `undefined-reference` error naming the grant's
+  srcPosture position and `posture:missing`
+
+#### Scenario: A defaultSrcPosture entry names an undefined posture
+
+- **WHEN** the policy sets `defaultSrcPosture: ["posture:missing"]` and
+  `postures` defines no such posture
+- **THEN** lint reports one `undefined-reference` error naming the
+  defaultSrcPosture position
+
+### Requirement: Unused posture definitions are reported
+
+The lint capability SHALL report an `unused-posture` info finding when a
+posture is defined in `postures` but no `srcPosture` or
+`defaultSrcPosture` references it. A reference from `defaultSrcPosture`
+SHALL count as a use.
+
+#### Scenario: An unreferenced posture is reported
+
+- **WHEN** `postures` defines `posture:unused` and no `srcPosture` or
+  `defaultSrcPosture` names it
+- **THEN** lint reports one `unused-posture` info finding naming it
+
+#### Scenario: A default-referenced posture is used
+
+- **WHEN** `postures` defines `posture:linux` and only `defaultSrcPosture`
+  references it
+- **THEN** lint reports no `unused-posture` finding for it
