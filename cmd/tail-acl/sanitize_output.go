@@ -129,7 +129,20 @@ func registerResultIdentities(input *result, output *sanitize.Sanitizer) {
 	}
 	registerSkipIdentities(input.Skipped, output)
 	registerExternalTailnetIdentities(input.ExternalTailnets, output)
-	output.Value("alias", input.EditedAlias)
+	registerEdited(input.Edited, output)
+}
+
+func registerEdited(values []editedValue, output *sanitize.Sanitizer) {
+	for _, edited := range values {
+		switch edited.How {
+		case editedAsHostname:
+			output.Value("hostname", edited.Value)
+		case editedAsAlias:
+			output.Value("alias", edited.Value)
+		case editedAsSelector:
+			registerSelector(edited.Value, output)
+		}
+	}
 }
 
 func registerAssertionIdentities(values *[]aclpolicy.AssertionResult, output *sanitize.Sanitizer) {

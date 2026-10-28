@@ -33,7 +33,7 @@ func TestSanitizedOutputTypesRequireExplicitFieldDecisions(t *testing.T) {
 		"Allowed", "Source", "Destination", "Port", "Protocol", "Evidence", "Trace", "Assertions",
 		"Skipped", "SSHTestsSkipped", "TestSummary", "Policy", "Findings", "LintSummary",
 		"LintThreshold", "LintSeverityExplicit", "Results", "Validation", "Local", "Server", "Agreement",
-		"ExternalTailnets", "EditedAlias",
+		"ExternalTailnets", "Edited",
 	))
 	assertHandled("AssertionResult", sanitize.UnhandledFields[aclpolicy.AssertionResult](
 		"ID", "Status", "TestIndex", "Expectation", "Source", "Destination", "Expected", "Actual",

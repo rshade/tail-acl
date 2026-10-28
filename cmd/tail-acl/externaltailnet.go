@@ -123,7 +123,7 @@ func runExternalTailnetAdd(
 	}
 	res := newResult(commandExternalTailnetAdd, status, message)
 	res.File = path
-	res.EditedAlias = edit.Alias
+	res.Edited = []editedValue{editedAlias(edit.Alias)}
 	return res, nil
 }
 
@@ -153,7 +153,7 @@ func runExternalTailnetRemove(path string, args []string, force bool) (*result, 
 	}
 	res := newResult(commandExternalTailnetRemove, status, message)
 	res.File = path
-	res.EditedAlias = edit.Alias
+	res.Edited = []editedValue{editedAlias(edit.Alias)}
 	return res, nil
 }
 

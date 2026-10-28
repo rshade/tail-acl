@@ -238,6 +238,39 @@ func (o *indeterminateOption) String() string {
 // argument placeholder.
 func (o *indeterminateOption) Type() string { return "fail|warn|ignore" }
 
+// editedHow selects how one value embedded in Message is registered.
+type editedHow int
+
+const (
+	// editedAsSelector classifies the value the same way a grant selector is
+	// classified: logins, hostnames, addresses, and CIDRs at identity;
+	// group, tag, ipset, and posture names only at strict.
+	editedAsSelector editedHow = iota
+	// editedAsHostname always registers a host alias as a hostname, including
+	// a name that would otherwise parse as an address or a host:port.
+	editedAsHostname
+	// editedAsAlias registers an externalTailnets alias.
+	editedAsAlias
+)
+
+// editedValue is one identity a mutation put into Message.
+type editedValue struct {
+	Value string
+	How   editedHow
+}
+
+func editedSelector(value string) editedValue {
+	return editedValue{Value: value, How: editedAsSelector}
+}
+
+func editedHostname(value string) editedValue {
+	return editedValue{Value: value, How: editedAsHostname}
+}
+
+func editedAlias(value string) editedValue {
+	return editedValue{Value: value, How: editedAsAlias}
+}
+
 // result is the versioned envelope every command returns. Human rendering emits
 // Message (and Diff, when present); JSON rendering emits the whole struct.
 type result struct {
@@ -316,10 +349,10 @@ type result struct {
 	// fail at warn) from an explicit -severity warn (show and fail at warn). It is
 	// presentation state, not part of the versioned JSON envelope.
 	LintSeverityExplicit bool `json:"-"`
-	// EditedAlias is the externalTailnets alias an add or remove named. Only
-	// Message carries it, so it exists for the sanitizer to register; list
-	// reports aliases through ExternalTailnets instead.
-	EditedAlias string `json:"-"`
+	// Edited lists identities embedded in Message so the sanitizer can register
+	// them before rewriting prose. It is not part of the versioned JSON envelope.
+	// external-tailnet list reports aliases through ExternalTailnets instead.
+	Edited []editedValue `json:"-"`
 	// Results carries jq's output values, and only jq sets it. The pointer is
 	// the same absent-versus-empty split as Assertions and Findings: a query
 	// that matched nothing still emits "results": [], which a consumer can tell
@@ -1219,6 +1252,7 @@ func finishDefinitionAdd(
 	}
 	res := newResult(command, status, message)
 	res.File = path
+	res.Edited = []editedValue{editedSelector(edit.Name)}
 	return res, nil
 }
 
@@ -1252,6 +1286,7 @@ func runDefinitionRemove(
 	}
 	res := newResult(command, status, message)
 	res.File = path
+	res.Edited = []editedValue{editedSelector(canonical)}
 	return res, nil
 }
 
@@ -1498,6 +1533,7 @@ func runTagOwnerAdd(path string, args []string, comment string, commentSet, over
 	}
 	res := newResult(commandTagOwnerAdd, statusOK, fmt.Sprintf("added owner %s to %s in %s", owner, tag, path))
 	res.File = path
+	res.Edited = []editedValue{editedSelector(owner), editedSelector(tag)}
 	return res, nil
 }
 
@@ -1519,6 +1555,7 @@ func commentExistingOwner(path, comment string, overwrite bool, tag, owner strin
 			fmt.Sprintf("added comment to owner %s of %s in %s", owner, tag, path))
 	}
 	res.File = path
+	res.Edited = []editedValue{editedSelector(owner), editedSelector(tag)}
 	return res, nil
 }
 
@@ -1563,6 +1600,7 @@ func runHostSet(path string, args []string, comment string, commentSet, overwrit
 		res = newResult(commandHostSet, statusOK, fmt.Sprintf("set host %s to %s in %s", name, address, path))
 	}
 	res.File = path
+	res.Edited = []editedValue{editedHostname(name), editedSelector(address)}
 	return res, nil
 }
 
@@ -1620,6 +1658,7 @@ func runPostureSet(
 		res = newResult(commandPostureSet, statusOK, fmt.Sprintf("set posture %s in %s", canonical, path))
 	}
 	res.File = path
+	res.Edited = []editedValue{editedSelector(canonical)}
 	return res, nil
 }
 
@@ -1668,6 +1707,7 @@ func runPostureRemove(path string, args []string) (*result, error) {
 		res := newResult(commandPostureRemove, statusNoChanges,
 			fmt.Sprintf("posture %s not present in %s", canonical, path))
 		res.File = path
+		res.Edited = []editedValue{editedSelector(canonical)}
 		return res, nil
 	}
 	// Remove the member, never the whole "postures" key — see runGrantRemove.
@@ -1677,6 +1717,7 @@ func runPostureRemove(path string, args []string) (*result, error) {
 	res := newResult(commandPostureRemove, statusOK,
 		fmt.Sprintf("removed posture %s from %s", canonical, path))
 	res.File = path
+	res.Edited = []editedValue{editedSelector(canonical)}
 	return res, nil
 }
 
@@ -1706,6 +1747,15 @@ func autoApproverTargetName(route string) string {
 		return "exitNode"
 	}
 	return "route " + route
+}
+
+// editedRoute registers the CIDR a route message names. An exit-node edit has
+// no CIDR in its message, so it records nothing.
+func editedRoute(route string) []editedValue {
+	if route == "" {
+		return nil
+	}
+	return []editedValue{editedSelector(route)}
 }
 
 // runAutoApproverAdd implements "auto-approver add". The approver list merges
@@ -1771,6 +1821,7 @@ func runAutoApproverAdd(
 		res = newResult(commandAutoApproverAdd, statusOK, message)
 	}
 	res.File = path
+	res.Edited = editedRoute(edit.Route)
 	return res, nil
 }
 
@@ -1809,6 +1860,7 @@ func runAutoApproverRemove(path, route string, exitNode bool, approvers []string
 			fmt.Sprintf("removed approvers from %s in %s", name, path))
 	}
 	res.File = path
+	res.Edited = editedRoute(edit.Route)
 	return res, nil
 }
 
