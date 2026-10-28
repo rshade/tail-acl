@@ -292,6 +292,26 @@
       "severity": "error"
     },
     {
+      "description": "an ipset member is not an address, CIDR, range, host: alias, or ipset: reference",
+      "id": "ipset-member-invalid",
+      "severity": "error"
+    },
+    {
+      "description": "an ipset member names a host alias or ipset that is not defined",
+      "id": "ipset-reference-undefined",
+      "severity": "error"
+    },
+    {
+      "description": "ipset references form a cycle",
+      "id": "ipset-reference-cycle",
+      "severity": "error"
+    },
+    {
+      "description": "a hosts value is neither an address nor a prefix",
+      "id": "host-not-address",
+      "severity": "error"
+    },
+    {
       "description": "a tag is defined but referenced by no rule",
       "id": "unused-tag",
       "severity": "info"

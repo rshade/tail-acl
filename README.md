@@ -883,6 +883,10 @@ reports these as findings, each with a stable id, severity, a locator (e.g.
 | `grant-empty` | warn | a grant has an empty required selector list and can never match |
 | `duplicate-grant` | warn | a grant is identical to an earlier one (order-insensitive) |
 | `ipset-mixed-operations` | error | an ipset carries a `remove` operation beside a member with no `add`/`remove` operation, which the control plane rejects |
+| `ipset-member-invalid` | error | an ipset member is not an address, CIDR, range, `host:` alias, or `ipset:` reference |
+| `ipset-reference-undefined` | error | an ipset member names a `host:` alias or `ipset:` that is not defined |
+| `ipset-reference-cycle` | error | `ipset:` references form a cycle |
+| `host-not-address` | error | a `hosts` value is neither an address nor a prefix |
 | `unused-tag`/`-group`/`-host`/`-ipset` | info | a definition is referenced by no rule, approver, or ipset member |
 | `unused-posture` | info | a posture is defined but no `srcPosture` or `defaultSrcPosture` references it |
 | `posture-invalid` | error | a posture expression is unparseable or names an out-of-vocabulary `ip:country` value (an unknown `node:`/`ip:` attribute only warns, since the known-attribute table can lag the server) |

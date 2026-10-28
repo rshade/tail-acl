@@ -60,6 +60,10 @@ const (
 	LintExternalTailnetIncomingDisabled = "external-tailnet-incoming-disabled"
 	LintAutoApproverRouteOverlap        = "autoapprover-route-overlap"
 	LintAutoApproverSiteIDCollision     = "autoapprover-siteid-collision"
+	LintIPSetMemberInvalid              = "ipset-member-invalid"
+	LintIPSetReferenceUndefined         = "ipset-reference-undefined"
+	LintIPSetReferenceCycle             = "ipset-reference-cycle"
+	LintHostNotAddress                  = "host-not-address"
 )
 
 // scimNotSyncingMarker is the stable substring of the control-plane validation
@@ -265,6 +269,26 @@ func LintCatalog() []LintCheck {
 			LintIPSetMixedOperations,
 			LintError,
 			"an ipset mixes a remove operation with a member that has no add/remove operation",
+		},
+		{
+			LintIPSetMemberInvalid,
+			LintError,
+			"an ipset member is not an address, CIDR, range, host: alias, or ipset: reference",
+		},
+		{
+			LintIPSetReferenceUndefined,
+			LintError,
+			"an ipset member names a host alias or ipset that is not defined",
+		},
+		{
+			LintIPSetReferenceCycle,
+			LintError,
+			"ipset references form a cycle",
+		},
+		{
+			LintHostNotAddress,
+			LintError,
+			"a hosts value is neither an address nor a prefix",
 		},
 		{LintUnusedTag, LintInfo, "a tag is defined but referenced by no rule"},
 		{LintUnusedGroup, LintInfo, "a group is defined but referenced by no rule"},
@@ -539,6 +563,8 @@ func evaluateLint(
 	}
 	findings = append(findings, duplicates...)
 	findings = append(findings, lintIPSetOperations(policy)...)
+	findings = append(findings, lintIPSetMembers(policy)...)
+	findings = append(findings, lintHostAddresses(policy)...)
 	findings = append(findings, lintUnusedDefinitions(policy, sshRules, sshTests)...)
 	findings = append(findings, lintPostureExpressions(policy)...)
 
