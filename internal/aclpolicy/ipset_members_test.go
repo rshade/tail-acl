@@ -71,6 +71,15 @@ func TestLintIPSetMembers(t *testing.T) {
 			contain: `value "tag:web"`,
 			also:    `ipset ipset:p member "host:gw"`,
 		},
+		{
+			name: "host value is another host",
+			policy: &tailscale.ACL{
+				Hosts: map[string]string{"a": "b", "b": "10.10.20.1"},
+			},
+			id:      aclpolicy.LintHostNotAddress,
+			want:    1,
+			contain: `host a value "b"`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

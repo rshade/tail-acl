@@ -277,10 +277,12 @@ Set `HaveRoles` from that distinction, not from the map's length.
   control-plane state settles that, so it belongs to a live-fleet check rather
   than a static advisory.
 - `ExpandAddressSelector` resolves a selector through `Hosts` and `IPSets` to
-  the addresses or prefixes it names: a `Hosts` alias is followed
-  transitively, and an `IPSets` entry is materialized through `ResolveIPSet`
-  and rendered as prefix strings, or expands to nothing when it cannot be
-  materialized. A value that names neither is returned unchanged.
+  the addresses or prefixes it names. A `Hosts` value is returned as written:
+  a literal address or prefix is that literal and is not looked up again as a
+  host name, and any other value is returned unchanged rather than followed.
+  An `IPSets` entry is materialized through `ResolveIPSet` and rendered as
+  prefix strings, or expands to nothing when it cannot be materialized. A
+  value that names neither is returned unchanged.
 - `AddressContains` reports whether a selector covers a query, where either may
   be an address or a prefix.
 - `IsPublicAddress` reports whether a value resolves to a publicly routable
@@ -336,11 +338,13 @@ for a failed `remove`, silently widen the set.
 and `Matcher` treats a set it cannot materialize as undecidable:
 `MatchesTri` reports `Unresolvable` for a selector that names or reaches one,
 and `Recognized` reports `false` for it, so a consumer reports indeterminate
-evidence rather than a confident denial. A set that materializes to no
-address space is decidable — a query against it is `NoMatch`. A bare host
-alias written directly as a member (`"gw"` rather than `"host:gw"`) is not a
-form the control plane accepts, so it makes the set unmaterializable rather
-than resolving by accident.
+evidence rather than a confident denial. A host whose value is not a literal
+address or prefix is undecidable in the same way: expansion returns that
+value unchanged, so a non-match is not a denial. A literal host value stays
+decidable. A set that materializes to no address space is decidable — a query
+against it is `NoMatch`. A bare host alias written directly as a member
+(`"gw"` rather than `"host:gw"`) is not a form the control plane accepts, so
+it makes the set unmaterializable rather than resolving by accident.
 
 ## Posture expressions
 

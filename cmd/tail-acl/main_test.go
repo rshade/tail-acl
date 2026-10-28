@@ -2526,6 +2526,31 @@ func TestCheckIndeterminateIsExitTen(t *testing.T) {
 	}
 }
 
+func TestCheckNonLiteralHostIsIndeterminate(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+		"hosts": {"a": "b", "b": "10.10.20.1"},
+		"grants": [{"src": ["alice@example.com"], "dst": ["a"], "ip": ["tcp:443"]}]
+	}`)
+	var stdout, stderr strings.Builder
+	err := run(
+		context.Background(),
+		[]string{"--file", path, cmdCheck, "--src", "alice@example.com", "--dst", "10.10.20.1:443"},
+		func(string) string { return "" },
+		nil,
+		"",
+		&stdout,
+		&stderr,
+	)
+	if code := exitCode(err); code != exitIndeterminate {
+		t.Fatalf("exit code = %d, want %d (error %v)\nstdout=%s", code, exitIndeterminate, err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "indeterminate") {
+		t.Errorf("stdout = %q, want indeterminate rather than deny", stdout.String())
+	}
+}
+
 // TestCheckPostureAttrEvaluation pins the posture-attribute probes against
 // the reference policy (internal/aclpolicy/testdata/posture_eval_policy.hujson,
 // whose verdicts were server-confirmed on 2026-10-02). With a complete

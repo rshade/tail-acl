@@ -21,13 +21,17 @@ import (
 const v4In6PrefixBits = 96
 
 // ExpandAddressSelector resolves a selector through Hosts and IPSets to the
-// concrete addresses or prefixes it names. A Hosts alias is followed
-// transitively; an IPSets entry is materialized through ResolveIPSet, so
-// operations, ranges, and host: references inside it resolve, and a set that
-// cannot be materialized expands to nothing. A value that names neither is
-// returned unchanged, as is every value when policy is nil: a document that
-// does not exist declares no aliases, so the selector already is the concrete
-// value it names.
+// concrete addresses or prefixes it names. A Hosts value is returned as
+// written: a literal address or prefix is that literal and is not looked up
+// again as a host name, and any other value is returned unchanged rather than
+// followed. The control plane rejects a hosts value that is not a literal, so
+// following an alias chain would agree with a policy that cannot deploy. An
+// IPSets entry is materialized through ResolveIPSet, so operations, ranges,
+// and host: references inside it resolve, and a set that cannot be
+// materialized expands to nothing. A value that names neither is returned
+// unchanged, as is every value when policy is nil: a document that does not
+// exist declares no aliases, so the selector already is the concrete value it
+// names.
 func ExpandAddressSelector(selector string, policy *tailscale.ACL) []string {
 	return expandAddressSelectorSeen(selector, policy, make(map[string]bool))
 }
@@ -43,9 +47,11 @@ func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[
 		return nil
 	}
 	if address, ok := policy.Hosts[selector]; ok {
+		// The cycle guard stays even though a hosts value is not followed: a
+		// later walk that does re-enter this selector still terminates.
 		seen[selector] = true
 		defer delete(seen, selector)
-		return expandAddressSelectorSeen(address, policy, seen)
+		return []string{address}
 	}
 	if _, ok := policy.IPSets[selector]; ok {
 		// Expanding to nothing is the boolean caller's honest answer — no
@@ -62,6 +68,16 @@ func expandAddressSelectorSeen(selector string, policy *tailscale.ACL, seen map[
 		return expanded
 	}
 	return []string{selector}
+}
+
+// hostValueLiteral reports whether value is an IP address or CIDR prefix.
+// That is the only hosts value the control plane accepts.
+func hostValueLiteral(value string) bool {
+	if _, err := netip.ParsePrefix(value); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddr(value)
+	return err == nil
 }
 
 // AddressContains reports whether selector covers query, where either may be an

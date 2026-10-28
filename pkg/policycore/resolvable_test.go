@@ -606,6 +606,60 @@ func TestMatchesTriResolvesIPSetMemberForms(t *testing.T) {
 	}
 }
 
+func TestMatchesTriTreatsANonLiteralHostAsUnresolvable(t *testing.T) {
+	t.Parallel()
+
+	policy := &tailscale.ACL{
+		Hosts: map[string]string{
+			"a":   "b",
+			"b":   "10.10.20.1",
+			"gw":  "tag:web",
+			"web": "10.1.0.0/16",
+		},
+		Groups: map[string][]string{"group:net": {"a"}},
+	}
+	matcher := policycore.Matcher{Policy: &policycore.Policy{ACL: policy}}
+	tests := []struct {
+		name     string
+		selector string
+		query    string
+		want     policycore.Match
+		known    bool
+	}{
+		{
+			name: "alias chain is not a denial", selector: "a", query: "10.10.20.1",
+			want: policycore.Unresolvable, known: false,
+		},
+		{
+			name: "tag value is not a denial", selector: "gw", query: "tag:web",
+			want: policycore.Unresolvable, known: false,
+		},
+		{
+			name: "group of a non-literal host stays undecidable", selector: "group:net", query: "10.10.20.1",
+			want: policycore.Unresolvable, known: true,
+		},
+		{
+			name: "literal host matches an address it contains", selector: "web", query: "10.1.2.3",
+			want: policycore.Matched, known: true,
+		},
+		{
+			name: "literal host misses outside its prefix", selector: "web", query: "11.0.0.1",
+			want: policycore.NoMatch, known: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matcher.MatchesTri(test.selector, test.query, ""); got != test.want {
+				t.Errorf("MatchesTri(%q, %q) = %v, want %v", test.selector, test.query, got, test.want)
+			}
+			if got := matcher.Recognized(test.selector); got != test.known {
+				t.Errorf("Recognized(%q) = %v, want %v", test.selector, got, test.known)
+			}
+		})
+	}
+}
+
 func TestRecognizedReportsAnUnmaterializableIPSetUnrecognized(t *testing.T) {
 	t.Parallel()
 

@@ -1571,6 +1571,9 @@ func runHostSet(path string, args []string, comment string, commentSet, overwrit
 		return nil, err
 	}
 	name, address := args[0], args[1]
+	if err = validateHostAddress(address); err != nil {
+		return nil, err
+	}
 	policy, err := loadForEdit(path)
 	if err != nil {
 		return nil, err
@@ -1602,6 +1605,20 @@ func runHostSet(path string, args []string, comment string, commentSet, overwrit
 	res.File = path
 	res.Edited = []editedValue{editedHostname(name), editedSelector(address)}
 	return res, nil
+}
+
+// validateHostAddress rejects a hosts value the control plane cannot parse.
+// A prefix is accepted as a prefix. Anything else must parse as an address,
+// and the ParseAddr error is what the message reports.
+func validateHostAddress(address string) error {
+	if _, err := netip.ParsePrefix(address); err == nil {
+		return nil
+	}
+	_, err := netip.ParseAddr(address)
+	if err == nil {
+		return nil
+	}
+	return usagef("%s is not an address: %s", address, err.Error())
 }
 
 // runPostureSet implements "posture set NAME EXPR [EXPR ...]". See

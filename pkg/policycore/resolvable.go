@@ -123,7 +123,7 @@ func (m Matcher) selectorResolvableSeen(
 		return m.crossTailnetSettles(crossSpec)
 	}
 
-	if !m.ipsetMaterializes(selector) {
+	if !m.ipsetMaterializes(selector) || !m.hostMaterializes(selector) {
 		return false
 	}
 
@@ -157,6 +157,24 @@ func (m Matcher) ipsetMaterializes(selector string) bool {
 	}
 	_, err := ResolveIPSet(selector, acl)
 	return err == nil
+}
+
+// hostMaterializes reports whether selector, if it names a Hosts entry, has a
+// literal address or prefix as its value. The control plane rejects any other
+// value, and address expansion returns that value unchanged rather than
+// following it, so a non-match means the host could not be read, not that it
+// names nothing. A literal value is decidable. Every selector that is not a
+// Hosts key is unaffected.
+func (m Matcher) hostMaterializes(selector string) bool {
+	acl := m.acl()
+	if acl == nil {
+		return true
+	}
+	value, ok := acl.Hosts[selector]
+	if !ok {
+		return true
+	}
+	return hostValueLiteral(value)
 }
 
 // AutogroupResolvable is the roster-blind view of whether this selector's

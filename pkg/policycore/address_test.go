@@ -42,7 +42,15 @@ func TestExpandAddressSelectorResolvesHostsAndIPSets(t *testing.T) {
 	t.Parallel()
 
 	policy := &tailscale.ACL{
-		Hosts:  map[string]string{"web": "10.1.0.0/16", "alias": "web"},
+		Hosts: map[string]string{
+			"web":      "10.1.0.0/16",
+			"alias":    "web",
+			"db":       "10.9.0.1",
+			"10.9.0.1": "192.0.2.1",
+			"a":        "b",
+			"b":        "10.10.20.1",
+			"gw":       "tag:web",
+		},
 		IPSets: map[string][]string{"ipset:corp": {"10.1.0.0/16", "192.168.5.0/24"}},
 	}
 	tests := []struct {
@@ -51,7 +59,10 @@ func TestExpandAddressSelectorResolvesHostsAndIPSets(t *testing.T) {
 		want     []string
 	}{
 		{name: "host resolves to cidr", selector: "web", want: []string{"10.1.0.0/16"}},
-		{name: "host alias resolves transitively", selector: "alias", want: []string{"10.1.0.0/16"}},
+		{name: "host alias is not followed", selector: "alias", want: []string{"web"}},
+		{name: "alias chain stops at the first value", selector: "a", want: []string{"b"}},
+		{name: "literal host value is not looked up again", selector: "db", want: []string{"10.9.0.1"}},
+		{name: "tag value is returned unchanged", selector: "gw", want: []string{"tag:web"}},
 		{name: "ipset expands to members", selector: "ipset:corp", want: []string{"10.1.0.0/16", "192.168.5.0/24"}},
 		{name: "unknown value passes through", selector: "tag:web", want: []string{"tag:web"}},
 	}
@@ -76,8 +87,9 @@ func TestExpandAddressSelectorTerminatesOnCycle(t *testing.T) {
 	t.Parallel()
 
 	policy := &tailscale.ACL{Hosts: map[string]string{"a": "b", "b": "a"}}
-	if got := policycore.ExpandAddressSelector("a", policy); len(got) != 0 {
-		t.Errorf("cyclic host expansion = %v; want empty", got)
+	got := policycore.ExpandAddressSelector("a", policy)
+	if len(got) != 1 || got[0] != "b" {
+		t.Errorf("cyclic host expansion = %v; want [b]", got)
 	}
 }
 
