@@ -96,27 +96,35 @@ jobs:
           fi
           echo "Release PR #$number is at ${sha:0:7}"
 
-          run_id=""
+          run_ids=""
           for attempt in 1 2 3 4 5 6; do
-            run_id=$(gh api "$actions/workflows/ci.yml/runs?head_sha=$sha&event=pull_request&status=action_required&per_page=1" \
-              --jq '.workflow_runs[0].id // empty') || run_id=""
-            if [[ -n "$run_id" ]]; then
+            run_ids=$(gh api "$actions/runs?head_sha=$sha&event=pull_request&status=action_required&per_page=100" \
+              --jq '.workflow_runs[].id') || run_ids=""
+            if [[ -n "$run_ids" ]]; then
               break
             fi
-            echo "No parked CI run yet at ${sha:0:7} (attempt $attempt of 6)"
+            echo "No parked runs yet at ${sha:0:7} (attempt $attempt of 6)"
             sleep 10
           done
-          if [[ -z "$run_id" ]]; then
-            echo "No parked pull_request CI run for #$number at ${sha:0:7}; it may already be running (gh pr checks $number)" >&2
+          if [[ -z "$run_ids" ]]; then
+            echo "No parked pull_request runs for #$number at ${sha:0:7}; they may already be running (gh pr checks $number)"
+            exit 0
+          fi
+
+          failed=0
+          for run_id in $run_ids; do
+            if output=$(gh api -X POST "$actions/runs/$run_id/approve" --silent 2>&1); then
+              echo "Approved run $run_id for #$number"
+            else
+              echo "Could not approve run $run_id: $output" >&2
+              echo "Approve it by hand: gh api -X POST $actions/runs/$run_id/approve" >&2
+              failed=1
+            fi
+          done
+          if [[ "$failed" -ne 0 ]]; then
             exit 1
           fi
-          if output=$(gh api -X POST "$actions/runs/$run_id/approve" --silent 2>&1); then
-            echo "Approved CI run $run_id for #$number; merge once the PR shows CLEAN"
-          else
-            echo "Could not approve CI run $run_id: $output" >&2
-            echo "Approve it by hand: gh api -X POST $actions/runs/$run_id/approve" >&2
-            exit 1
-          fi
+          echo "Merge once the PR shows CLEAN"
 
   goreleaser:
     name: goreleaser
