@@ -1,5 +1,10 @@
 # tail-acl
 
+> **Note: this repository is in transition.** `tail-acl` and the `policycore`
+> library are moving here from their previous home. Until this note is
+> removed, treat the release downloads and the `go get` module versions as
+> unverified, and wait for the note to go away before using them.
+
 Compile, normalize, validate, test, check, lint, plan, and upload a Tailscale ACL policy.
 `tail-acl` makes typed edits to a policy file, deep-merges commented HuJSON
 sources into one strict-JSON policy, runs its native network assertions,
