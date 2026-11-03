@@ -15,10 +15,10 @@ import (
 // the control plane and fails on drift. The live_verify build tag keeps it out
 // of every ordinary `go test ./...`; it is invoked deliberately, e.g.
 //
-//	go test -tags live_verify ./posture/ -run TestLiveVerify -v
+//	go test -tags live_verify ./pkg/policycore/posture/ -run TestLiveVerify -v
 //
-// with TAILSCALE_API_KEY and TAILSCALE_TAILNET set, the same opt-in mechanism
-// policycore/alpha's live-verify test uses.
+// with TAILSCALE_API_KEY and TAILSCALE_TAILNET set. It is read-only: /acl/validate
+// checks a candidate and never saves it.
 //
 // The derivation mirrors how the fixture was captured on 2026-10-02: a policy
 // whose posture lists an invalid country code is submitted to /acl/validate,

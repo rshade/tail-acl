@@ -1,9 +1,5 @@
 package policycore
 
-import (
-	"github.com/rshade/tail-acl/pkg/policycore/alpha"
-)
-
 // crossTailnetSpec is everything this package knows about one cross-tailnet
 // selector: the parsed selector when the grammar accepted it, or the parse
 // error when it did not. Exactly one of the two is set.
@@ -15,20 +11,20 @@ import (
 // either every view agrees it is one, or every view treats it as an ordinary
 // local selector.
 type crossTailnetSpec struct {
-	selector alpha.ExternalSelector
+	selector ExternalSelector
 	parseErr error
 }
 
 // crossTailnetSpecFor reports whether selector belongs to the cross-tailnet
 // vocabulary, and describes it when it does. Membership is decided by
-// alpha.LooksLikeExternalSelector rather than by a prefix list of this
+// LooksLikeExternalSelector rather than by a prefix list of this
 // package's own, so the matcher and the parser cannot disagree about where the
 // grammar's boundary lies.
 func crossTailnetSpecFor(selector string) (crossTailnetSpec, bool) {
-	if !alpha.LooksLikeExternalSelector(selector) {
+	if !LooksLikeExternalSelector(selector) {
 		return crossTailnetSpec{}, false
 	}
-	parsed, err := alpha.ParseExternalSelector(selector)
+	parsed, err := ParseExternalSelector(selector)
 	if err != nil {
 		return crossTailnetSpec{parseErr: err}, true
 	}

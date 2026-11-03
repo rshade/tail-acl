@@ -6,16 +6,15 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 // TestIsCrossTailnetSelectorAgreesWithTheParser is the guard against the drift
 // this design exists to prevent: a second prefix list in policycore that fell
-// out of step with alpha's would route a real cross-tailnet selector down the
+// out of step with the parser's would route a real cross-tailnet selector down the
 // local path, where it reads as a definite non-match.
 //
 // It also pins IsCrossTailnetSelector's own values, rather than a second table
-// restating them: alpha's TestLooksLikeExternalSelector fixes what the parser
+// restating them: TestLooksLikeExternalSelector fixes what the parser
 // recognizes, and this fixes the two as equal.
 func TestIsCrossTailnetSelectorAgreesWithTheParser(t *testing.T) {
 	t.Parallel()
@@ -32,8 +31,8 @@ func TestIsCrossTailnetSelectorAgreesWithTheParser(t *testing.T) {
 			t.Parallel()
 
 			if got, want := policycore.IsCrossTailnetSelector(selector),
-				alpha.LooksLikeExternalSelector(selector); got != want {
-				t.Errorf("IsCrossTailnetSelector(%q) = %t, but alpha.LooksLikeExternalSelector = %t",
+				policycore.LooksLikeExternalSelector(selector); got != want {
+				t.Errorf("IsCrossTailnetSelector(%q) = %t, but policycore.LooksLikeExternalSelector = %t",
 					selector, got, want)
 			}
 		})

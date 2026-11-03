@@ -3,40 +3,18 @@
 This page describes the exported selector-matching API and ipset member
 grammar in `policycore`, the shared `policycore/addrspace` address primitives,
 the `policycore/sanitize` output contract, and the `policycore/hujsonedit`
-comment-preserving document editor, plus the `policycore/alpha` inventory and
-selector grammar for features modeled ahead of the pinned SDK.
+comment-preserving document editor, plus the cross-tailnet selector grammar.
 
-## Alpha feature inventory
-
-`alpha.RepositoryFeatures()` returns a fresh copy of the canonical inventory
-of alpha or unreleased Tailscale features this repository hand-models. Each
-`alpha.Feature` records its `Name`, upstream `DocURL`, `ModeledDate`, and
-pipeline `Stage` (`StageAlpha`, `StageBeta`, or `StageGA`). Add new entries to
-the slice returned by that function in `policycore/alpha/alpha.go`.
-
-`alpha.NewRegistry()` returns an empty, caller-owned validation and lookup
-container. `Registry.Register` rejects missing fields, unknown stages, and
-duplicate names; it does not update `alpha.RepositoryFeatures()`.
-`Registry.Lookup` reads one entry and `Registry.List` returns entries sorted by
-name.
-
-`alpha.AlphaHint` is the string `alpha-hint`, the `SourceRef.confidence` value
-for an editorial pointer associated with one of these unstable or unreleased
-features. It complements `derived` and `hint`; it does not relax the rule that
-a source package pointer must resolve when one exists.
-
-### Declarative node sharing
+## Cross-tailnet selectors
 
 The pinned SDK models the node-sharing relationships: `tailscale.ACL` carries
 `ExternalTailnets map[string]tailscale.ExternalTailnet` since
 tailscale.com/client/tailscale/v2 v2.11.0, keyed by the policy-local alias
-each relationship is declared under. This repository hand-modeled those types
-in `alpha` until the SDK caught up; the migration tripwire fired at v2.11.0
-and the model moved onto the SDK type. What `policycore` adds is the read flag
+each relationship is declared under. What `policycore` adds is the read flag
 `Policy.HaveExternalTailnets`, which distinguishes "the policy declares no
 external tailnets" from "the caller never parsed the field".
 
-`alpha.ParseExternalSelector` parses `group://<alias>/<name>` and
+`policycore.ParseExternalSelector` parses `group://<alias>/<name>` and
 `tag://<alias>/<name>` into an `ExternalSelector{Kind, Alias, Name}`. Ordinary
 same-tailnet selectors such as `group:engineering`, missing aliases or names,
 and extra path segments are rejected.
@@ -52,19 +30,12 @@ selectors, so `group://partner/group:engineering` is the natural mistake rather
 than an exotic one, and it is refused rather than parsed into a name nothing
 resolves.
 
-This is syntax modeling only; `Matcher` does not yet resolve cross-tailnet
-membership.
-
-`alpha.NewVerifierRegistry(features)` returns an empty `VerifierRegistry`
-backed by a `*Registry`. `RegisterVerifier(featureName, fn)` ties a
-`LiveVerifyFunc` (`func(context.Context) error`) to a feature already present
-in `features`, rejecting a nil `fn`, an unregistered feature name, or a
-duplicate. `RunAll(ctx)` runs every registered verifier and returns one
-`VerifyResult{FeatureName, Err}` per registered verifier, sorted by name. It
-returns an empty slice when no verifiers have been registered, even if the
-backing feature registry is populated. See
-[Live-verifying an alpha feature](../README.md#live-verifying-an-alpha-feature)
-for the opt-in, credentialed workflow that invokes this.
+`policycore.IsCrossTailnetSelector` reports whether a selector uses this
+grammar, including a malformed one, and `Matcher.KnownExternalTailnetAlias`
+reports whether the policy declares an alias. A cross-tailnet selector is
+otherwise undecidable from this policy: the one case `Matcher` settles is a
+well-formed selector whose alias the policy does not declare, and only when
+the declarations were actually read (`Policy.HaveExternalTailnets`).
 
 ## Address-space primitives
 

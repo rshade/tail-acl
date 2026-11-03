@@ -9,7 +9,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 const externalTailnetsKey = "externalTailnets"
@@ -268,10 +268,10 @@ func appendLocatedAlias(references []string, locator, value, alias string) []str
 
 func selectorNamesExternalAlias(selector, alias string) bool {
 	selector = strings.TrimSpace(selector)
-	if !alpha.LooksLikeExternalSelector(selector) {
+	if !policycore.LooksLikeExternalSelector(selector) {
 		return false
 	}
-	parsed, err := alpha.ParseExternalSelector(selector)
+	parsed, err := policycore.ParseExternalSelector(selector)
 	return err == nil && parsed.Alias == alias
 }
 

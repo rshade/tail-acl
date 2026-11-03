@@ -15,6 +15,7 @@ and flags; `tail-acl --help` and `tail-acl --schema` are authoritative.
 
 - [Exit codes](reference/exit-codes.md)
 - [AX conventions](reference/ax-conventions.md)
+- [Feature support](reference/feature-support.md)
 
 ## Explanation
 
