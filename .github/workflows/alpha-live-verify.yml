@@ -12,17 +12,16 @@
 # executes them.
 #
 # live-verify runs only on workflow_dispatch from main, behind the protected
-# `live-verify` environment, and makes read-only Tailscale API calls. It
-# authenticates to Pulumi Cloud over OIDC and loads TAILSCALE_API_KEY and
-# TAILSCALE_TAILNET from Pulumi ESC, so nothing is stored in GitHub secrets.
-# Set the repository variables PULUMI_ORG and PULUMI_ESC_ENV (for example
-# `org/project/environment`) before dispatching it. The Go test only reads the
-# two plain environment variables and knows nothing about Pulumi.
+# `live-verify` environment, and makes read-only Tailscale API calls. It reads
+# TAILSCALE_API_KEY and TAILSCALE_TAILNET from secrets stored on that
+# environment, so they are released only to a run a required reviewer has
+# approved. The Go test only reads the two plain environment variables.
 #
 # The job executes repository code with those credentials, so a dispatch from
 # any other ref must never reach them: the ref check below and the
-# environment's required reviewers are the two gates, and the Pulumi OIDC
-# trust policy should accept only this repository's `live-verify` environment.
+# environment's required reviewers and branch policy are the gates. Use a
+# read-only API key or OAuth client, and keep it out of repository-level
+# secrets so no other workflow can read it.
 name: Alpha live-verify
 
 on:
@@ -66,7 +65,6 @@ jobs:
     environment: live-verify
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -74,29 +72,12 @@ jobs:
       - name: Install pinned tools
         uses: jdx/mise-action@v5
 
-      - name: Require the Pulumi variables
-        env:
-          PULUMI_ORG: ${{ vars.PULUMI_ORG }}
-          PULUMI_ESC_ENV: ${{ vars.PULUMI_ESC_ENV }}
-        run: |
-          : "${PULUMI_ORG:?set the PULUMI_ORG repository variable}"
-          : "${PULUMI_ESC_ENV:?set the PULUMI_ESC_ENV repository variable}"
-
-      - name: Authenticate to Pulumi Cloud (OIDC)
-        uses: pulumi/auth-actions@v2
-        with:
-          organization: ${{ vars.PULUMI_ORG }}
-          requested-token-type: urn:pulumi:token-type:access_token:personal
-          scope: user:${{ vars.PULUMI_ORG }}
-
-      - name: Load tailnet credentials from Pulumi ESC
-        uses: pulumi/esc-action@v3
-        with:
-          environment: ${{ vars.PULUMI_ESC_ENV }}
-
       - name: Run live-verify tests
+        env:
+          TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          TAILSCALE_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
         run: |
           set -euo pipefail
-          : "${TAILSCALE_API_KEY:?not injected, did the ESC step run?}"
-          : "${TAILSCALE_TAILNET:?not injected, did the ESC step run?}"
+          : "${TAILSCALE_API_KEY:?set the TAILSCALE_API_KEY secret on the live-verify environment}"
+          : "${TAILSCALE_TAILNET:?set the TAILSCALE_TAILNET secret on the live-verify environment}"
           go test -tags live_verify ./pkg/policycore/alpha/... -run TestLiveVerify -v
