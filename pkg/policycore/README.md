@@ -4,7 +4,7 @@ Selector resolution, address-space primitives, and the output sanitization
 contract, shared by `tsacl` and the other tailnet tools built on it.
 
 Import it from the `github.com/rshade/tsacl` module, for example
-`github.com/rshade/tsacl/pkg/policycore/ipcalc`. Go builds only the packages
+`github.com/rshade/tsacl/pkg/policycore/addrspace`. Go builds only the packages
 you import, so the CLI's own dependencies stay out of your binary.
 
 Several tools need to answer one question identically: *does this policy

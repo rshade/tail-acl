@@ -8,8 +8,9 @@
   Treat `tsacl`'s commands, flags, exit codes, and output as compatibility
   contracts.
 - `pkg/policycore/...` is the public library (`addrspace`, `cliflags`,
-  `hujsonedit`, `ipcalc`, `posture`, `sanitize`) that other tools import.
-  Treat its exported API as a compatibility contract too.
+  `hujsonedit`, `posture`, `sanitize`) that other tools import, and
+  `pkg/ipcalc` is the policy-agnostic subnet arithmetic library. Treat their
+  exported APIs as compatibility contracts too.
 
 `internal/` holds the CLI's private packages, `integration/` the end-to-end
 tests, and `docs/` the guides. Tests sit beside the code as `*_test.go`;

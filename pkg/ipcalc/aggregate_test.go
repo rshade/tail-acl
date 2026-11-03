@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/rshade/tsacl/pkg/policycore/ipcalc"
+	"github.com/rshade/tsacl/pkg/ipcalc"
 )
 
 func TestAggregate(t *testing.T) {
