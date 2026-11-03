@@ -5,13 +5,13 @@
 
 ### Features
 
-* **tail-acl:** add external-tailnet commands ([#438](https://github.com/rshade/tail-acl/issues/438)) ([3bf3c13](https://github.com/rshade/tail-acl/commit/3bf3c1346205f1d72a433f3b97d8e3a01f8b2fc5)), closes [#276](https://github.com/rshade/tail-acl/issues/276)
-* **tail-acl:** advise on shared via site IDs ([#440](https://github.com/rshade/tail-acl/issues/440)) ([527f414](https://github.com/rshade/tail-acl/commit/527f414515cd9def1ffe229fccccadcf80e4ff8e)), closes [#228](https://github.com/rshade/tail-acl/issues/228)
-* **tail-acl:** count externalTailnets allow-list uses ([#434](https://github.com/rshade/tail-acl/issues/434)) ([28d9f73](https://github.com/rshade/tail-acl/commit/28d9f73b1ecf45189fcc8a3c39e596d5cc1b97fa)), closes [#275](https://github.com/rshade/tail-acl/issues/275)
-* **tail-acl:** lint autoapprover-route-overlap ([#439](https://github.com/rshade/tail-acl/issues/439)) ([ee505a3](https://github.com/rshade/tail-acl/commit/ee505a3ed65870d3d55e56d48810cf87ff3fc905)), closes [#227](https://github.com/rshade/tail-acl/issues/227)
-* **tail-acl:** lint invalid ipset members ([#441](https://github.com/rshade/tail-acl/issues/441)) ([4117a50](https://github.com/rshade/tail-acl/commit/4117a50c68841e7396eccec3f6e1dfd237c91015)), closes [#373](https://github.com/rshade/tail-acl/issues/373)
-* **tail-acl:** lint unknown external tailnet aliases ([#435](https://github.com/rshade/tail-acl/issues/435)) ([de4049a](https://github.com/rshade/tail-acl/commit/de4049a6254a28bb4297764341513c3cba0b7d1e))
-* **tail-acl:** warn when grant sharing is closed ([#436](https://github.com/rshade/tail-acl/issues/436)) ([220668a](https://github.com/rshade/tail-acl/commit/220668a2a688fd2b25ac55990f850d1ed4cc836e)), closes [#279](https://github.com/rshade/tail-acl/issues/279)
+* **tail-acl:** add external-tailnet commands
+* **tail-acl:** advise on shared via site IDs
+* **tail-acl:** count externalTailnets allow-list uses
+* **tail-acl:** lint autoapprover-route-overlap
+* **tail-acl:** lint invalid ipset members
+* **tail-acl:** lint unknown external tailnet aliases
+* **tail-acl:** warn when grant sharing is closed
 
 
 ### Bug Fixes
@@ -19,11 +19,11 @@
 * **ci:** approve every parked run on the release PR ([7b3c164](https://github.com/rshade/tail-acl/commit/7b3c164aa88e6898be6bf6cdb43b799e84dd139d))
 * **ci:** drop the release-please component from the branch name ([ff48f39](https://github.com/rshade/tail-acl/commit/ff48f39bdb7a1b36c77a70ddeb8232f420691710))
 * **ci:** gate live-verify on main behind a protected environment ([d0b05fe](https://github.com/rshade/tail-acl/commit/d0b05feb0ab5d773527b3f963fe2d02473917718))
-* **deps:** update module tailscale.com to v1.104.2 ([#418](https://github.com/rshade/tail-acl/issues/418)) ([3a28f06](https://github.com/rshade/tail-acl/commit/3a28f0692929c2e3df031d602c7ee77a934f70ff))
-* **deps:** update module tailscale.com to v1.104.4 ([#454](https://github.com/rshade/tail-acl/issues/454)) ([7711883](https://github.com/rshade/tail-acl/commit/771188387134bd3bb791a9cccbcd4f96cd4c6eba))
-* **deps:** update module tailscale.com/client/tailscale/v2 to v2.12.0 ([#426](https://github.com/rshade/tail-acl/issues/426)) ([04b9382](https://github.com/rshade/tail-acl/commit/04b9382335ea3b8288800e3529f70d10b7d2071c))
-* **policycore:** reject non-literal host aliases ([#459](https://github.com/rshade/tail-acl/issues/459)) ([7d723ab](https://github.com/rshade/tail-acl/commit/7d723abd36b86a20e0042db5d03b3618687af690)), closes [#374](https://github.com/rshade/tail-acl/issues/374)
-* **tail-acl:** sanitize names in mutation messages ([#455](https://github.com/rshade/tail-acl/issues/455)) ([aa1d2e0](https://github.com/rshade/tail-acl/commit/aa1d2e04650199e3b38e4159be7a0e0a7b50d8a4)), closes [#451](https://github.com/rshade/tail-acl/issues/451)
+* **deps:** update module tailscale.com to v1.104.2
+* **deps:** update module tailscale.com to v1.104.4
+* **deps:** update module tailscale.com/client/tailscale/v2 to v2.12.0
+* **policycore:** reject non-literal host aliases
+* **tail-acl:** sanitize names in mutation messages
 
 ## 0.3.0 (2026-10-22)
 
