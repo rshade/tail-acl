@@ -1,7 +1,7 @@
 package policycore
 
 import (
-	"github.com/rshade/tailscale-utils/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 // crossTailnetSpec is everything this package knows about one cross-tailnet

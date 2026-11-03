@@ -20,7 +20,7 @@ import (
 	"github.com/tailscale/hujson"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore/hujsonedit"
+	"github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
 )
 
 // parseFile reads and parses path as HuJSON. It is a package-level wrapper

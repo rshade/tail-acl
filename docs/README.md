@@ -9,10 +9,12 @@ and flags; `tail-acl --help` and `tail-acl --schema` are authoritative.
 - [Adopt tail-acl for an existing tailnet](how-to/bootstrap-existing-tailnet.md)
 - [Lint a policy and act on the findings](how-to/lint-policy.md)
 - [Watch policy tests while editing](how-to/watch-policy-tests.md)
+- [Gate policy changes in CI](how-to/gate-policy-changes-in-ci.md)
 
 ## Reference
 
 - [Exit codes](reference/exit-codes.md)
+- [AX conventions](reference/ax-conventions.md)
 
 ## Explanation
 

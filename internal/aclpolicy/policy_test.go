@@ -11,7 +11,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
 )
 
 func TestLoadHuJSONIntoTailscaleTypes(t *testing.T) {

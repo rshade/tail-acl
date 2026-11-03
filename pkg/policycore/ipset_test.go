@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 func TestParseIPSetMemberAcceptsEveryForm(t *testing.T) {

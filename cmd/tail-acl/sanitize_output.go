@@ -6,9 +6,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/rshade/tailscale-utils/policycore/sanitize"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
 )
 
 // sanitizeResultEnvelope rebuilds the structured, shareable tail-acl output

@@ -3,7 +3,7 @@ package addrspace_test
 import (
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/addrspace"
+	"github.com/rshade/tail-acl/pkg/policycore/addrspace"
 )
 
 func TestOverlaps(t *testing.T) {

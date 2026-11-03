@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshade/tailscale-utils/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
 const (

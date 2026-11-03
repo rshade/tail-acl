@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/sanitize"
-	"github.com/rshade/tailscale-utils/policycore/sanitize/sanitizetest"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
+	"github.com/rshade/tail-acl/pkg/policycore/sanitize/sanitizetest"
 )
 
 func TestExternalTailnetAddPreservesCommentAndRepeats(t *testing.T) {

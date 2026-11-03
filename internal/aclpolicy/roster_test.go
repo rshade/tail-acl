@@ -7,7 +7,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
 )
 
 // loadReachabilityPolicy returns the fixture whose grant 4 is gated on

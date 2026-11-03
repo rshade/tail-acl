@@ -6,7 +6,7 @@ import (
 
 	"tailscale.com/net/tsaddr"
 
-	"github.com/rshade/tailscale-utils/policycore/addrspace"
+	"github.com/rshade/tail-acl/pkg/policycore/addrspace"
 )
 
 // TestSiteIDMatchesTailscale is the Tier-2 provenance guard for the owned

@@ -10,7 +10,7 @@ import (
 
 	"github.com/tailscale/hujson"
 
-	"github.com/rshade/tailscale-utils/policycore/hujsonedit"
+	"github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
 )
 
 func writeTemp(t *testing.T, content string) string {

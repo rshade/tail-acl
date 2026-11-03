@@ -3,7 +3,7 @@ package policycore_test
 import (
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 func TestContainsLiteralWildcard(t *testing.T) {

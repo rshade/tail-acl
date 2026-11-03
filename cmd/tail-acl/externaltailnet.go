@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
 )
 
 func newExternalTailnetAddCommand(deps *commandDeps) *cobra.Command {

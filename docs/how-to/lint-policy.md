@@ -183,7 +183,7 @@ rest, so a CI run stays honest about what it chose not to gate on.
 Exit `2` is a usage or input error and never a policy verdict — fail the build
 loudly on it rather than treating it as "clean". See
 [Exit codes](../reference/exit-codes.md) and
-[Gate policy changes in CI](../../../docs/how-to/gate-policy-changes-in-ci.md).
+[Gate policy changes in CI](gate-policy-changes-in-ci.md).
 
 ## What lint will not tell you
 

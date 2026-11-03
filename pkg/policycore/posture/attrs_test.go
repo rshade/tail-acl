@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
 // attrsCase pins one posture's verdict against one attribute set.

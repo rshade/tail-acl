@@ -7,8 +7,8 @@ ad-hoc reachability checks, and static hygiene lints locally, and talks to
 Tailscale's policy-file API to validate a candidate, diff it against the live
 tailnet, or upload it.
 
-> **Module** `github.com/rshade/tailscale-utils/tail-acl`. Conforms to the AX
-> conventions in [`../AGENTS.md`](../AGENTS.md#ax-conventions-the-shared-standard):
+> **Module** `github.com/rshade/tail-acl`. Conforms to the AX
+> conventions in [`docs/reference/ax-conventions.md`](docs/reference/ax-conventions.md):
 > the command result goes to **stdout** (human text, or a versioned JSON
 > envelope with `-format json`); logs and errors go to **stderr**.
 
@@ -35,7 +35,8 @@ go build -o tail-acl ./cmd/tail-acl
 go build -ldflags "-X main.version=v0.1.0" -o tail-acl ./cmd/tail-acl
 ```
 
-`make build` at the monorepo root builds all three binaries into `bin/`.
+`mise run build` compiles every package; the release workflow builds the three
+binaries for each supported OS and architecture with GoReleaser.
 
 ## Usage
 

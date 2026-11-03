@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/ipcalc"
+	"github.com/rshade/tail-acl/pkg/policycore/ipcalc"
 )
 
 func TestNextFree(t *testing.T) {

@@ -12,9 +12,9 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore"
-	"github.com/rshade/tailscale-utils/policycore/alpha"
-	"github.com/rshade/tailscale-utils/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
 // LintSeverity ranks a lint finding. advice < info < warn < error.

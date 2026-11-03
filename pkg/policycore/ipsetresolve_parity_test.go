@@ -10,7 +10,7 @@ import (
 
 	"github.com/tailscale/hujson"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 )

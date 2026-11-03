@@ -23,9 +23,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/rshade/tailscale-utils/policycore/cliflags"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/internal/buildinfo"
+	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/pkg/policycore/cliflags"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".

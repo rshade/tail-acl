@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/internal/tailapi"
 )
 
 func TestCompositeTestResultTruthTable(t *testing.T) {

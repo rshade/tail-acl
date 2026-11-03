@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshade/tailscale-utils/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 func TestRegistryRegisterAndLookup(t *testing.T) {
@@ -175,7 +175,7 @@ func TestPackageDocNamesRegistryFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parser.ParseFile(%s): %v", sourceFile, err)
 	}
-	docPkg, err := doc.NewFromFiles(fset, []*ast.File{file}, "github.com/rshade/tailscale-utils/policycore/alpha")
+	docPkg, err := doc.NewFromFiles(fset, []*ast.File{file}, "github.com/rshade/tail-acl/pkg/policycore/alpha")
 	if err != nil {
 		t.Fatalf("doc.NewFromFiles(%s): %v", sourceFile, err)
 	}

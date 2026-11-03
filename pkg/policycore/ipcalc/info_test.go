@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/ipcalc"
+	"github.com/rshade/tail-acl/pkg/policycore/ipcalc"
 )
 
 type blockFactsCase struct {

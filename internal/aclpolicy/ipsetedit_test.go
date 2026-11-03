@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 const ipsetMemberPolicy = `{

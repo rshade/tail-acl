@@ -1,11 +1,15 @@
 # policycore
 
-Selector resolution, address-space primitives, and the repository-wide output
-sanitization contract, shared by the tool modules.
+Selector resolution, address-space primitives, and the output sanitization
+contract, shared by `tail-acl` and the other tailnet tools built on it.
 
-Both tools need to answer one question identically: *does this policy selector
-name this thing?* Two tools in the same repo disagreeing about one policy is
-worse than duplicated code, so the logic lives here rather than in each tool.
+Import it from the `github.com/rshade/tail-acl` module, for example
+`github.com/rshade/tail-acl/pkg/policycore/ipcalc`. Go builds only the packages
+you import, so the CLI's own dependencies stay out of your binary.
+
+Several tools need to answer one question identically: *does this policy
+selector name this thing?* Two tools disagreeing about one policy is worse than
+duplicated code, so the logic lives here rather than in each tool.
 
 ## Scope
 

@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rshade/tailscale-utils/policycore/sanitize"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
 )
 
 // commandDeps carries what every subcommand constructor needs. result is a

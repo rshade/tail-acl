@@ -1,6 +1,6 @@
 package aclpolicy
 
-import "github.com/rshade/tailscale-utils/policycore/hujsonedit"
+import "github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
 
 // PatchComment, PatchCommentOverwrite, and ValidateCommentText are
 // schema-agnostic HuJSON comment-authoring mechanics that live in

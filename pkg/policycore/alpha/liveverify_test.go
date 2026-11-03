@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshade/tailscale-utils/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 var errRequiredFieldMissing = errors.New(

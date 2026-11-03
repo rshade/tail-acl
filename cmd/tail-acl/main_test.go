@@ -22,8 +22,8 @@ import (
 	"github.com/tailscale/hujson"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/observedstate"
 )
 
 func TestInitBootstrapsTypedAuthoringWithoutOverwriting(t *testing.T) {

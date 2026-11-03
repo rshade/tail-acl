@@ -5,8 +5,8 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore"
-	"github.com/rshade/tailscale-utils/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 // TestIsCrossTailnetSelectorAgreesWithTheParser is the guard against the drift

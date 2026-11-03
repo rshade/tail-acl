@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
 // diagnosticCase pins one expression's diagnostics as an ordered list of

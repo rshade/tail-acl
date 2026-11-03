@@ -11,7 +11,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 	"tailscale.com/net/tsaddr"
 
-	"github.com/rshade/tailscale-utils/policycore/addrspace"
+	"github.com/rshade/tail-acl/pkg/policycore/addrspace"
 )
 
 // minDistinctViaSubnets is the count that makes one site ID cover more

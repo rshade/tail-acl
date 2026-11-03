@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 // DefinitionKind identifies one of the policy's string-list maps that has a

@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 func TestEffectiveSrcPosture(t *testing.T) {

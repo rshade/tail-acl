@@ -15,7 +15,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/internal/tailapi"
 )
 
 func TestValidatePolicyResponseMatrix(t *testing.T) {

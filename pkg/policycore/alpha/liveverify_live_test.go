@@ -9,7 +9,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore/alpha"
+	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 )
 
 // TestLiveVerifyRegisteredFeatures is the opt-in, credentialed smoke test for

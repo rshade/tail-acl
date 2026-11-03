@@ -11,7 +11,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore"
 )
 
 // autoApproversKey* are the JSON member names an autoApprovers edit targets.

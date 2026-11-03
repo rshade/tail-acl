@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
 )
 
 func TestNormalizeCommandEmitsBareStandardJSON(t *testing.T) {

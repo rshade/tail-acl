@@ -11,8 +11,8 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore"
-	"github.com/rshade/tailscale-utils/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
 // AssertionStatus is the machine-readable outcome of one policy assertion.

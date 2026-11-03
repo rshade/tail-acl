@@ -37,14 +37,14 @@ import (
 	"github.com/spf13/viper"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tailscale-utils/policycore"
-	"github.com/rshade/tailscale-utils/policycore/cliflags"
-	"github.com/rshade/tailscale-utils/policycore/posture"
-	"github.com/rshade/tailscale-utils/policycore/sanitize"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/buildinfo"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/observedstate"
-	"github.com/rshade/tailscale-utils/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/buildinfo"
+	"github.com/rshade/tail-acl/internal/observedstate"
+	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tail-acl/pkg/policycore/cliflags"
+	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".

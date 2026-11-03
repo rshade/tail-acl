@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tailscale-utils/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tail-acl/internal/aclpolicy"
 )
 
 func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
