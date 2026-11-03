@@ -6,7 +6,6 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "package-name": "tail-acl",
       "exclude-paths": [
         "openspec",
         "docs",
