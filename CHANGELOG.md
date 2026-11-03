@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0](https://github.com/rshade/tail-acl/compare/v0.3.0...v0.4.0) (2026-11-03)
+
+
+### Features
+
+* **tail-acl:** add external-tailnet commands
+* **tail-acl:** advise on shared via site IDs
+* **tail-acl:** count externalTailnets allow-list uses
+* **tail-acl:** lint autoapprover-route-overlap
+* **tail-acl:** lint invalid ipset members
+* **tail-acl:** lint unknown external tailnet aliases
+* **tail-acl:** warn when grant sharing is closed
+
+
+### Bug Fixes
+
+* **ci:** approve every parked run on the release PR ([7b3c164](https://github.com/rshade/tail-acl/commit/7b3c164aa88e6898be6bf6cdb43b799e84dd139d))
+* **ci:** drop the release-please component from the branch name ([ff48f39](https://github.com/rshade/tail-acl/commit/ff48f39bdb7a1b36c77a70ddeb8232f420691710))
+* **ci:** gate live-verify on main behind a protected environment ([d0b05fe](https://github.com/rshade/tail-acl/commit/d0b05feb0ab5d773527b3f963fe2d02473917718))
+* **deps:** update module tailscale.com to v1.104.2
+* **deps:** update module tailscale.com to v1.104.4
+* **deps:** update module tailscale.com/client/tailscale/v2 to v2.12.0
+* **policycore:** reject non-literal host aliases
+* **tail-acl:** sanitize names in mutation messages
+
 ## 0.3.0 (2026-10-22)
 
 
