@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/hexops/gotextdiff v1.0.3
-	github.com/itchyny/gojq v0.12.19
+	github.com/itchyny/gojq v0.12.20
 	github.com/jaxxstorm/tscli v0.12.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
@@ -34,7 +34,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/itchyny/timefmt-go v0.1.8 // indirect
+	github.com/itchyny/timefmt-go v0.1.9 // indirect
 	github.com/jaxxstorm/vers v0.0.3 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
