@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "tool": "tail-acl",
+  "tool": "tsacl",
   "command": "validate",
   "status": "ok",
   "message": "testdata/validation_warning.hujson is valid",

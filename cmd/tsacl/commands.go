@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
 )
 
 // commandDeps carries what every subcommand constructor needs. result is a
@@ -412,8 +412,8 @@ func newInitCommand(deps *commandDeps) *cobra.Command {
 // cobra treats a command with only
 // subcommands as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
 // PersistentPreRunE ever run — for *any* leftover args, not just none — so
-// "tail-acl grant bogus" printed help and exited 0 exactly like a bare
-// "tail-acl grant". Splitting the two here restores the documented exit-code
+// "tsacl grant bogus" printed help and exited 0 exactly like a bare
+// "tsacl grant". Splitting the two here restores the documented exit-code
 // scheme (2 = usage error) for a real mistake while keeping the bare case at
 // exit 0: printing help and exiting 0 for a bare parent is what git remote,
 // gh repo, and docker network all do, and is more useful than an error for a

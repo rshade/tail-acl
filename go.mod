@@ -1,4 +1,4 @@
-module github.com/rshade/tail-acl
+module github.com/rshade/tsacl
 
 go 1.27.3
 

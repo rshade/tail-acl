@@ -12,8 +12,8 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
 )
 
 // LintSeverity ranks a lint finding. advice < info < warn < error.
@@ -1615,7 +1615,7 @@ func collectReferences(
 	}
 	// A node attribute targets the same selectors a grant source does. Omitting
 	// it reported a live definition as unused and told the operator to delete
-	// it, which tail-acl's own definition removal would then carry out.
+	// it, which tsacl's own definition removal would then carry out.
 	for _, attr := range policy.NodeAttrs {
 		addReferences(referenced, attr.Target)
 		for _, apps := range attr.App {

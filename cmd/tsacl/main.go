@@ -1,4 +1,4 @@
-// Command tail-acl makes typed edits to a Tailscale policy file and can pull,
+// Command tsacl makes typed edits to a Tailscale policy file and can pull,
 // merge, normalize, validate, test, check, lint, plan, or upload it with
 // Tailscale's policy-file API.
 //
@@ -37,14 +37,14 @@ import (
 	"github.com/spf13/viper"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/buildinfo"
-	"github.com/rshade/tail-acl/internal/observedstate"
-	"github.com/rshade/tail-acl/internal/tailapi"
-	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/cliflags"
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/buildinfo"
+	"github.com/rshade/tsacl/internal/observedstate"
+	"github.com/rshade/tsacl/internal/tailapi"
+	"github.com/rshade/tsacl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore/cliflags"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".
@@ -109,7 +109,7 @@ const (
 
 // Command and sub-command names, output formats, and the tool name.
 const (
-	toolName = "tail-acl"
+	toolName = "tsacl"
 
 	cmdGrant           = "grant"
 	cmdGroup           = "group"
@@ -424,7 +424,7 @@ func realMain() int {
 	}
 	err := run(ctx, os.Args[1:], os.Getenv, client, apiURL, os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tail-acl:", err)
+		fmt.Fprintln(os.Stderr, "tsacl:", err)
 	}
 	return exitCode(err)
 }
@@ -526,7 +526,7 @@ func newRootCommand(getenv func(string) string, opts *options) *cobra.Command {
 	// cobra resolves a command's help function by walking up to the nearest
 	// ancestor that set one, so an override here answers --help for the entire
 	// tree unless it hands descendants back. Without the dispatch, every
-	// subcommand's --help printed this whole-tool page: "tail-acl lint --help"
+	// subcommand's --help printed this whole-tool page: "tsacl lint --help"
 	// listed the full command catalog, every root example, and lint's own
 	// --severity/--wildcard/--config under a "Global flags:" heading that they
 	// are not. Only root gets the hand-written page.
@@ -567,7 +567,7 @@ func run(
 	// Registered but unbound: cobra's Version field intercepts --version before
 	// RunE, so no handler here would ever run. The registration must stay under
 	// this exact name and usage text, which schema.golden.json locks — cobra's
-	// own auto-registered flag would read "version for tail-acl" and break the
+	// own auto-registered flag would read "version for tsacl" and break the
 	// golden.
 	root.PersistentFlags().Bool("version", false, "print version and exit")
 	root.PersistentFlags().BoolVar(&showSchema, "schema", false,
@@ -624,8 +624,8 @@ func run(
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	err := root.Execute()
-	// Cobra returns "unknown command \"x\" for \"tail-acl\"" (or, from a
-	// subcommand's NoArgs validator, "...for \"tail-acl lint\"") as a plain
+	// Cobra returns "unknown command \"x\" for \"tsacl\"" (or, from a
+	// subcommand's NoArgs validator, "...for \"tsacl lint\"") as a plain
 	// error; dispatch() used to return the same wording wrapped in usageError,
 	// so the wrap happens here rather than only in main() because tests call
 	// run() directly and check exitCode() on its result.
@@ -718,8 +718,8 @@ func validateIndeterminate(commandName string, opt indeterminateOption) error {
 // resolved when they were not, so this is loud rather than a silent no-op.
 //
 // The test is an allowlist, never a denylist of the other commands: cmd.Name()
-// reports the leaf name, so "tail-acl grant add" arrives here as "add" and
-// "tail-acl posture set" as "set". A denylist naming the parents would let
+// reports the leaf name, so "tsacl grant add" arrives here as "add" and
+// "tsacl posture set" as "set". A denylist naming the parents would let
 // --roster through on every subcommand.
 func validateRoster(commandName, path string, supplied bool) error {
 	if !supplied {
@@ -827,19 +827,19 @@ func render(w io.Writer, format string, colorize bool, res *result) error {
 	// it in there would make the machine envelope's text vary by an orthogonal
 	// fact that already has its own field.
 	if res.Authentication != "" {
-		if _, err := fmt.Fprintln(w, "tail-acl: authenticated with OAuth client credentials"); err != nil {
+		if _, err := fmt.Fprintln(w, "tsacl: authenticated with OAuth client credentials"); err != nil {
 			return err
 		}
 	}
 	// The lint summary is the one line where counts carry severity color, so it
 	// is rebuilt from the structured summary rather than reprinting res.Message.
-	// Every other command keeps the plain "tail-acl: <message>" line.
+	// Every other command keeps the plain "tsacl: <message>" line.
 	if colorize && res.Command == cmdLint && res.LintSummary != nil && res.Findings != nil {
 		return renderLintSummaryLine(
 			w, res.File, *res.LintSummary, len(reportedFindings), aclpolicy.LintSeverity(res.LintThreshold),
 		)
 	}
-	_, err := fmt.Fprintln(w, "tail-acl:", res.Message)
+	_, err := fmt.Fprintln(w, "tsacl:", res.Message)
 	return err
 }
 
@@ -1499,7 +1499,7 @@ func definitionCommand(kind aclpolicy.DefinitionKind, subcommand string) string 
 // name beginning with "-" needs a "--" terminator before it.
 func runTagOwnerAdd(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
 	if len(args) != 2 { //nolint:mnd // TAG and OWNER
-		return nil, usagef("usage: tail-acl tag-owner add TAG OWNER")
+		return nil, usagef("usage: tsacl tag-owner add TAG OWNER")
 	}
 	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
@@ -1564,7 +1564,7 @@ func commentExistingOwner(path, comment string, overwrite bool, tag, owner strin
 // terminator.
 func runHostSet(path string, args []string, comment string, commentSet, overwriteComment bool) (*result, error) {
 	if len(args) != 2 { //nolint:mnd // NAME and ADDRESS
-		return nil, usagef("usage: tail-acl host set NAME ADDRESS")
+		return nil, usagef("usage: tsacl host set NAME ADDRESS")
 	}
 	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
@@ -1631,7 +1631,7 @@ func runPostureSet(
 	path string, args []string, comment string, commentSet, overwriteComment bool, stderr io.Writer,
 ) (*result, error) {
 	if len(args) < 2 { //nolint:mnd // NAME and at least one EXPR required
-		return nil, usagef("usage: tail-acl posture set NAME EXPR [EXPR ...]")
+		return nil, usagef("usage: tsacl posture set NAME EXPR [EXPR ...]")
 	}
 	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
@@ -1694,7 +1694,7 @@ func validatePostureExpressions(name string, exprs []string, stderr io.Writer) e
 	for _, expr := range exprs {
 		for _, diagnostic := range posture.Validate(expr) {
 			if diagnostic.Kind != posture.DiagnosticUnparseable {
-				fmt.Fprintf(stderr, "tail-acl: warning: posture %s expression %q: %s\n",
+				fmt.Fprintf(stderr, "tsacl: warning: posture %s expression %q: %s\n",
 					name, expr, diagnostic.Reason)
 				continue
 			}
@@ -1710,7 +1710,7 @@ func validatePostureExpressions(name string, exprs []string, stderr io.Writer) e
 
 func runPostureRemove(path string, args []string) (*result, error) {
 	if len(args) != 1 {
-		return nil, usagef("usage: tail-acl posture remove NAME")
+		return nil, usagef("usage: tsacl posture remove NAME")
 	}
 	canonical, err := aclpolicy.NormalizePostureName(args[0])
 	if err != nil {
@@ -1933,7 +1933,7 @@ func runTestEdit(
 		return nil, usageError{err}
 	}
 	for _, warning := range aclpolicy.PostureAttrWarnings(attrs) {
-		fmt.Fprintln(stderr, "tail-acl: warning:", warning)
+		fmt.Fprintln(stderr, "tsacl: warning:", warning)
 	}
 	policy, err := loadForEdit(path)
 	if err != nil {
@@ -3219,7 +3219,7 @@ func renderLintSummaryLine(
 	threshold aclpolicy.LintSeverity,
 ) error {
 	var b strings.Builder
-	b.WriteString("tail-acl: ")
+	b.WriteString("tsacl: ")
 	for _, seg := range lintSummarySegments(path, summary, reported, threshold) {
 		b.WriteString(paint(true, seg.color, seg.text))
 	}
@@ -3440,11 +3440,11 @@ func isPreconditionFailed(err error) bool {
 }
 
 const staleUploadRemediation = "deployed policy changed since the last observation; upload refused. " +
-	"Pull the deployed policy to a separate file with `tail-acl --file <remote-policy.hujson> pull`, " +
+	"Pull the deployed policy to a separate file with `tsacl --file <remote-policy.hujson> pull`, " +
 	"then reconcile through the comment-preserving pair merge " +
 	"`hujson-merge --base <remote-policy.hujson> --add <local-change-snippet.hujson> --out <reconciled-policy.hujson>`. " +
-	"Review the result and run `tail-acl --file <reconciled-policy.hujson> plan` before retrying. " +
-	"Do not use `tail-acl merge` for this reconciliation; its directory merge standardizes away HuJSON comments"
+	"Review the result and run `tsacl --file <reconciled-policy.hujson> plan` before retrying. " +
+	"Do not use `tsacl merge` for this reconciliation; its directory merge standardizes away HuJSON comments"
 
 func apiClient(opts options, httpClient *http.Client, apiURL, requiredScope string) (*tailscale.Client, error) {
 	if opts.tailnet == "" {
@@ -3790,7 +3790,7 @@ func commandHelp(cmd *cobra.Command) {
 }
 
 func usage(w io.Writer, fs *pflag.FlagSet) {
-	fmt.Fprintln(w, "tail-acl: pull, edit, query, merge, normalize, validate, test, check, lint, plan, and upload"+
+	fmt.Fprintln(w, "tsacl: pull, edit, query, merge, normalize, validate, test, check, lint, plan, and upload"+
 		" a Tailscale ACL policy.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The result is written to stdout (human text, or a versioned JSON envelope")
@@ -3828,43 +3828,43 @@ func usage(w io.Writer, fs *pflag.FlagSet) {
 // merge without either one exceeding the limit alone.
 const usageExamples = `
 Examples:
-  tail-acl --file acl.json init
-  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
-  tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
-  tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
-  tail-acl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
-  tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
-  tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
-  tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
-  tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng --comment "Lab subnet routers"
-  tail-acl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
-  tail-acl --file acl.hujson external-tailnet add partner --external-id tn-123 --allow-incoming
-  tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
-  tail-acl --file acl.json host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
-  tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
-  tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
-  tail-acl --file acl/acl.generated.json normalize | jq -r 'paths | join(".")'
-  tail-acl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet
-  tail-acl --file acl/acl.generated.json test        # run native policy assertions locally
-  tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
-  tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
-  tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
-  tail-acl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion
-  tail-acl --file acl/acl.generated.json test --watch  # re-run on every save
-  tail-acl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line
-  tail-acl --file acl.hujson test --watch --validate # local plus read-only server verdict
-  tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
-  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
-  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
-  tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp
-  tail-acl --file acl/acl.generated.json lint         # static policy hygiene findings
-  tail-acl --file acl.hujson jq '.grants[] | .src'    # NDJSON query results
-  tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
-  tail-acl -strict --file acl/acl.generated.json test # fail if any rule is unparseable
-  tail-acl --file acl/acl.generated.json plan        # diff against the live tailnet
-  tail-acl --file acl/acl.generated.json upload      # use plan's recorded ETag
-  tail-acl --file acl/acl.generated.json upload --accept-remote-changes # explicit no-If-Match opt-out
-  tail-acl -schema                                   # machine-readable schema
+  tsacl --file acl.json init
+  tsacl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
+  tsacl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
+  tsacl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+  tsacl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
+  tsacl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
+  tsacl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
+  tsacl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
+  tsacl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng --comment "Lab subnet routers"
+  tsacl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
+  tsacl --file acl.hujson external-tailnet add partner --external-id tn-123 --allow-incoming
+  tsacl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
+  tsacl --file acl.json host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
+  tsacl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
+  tsacl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
+  tsacl --file acl/acl.generated.json normalize | jq -r 'paths | join(".")'
+  tsacl --file acl/acl.generated.json pull        # bootstrap once from the live tailnet
+  tsacl --file acl/acl.generated.json test        # run native policy assertions locally
+  tsacl --file acl.json test add --src alice@example.com --deny tag:db:5432
+  tsacl --file acl.json test add --src alice@example.com --accept tag:web:443
+  tsacl --file acl.json test remove --src alice@example.com --deny tag:db:5432
+  tsacl --indeterminate=fail --file acl/acl.generated.json test # fail CI on an unsettled assertion
+  tsacl --file acl/acl.generated.json test --watch  # re-run on every save
+  tsacl -format json --file acl/acl.generated.json test --watch # NDJSON, one verdict per line
+  tsacl --file acl.hujson test --watch --validate # local plus read-only server verdict
+  tsacl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
+  tsacl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
+  tsacl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
+  tsacl --file acl/acl.generated.json check --src tag:app --dst tag:sig:5060 --proto sctp
+  tsacl --file acl/acl.generated.json lint         # static policy hygiene findings
+  tsacl --file acl.hujson jq '.grants[] | .src'    # NDJSON query results
+  tsacl --file acl/acl.generated.json lint -config acl/lint.hujson
+  tsacl -strict --file acl/acl.generated.json test # fail if any rule is unparseable
+  tsacl --file acl/acl.generated.json plan        # diff against the live tailnet
+  tsacl --file acl/acl.generated.json upload      # use plan's recorded ETag
+  tsacl --file acl/acl.generated.json upload --accept-remote-changes # explicit no-If-Match opt-out
+  tsacl -schema                                   # machine-readable schema
 `
 
 // usageRosterNote elaborates --roster beyond its one-line flag summary: the
@@ -3882,7 +3882,7 @@ const usageRosterNote = `
 
 const usageUploadNote = `
   upload safety   plan and pull record the observed ETag in a gitignored
-                  .tail-acl-state.json beside --file, keyed by tailnet. Upload
+                  .tsacl-state.json beside --file, keyed by tailnet. Upload
                   uses that ETag by default and refuses if the record is absent,
                   unreadable, or stale. --if-match explicitly overrides the
                   record. --accept-remote-changes is the explicit opt-out that

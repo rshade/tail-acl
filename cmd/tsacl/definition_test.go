@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestDefinitionCommandsCloseLintRoundTrip(t *testing.T) {
@@ -20,19 +20,19 @@ func TestDefinitionCommandsCloseLintRoundTrip(t *testing.T) {
 		"tagOwners": {"tag:web": ["autogroup:admin"]},
 	}`)
 
-	initialLint, err := runTailACL(t, path, cmdLint)
+	initialLint, err := runTSACL(t, path, cmdLint)
 	if err == nil || !strings.Contains(initialLint, `"id": "undefined-reference"`) {
 		t.Fatalf("initial lint error = %v, want undefined references", err)
 	}
-	if _, addErr := runTailACL(t, path, cmdGroup, subAdd,
+	if _, addErr := runTSACL(t, path, cmdGroup, subAdd,
 		"--name", "group:eng", "--member", "alice@example.com", "--comment", "Engineering"); addErr != nil {
 		t.Fatal(addErr)
 	}
-	if _, ipsetErr := runTailACL(t, path, cmdIPSet, subAdd,
+	if _, ipsetErr := runTSACL(t, path, cmdIPSet, subAdd,
 		"--name", "ipset:office", "--cidr", "10.0.0.0/8"); ipsetErr != nil {
 		t.Fatal(ipsetErr)
 	}
-	if _, lintErr := runTailACL(t, path, cmdLint); lintErr != nil {
+	if _, lintErr := runTSACL(t, path, cmdLint); lintErr != nil {
 		t.Fatalf("lint after definitions = %v", lintErr)
 	}
 
@@ -53,7 +53,7 @@ func TestDefinitionCommandsCloseLintRoundTrip(t *testing.T) {
 	}
 
 	first := readPolicy(t, path)
-	if _, addErr := runTailACL(t, path, cmdGroup, subAdd,
+	if _, addErr := runTSACL(t, path, cmdGroup, subAdd,
 		"--name", "group:eng", "--member", "alice@example.com"); addErr != nil {
 		t.Fatal(addErr)
 	}
@@ -70,17 +70,17 @@ func TestDefinitionRemoveSafetyAndForce(t *testing.T) {
 		"grants": [{"src": ["group:eng"], "dst": ["100.64.0.1"], "ip": ["tcp:443"]}],
 	}`)
 
-	_, err := runTailACL(t, path, cmdGroup, subRemove, "--name", "group:eng")
+	_, err := runTSACL(t, path, cmdGroup, subRemove, "--name", "group:eng")
 	if err == nil || !strings.Contains(err.Error(), "grants[0].src[0]") || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("referenced removal error = %v, want site and force guidance", err)
 	}
 	if code := exitCode(err); code != exitFailed {
 		t.Errorf("referenced removal exit code = %d, want %d", code, exitFailed)
 	}
-	if _, err = runTailACL(t, path, cmdGroup, subRemove, "--name", "group:unused"); err != nil {
+	if _, err = runTSACL(t, path, cmdGroup, subRemove, "--name", "group:unused"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = runTailACL(t, path, cmdGroup, subRemove, "--name", "group:eng", "--force"); err != nil {
+	if _, err = runTSACL(t, path, cmdGroup, subRemove, "--name", "group:eng", "--force"); err != nil {
 		t.Fatal(err)
 	}
 	policy, err := aclpolicy.Load(path)

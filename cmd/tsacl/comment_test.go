@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 // commentAuthoringPolicy carries a comment in each position that decides
@@ -108,7 +108,7 @@ func TestTypedEditsAuthorComments(t *testing.T) {
 				writeTestPolicy(t, path, commentAuthoringPolicy)
 
 				command := append(slices.Clone(target.command), "--comment", comment)
-				if _, err := runTailACL(t, path, command...); err != nil {
+				if _, err := runTSACL(t, path, command...); err != nil {
 					t.Fatalf("run(%q): %v", command, err)
 				}
 
@@ -143,12 +143,12 @@ func TestCommentAuthoringIsIdempotent(t *testing.T) {
 			writeTestPolicy(t, path, commentAuthoringPolicy)
 			command := append(slices.Clone(target.command), "--comment", comment)
 
-			if _, err := runTailACL(t, path, command...); err != nil {
+			if _, err := runTSACL(t, path, command...); err != nil {
 				t.Fatalf("first run: %v", err)
 			}
 			first := readPolicy(t, path)
 
-			stdout, err := runTailACL(t, path, command...)
+			stdout, err := runTSACL(t, path, command...)
 			if err != nil {
 				t.Fatalf("second run: %v", err)
 			}
@@ -197,7 +197,7 @@ func TestCommentOnExistingValueReportsChange(t *testing.T) {
 			writeTestPolicy(t, path, commentAuthoringPolicy)
 
 			command := append(slices.Clone(testCase.command), "--comment", comment)
-			stdout, err := runTailACL(t, path, command...)
+			stdout, err := runTSACL(t, path, command...)
 			if err != nil {
 				t.Fatalf("run(%q): %v", command, err)
 			}
@@ -228,7 +228,7 @@ func TestCommentPreservesExistingLeadingComments(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, commentAuthoringPolicy)
 
-	if _, err := runTailACL(t, path, "host", "set", "legacy", "100.64.0.99",
+	if _, err := runTSACL(t, path, "host", "set", "legacy", "100.64.0.99",
 		"--comment", "Now the canary"); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestOverwriteCommentReplacesExistingComments(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, commentAuthoringPolicy)
 
-	stdout, err := runTailACL(t, path, "host", "set", "legacy", "100.64.0.99",
+	stdout, err := runTSACL(t, path, "host", "set", "legacy", "100.64.0.99",
 		"--comment", "Now the canary", "--overwrite-comment")
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +261,7 @@ func TestOverwriteCommentReplacesExistingComments(t *testing.T) {
 
 	// Repeating an overwrite must settle rather than rewrite.
 	before := readPolicy(t, path)
-	stdout, err = runTailACL(t, path, "host", "set", "legacy", "100.64.0.99",
+	stdout, err = runTSACL(t, path, "host", "set", "legacy", "100.64.0.99",
 		"--comment", "Now the canary", "--overwrite-comment")
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +284,7 @@ func TestOverwriteCommentRequiresComment(t *testing.T) {
 			writeTestPolicy(t, path, commentAuthoringPolicy)
 
 			command := append(slices.Clone(target.command), "--overwrite-comment")
-			_, err := runTailACL(t, path, command...)
+			_, err := runTSACL(t, path, command...)
 			if code := exitCode(err); code != exitUsage {
 				t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 			}
@@ -310,7 +310,7 @@ func TestCommentRejectsInvalidText(t *testing.T) {
 				writeTestPolicy(t, path, commentAuthoringPolicy)
 
 				command := append(slices.Clone(target.command), "--comment", text)
-				_, err := runTailACL(t, path, command...)
+				_, err := runTSACL(t, path, command...)
 				if code := exitCode(err); code != exitUsage {
 					t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 				}
@@ -336,7 +336,7 @@ func TestCommentRejectedByUnsupportedCommands(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acl.hujson")
 			writeTestPolicy(t, path, commentAuthoringPolicy)
 
-			_, err := runTailACL(t, path, command...)
+			_, err := runTSACL(t, path, command...)
 			if code := exitCode(err); code != exitUsage {
 				t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 			}
@@ -362,7 +362,7 @@ func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		_, err := runTailACL(t, path, "posture", "set", "posture:lab",
+		_, err := runTSACL(t, path, "posture", "set", "posture:lab",
 			"--comment", "allows negative scores", "--", "-1 < custom:score")
 		if code := exitCode(err); code != exitUsage {
 			t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
@@ -380,7 +380,7 @@ func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		_, err := runTailACL(t, path, "posture", "set", "posture:lab", "--", "--custom-check")
+		_, err := runTSACL(t, path, "posture", "set", "posture:lab", "--", "--custom-check")
 		if code := exitCode(err); code != exitUsage {
 			t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 		}
@@ -395,7 +395,7 @@ func TestPostureSetDashPrefixedExpressionsNeedTerminator(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, commentAuthoringPolicy)
 
-		if _, err := runTailACL(t, path, "posture", "set", "posture:lab",
+		if _, err := runTSACL(t, path, "posture", "set", "posture:lab",
 			"custom:x == true", "--comment", "lab devices"); err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +418,7 @@ func TestPostureSetRejectsUnrecognizedFlagWithoutTerminator(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, commentAuthoringPolicy)
 
-	_, err := runTailACL(t, path, "posture", "set", "posture:lab",
+	_, err := runTSACL(t, path, "posture", "set", "posture:lab",
 		"custom:score > 1", "--commnet", "oops")
 	if code := exitCode(err); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
@@ -456,7 +456,7 @@ func TestGrantCommentRejectsAmbiguousDuplicateGrant(t *testing.T) {
 				command = append(command, "--overwrite-comment")
 			}
 
-			_, err := runTailACL(t, path, command...)
+			_, err := runTSACL(t, path, command...)
 			if err == nil || !strings.Contains(err.Error(), "duplicate grants") {
 				t.Fatalf("error = %v, want duplicate-grant ambiguity", err)
 			}
@@ -481,7 +481,7 @@ func TestHostSetAndPostureSetAreIdempotent(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acl.hujson")
 			writeTestPolicy(t, path, commentAuthoringPolicy)
 
-			stdout, err := runTailACL(t, path, command...)
+			stdout, err := runTSACL(t, path, command...)
 			if err != nil {
 				t.Fatalf("run(%q): %v", command, err)
 			}
@@ -528,7 +528,7 @@ func TestCommentAuthoringRespectsLegacyCapitalizedKeys(t *testing.T) {
 			writeTestPolicy(t, path, legacy)
 
 			command := append(slices.Clone(testCase.command), "--comment", comment)
-			if _, err := runTailACL(t, path, command...); err != nil {
+			if _, err := runTSACL(t, path, command...); err != nil {
 				t.Fatalf("run(%q): %v", command, err)
 			}
 
@@ -546,7 +546,7 @@ func TestCommentAuthoringRespectsLegacyCapitalizedKeys(t *testing.T) {
 	}
 }
 
-func runTailACL(t *testing.T, path string, args ...string) (string, error) {
+func runTSACL(t *testing.T, path string, args ...string) (string, error) {
 	t.Helper()
 	var stdout strings.Builder
 	err := run(

@@ -4,12 +4,12 @@
 # Local smoke test: `mise run release-check`.
 version: 2
 
-project_name: tail-acl
+project_name: tsacl
 
 builds:
-  - id: tail-acl
-    main: ./cmd/tail-acl
-    binary: tail-acl
+  - id: tsacl
+    main: ./cmd/tsacl
+    binary: tsacl
     env:
       - CGO_ENABLED=0
     ldflags:

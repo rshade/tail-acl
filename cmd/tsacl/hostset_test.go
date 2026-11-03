@@ -19,7 +19,7 @@ func TestHostSetRejectsNonAddress(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acl.hujson")
 			const before = "{}\n"
 			writeTestPolicy(t, path, before)
-			_, err := runTailACL(t, path, "host", "set", "a", test.address)
+			_, err := runTSACL(t, path, "host", "set", "a", test.address)
 			if err == nil {
 				t.Fatal("host set accepted a non-address")
 			}
@@ -43,7 +43,7 @@ func TestHostSetAcceptsLiteralAddressAndPrefix(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "acl.hujson")
 			writeTestPolicy(t, path, "{}\n")
-			if _, err := runTailACL(t, path, "host", "set", "web", address); err != nil {
+			if _, err := runTSACL(t, path, "host", "set", "web", address); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(readPolicy(t, path), address) {

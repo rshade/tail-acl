@@ -387,7 +387,7 @@
       "severity": "advice"
     }
   ],
-  "name": "tail-acl",
+  "name": "tsacl",
   "sanitization": "TAILSCALE_SANITIZE=off|identity|strict sanitizes rendered output after evaluation; a non-off environment value overrides --sanitize. normalize, plan, and jq refuse active sanitization because policy bytes and policy diffs cannot be mechanically sanitized safely. Set TAILSCALE_SANITIZE_KEY (64 hex characters) for operator-scoped placeholders that remain comparable across runs; without it placeholders are artifact-scoped.",
   "schema_version": "1",
   "version": "dev"

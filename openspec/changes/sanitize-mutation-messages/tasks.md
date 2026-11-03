@@ -24,6 +24,6 @@
 
 ## 3. Verify
 
-- [x] 3.1 From `tail-acl`, run `openspec validate sanitize-mutation-messages --strict`
+- [x] 3.1 From `tsacl`, run `openspec validate sanitize-mutation-messages --strict`
   and `GOWORK=off go test ./...`, then `golangci-lint run ./...`. From the
   worktree root, run `make test` and `make lint` when time allows.

@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rshade/tail-acl/pkg/policycore/cliflags"
+	"github.com/rshade/tsacl/pkg/policycore/cliflags"
 )
 
 func newTestCommand() *cobra.Command {

@@ -20,7 +20,7 @@ import (
 	"github.com/tailscale/hujson"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
+	"github.com/rshade/tsacl/pkg/policycore/hujsonedit"
 )
 
 // parseFile reads and parses path as HuJSON. It is a package-level wrapper
@@ -31,7 +31,7 @@ func parseFile(path string) (hujson.Value, error) { return hujsonedit.ParseFile(
 
 // PatchOperation is a schema-agnostic HuJSON patch mechanic that lives in
 // policycore/hujsonedit; this is a type alias so every existing call site in
-// this package and cmd/tail-acl keeps compiling unchanged. See
+// this package and cmd/tsacl keeps compiling unchanged. See
 // hujsonedit's package doc for why the mechanics moved out. PatchAdd,
 // PatchRemove, JSONPointer, and WriteRaw below are the matching function
 // re-exports.
@@ -177,7 +177,7 @@ func ReadRaw(path string) ([]byte, error) {
 // gives, sharpened by where this output goes: hujson resolves duplicates
 // first-wins, while encoding/json, jq, and the rest of the strict-JSON tooling
 // this command feeds resolve them last-wins. Emitting the document would answer
-// an operator with the member tail-acl itself discards, so normalize refuses the
+// an operator with the member tsacl itself discards, so normalize refuses the
 // file exactly as Load does.
 func Normalize(path string) ([]byte, error) {
 	raw, err := ReadRaw(path)
@@ -208,7 +208,7 @@ func Load(path string) (*Policy, error) {
 }
 
 // LoadBytes decodes a policy from bytes the caller already holds. It exists for
-// a caller that must know exactly which bytes produced a verdict: tail-acl's
+// a caller that must know exactly which bytes produced a verdict: tsacl's
 // watch loop content-addresses every run, and hashing its own read while Load
 // took a second would let it report a digest for bytes it never evaluated. name
 // is used only in error messages.

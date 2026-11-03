@@ -21,7 +21,7 @@ SHALL exit 1.
 - **WHEN** a grant's `dst` references an undefined tag and its `src`
   references an undefined group
 - **THEN** stdout shows an `ERROR` line for each and
-  `tail-acl: 2 findings: 2 error, 0 warn, 0 info`, and the command exits 1
+  `tsacl: 2 findings: 2 error, 0 warn, 0 info`, and the command exits 1
 
 #### Scenario: A clean policy passes
 

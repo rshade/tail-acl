@@ -7,7 +7,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore/addrspace"
+	"github.com/rshade/tsacl/pkg/policycore/addrspace"
 )
 
 func lintAutoApproverRouteOverlap(policy *tailscale.ACL) []LintFinding {

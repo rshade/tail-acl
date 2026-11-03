@@ -114,7 +114,7 @@ library.
 `hujsonedit` provides schema-agnostic, comment-preserving RFC 6902 edits to
 HuJSON documents. It carries no knowledge of any particular document's
 fields — callers own that; the package owns only the AST/patch mechanics.
-Extracted from `tail-acl/internal/aclpolicy` once `tail-ipam` needed the same
+Extracted from `tsacl/internal/aclpolicy` once `tail-ipam` needed the same
 mechanics and the generic layer was already visibly separable from
 ACL-specific code.
 
@@ -129,7 +129,7 @@ the parsed document — pass `nil` when the schema has none.
 ```go
 err := hujsonedit.WritePatch(path, nil,
     hujsonedit.PatchAdd(entry, "acls", "-"),
-    hujsonedit.PatchComment("added by tail-acl grant add", "acls", "-"),
+    hujsonedit.PatchComment("added by tsacl grant add", "acls", "-"),
 )
 ```
 

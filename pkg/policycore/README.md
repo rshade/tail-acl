@@ -1,10 +1,10 @@
 # policycore
 
 Selector resolution, address-space primitives, and the output sanitization
-contract, shared by `tail-acl` and the other tailnet tools built on it.
+contract, shared by `tsacl` and the other tailnet tools built on it.
 
-Import it from the `github.com/rshade/tail-acl` module, for example
-`github.com/rshade/tail-acl/pkg/policycore/ipcalc`. Go builds only the packages
+Import it from the `github.com/rshade/tsacl` module, for example
+`github.com/rshade/tsacl/pkg/policycore/ipcalc`. Go builds only the packages
 you import, so the CLI's own dependencies stay out of your binary.
 
 Several tools need to answer one question identically: *does this policy
@@ -27,7 +27,7 @@ repeated site ID is intentional; callers own those classifications.
 
 The `hujsonedit` subpackage applies schema-agnostic, comment-preserving RFC
 6902 edits to HuJSON documents. It carries no knowledge of any particular
-document's fields; `tail-acl` and `tail-ipam` both build their typed edits on
+document's fields; `tsacl` and `tail-ipam` both build their typed edits on
 it.
 
 The `posture` subpackage parses, validates, and evaluates Tailscale
@@ -36,7 +36,7 @@ expression or attribute it cannot read is reported, never folded into a pass
 or a failure. Its grammar and vocabularies (the `ip:country` country list, the
 known-attribute table) are editorial readings of the control plane's behavior,
 each pinned by a Tier-2 provenance guard test against a fixture captured from
-the live server. `tailnet-audit` evaluates devices with it; `tail-acl`
+the live server. `tailnet-audit` evaluates devices with it; `tsacl`
 validates expressions with it.
 
 Cross-tailnet selectors (`group://<alias>/<name>` and `tag://<alias>/<name>`,
@@ -56,14 +56,14 @@ names:
 - `Hosts` and `IPSets` expansion, with a cycle guard
 - CIDR and address containment
 
-Out of scope — kept in `tail-acl`:
+Out of scope — kept in `tsacl`:
 
 - Port and protocol evaluation
 - `via` routing behavior
 - Policy parsing, merging, and upload
 
 The one shared policy-shape predicate is `ContainsLiteralWildcard`. Both
-`tail-acl` and `tailnet-audit` use it to keep the ownership boundary between a
+`tsacl` and `tailnet-audit` use it to keep the ownership boundary between a
 static literal-wildcard advisory and a destination that becomes broad only
 after resolving it against the live fleet. It recognizes only a port-stripped
 literal `*`; it deliberately does not classify any autogroup as a wildcard.

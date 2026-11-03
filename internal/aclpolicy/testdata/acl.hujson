@@ -1,6 +1,6 @@
 // Tailnet policy file for example-lab — this is the SOURCE. Managed via
 // Pulumi (tailscale.Acl in index.ts, overwriteExistingContent: true), but the
-// deployed policy is compiled by tail-acl: edit this file, run `make merge` to
+// deployed policy is compiled by tsacl: edit this file, run `make merge` to
 // rebuild acl/acl.generated.json, then `pulumi up`. Preview a live diff first
 // with `make acl-plan`. Don't edit the policy in the admin console — those
 // changes are reverted on the next deploy.

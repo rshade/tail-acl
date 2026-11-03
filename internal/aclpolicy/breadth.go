@@ -10,7 +10,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore"
 )
 
 const (
@@ -158,7 +158,7 @@ func denyCoveredDestinations(tests []tailscale.ACLTest) map[string]bool {
 			// splitSelectorPort rather than destinationHost: the latter is
 			// documented to reject portless input, and a portless deny would
 			// otherwise truncate to a garbage host ("tag:db" -> "tag"). A
-			// portless deny is not a readable assertion — tail-acl test reports
+			// portless deny is not a readable assertion — tsacl test reports
 			// it — so it contributes no coverage instead of a truncated key.
 			host, _, ok := splitSelectorPort(strings.TrimSpace(deny))
 			if !ok {

@@ -1,6 +1,6 @@
 # Offline evaluation and safety
 
-`tail-acl test` and `tail-acl check` evaluate the candidate policy without
+`tsacl test` and `tsacl check` evaluate the candidate policy without
 credentials or network access. This makes results deterministic for unchanged
 policy bytes and useful before a tailnet is available, but a policy file does
 not contain every fact that can affect access.

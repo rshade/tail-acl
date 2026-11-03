@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/pkg/policycore/ipcalc"
+	"github.com/rshade/tsacl/pkg/policycore/ipcalc"
 )
 
 func TestUnmap4In6(t *testing.T) {

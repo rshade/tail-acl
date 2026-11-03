@@ -1,4 +1,4 @@
-# Adopt tail-acl for an existing tailnet
+# Adopt tsacl for an existing tailnet
 
 This guide moves a policy that was authored in the Tailscale admin console
 under local, reviewable control, without a window in which your file and the
@@ -21,12 +21,12 @@ Every step below except the final upload is read-only.
 ## 1. Pull the deployed policy
 
 ```sh
-tail-acl --file acl/acl.hujson pull
+tsacl --file acl/acl.hujson pull
 ```
 
 `pull` writes the deployed bytes verbatim — comments, key order, and formatting
 are preserved — and reports the ETag that identifies the version it fetched.
-It also records that ETag in the gitignored `.tail-acl-state.json` beside the
+It also records that ETag in the gitignored `.tsacl-state.json` beside the
 policy, keyed by tailnet.
 
 `pull` refuses to overwrite an existing `--file`. If you have already started a
@@ -42,7 +42,7 @@ what was actually deployed, rather than against nothing.
 ## 3. Confirm the local copy matches production
 
 ```sh
-tail-acl --file acl/acl.hujson plan
+tsacl --file acl/acl.hujson plan
 ```
 
 `plan` fetches the deployed policy and prints a validated unified diff without
@@ -58,11 +58,11 @@ Edit the policy with the authoring commands rather than by hand, so the file
 keeps its comments and stays well-formed:
 
 ```sh
-tail-acl --file acl/acl.hujson grant add \
+tsacl --file acl/acl.hujson grant add \
   --src group:eng --dst tag:ci --ip 22 \
   --comment "engineers reach CI over SSH"
 
-tail-acl --file acl/acl.hujson plan
+tsacl --file acl/acl.hujson plan
 ```
 
 Read the diff. `plan` validates the candidate as well as diffing it, so a
@@ -71,7 +71,7 @@ policy the control plane would reject fails here rather than at upload.
 ## 5. Upload with optimistic concurrency
 
 ```sh
-tail-acl --file acl/acl.hujson upload
+tsacl --file acl/acl.hujson upload
 ```
 
 `upload` defaults `If-Match` to the ETag the latest `plan` recorded, so it fails
@@ -79,7 +79,7 @@ rather than silently clobbering a change someone else made through the admin
 console in the meantime. If it is rejected, pull the deployed policy to a
 separate file, reconcile through the comment-preserving
 `hujson-merge --base ... --add ...` path, review, re-plan, and retry. Do not use
-`tail-acl merge` for this recovery: its directory merge removes comments.
+`tsacl merge` for this recovery: its directory merge removes comments.
 
 If the state file is absent or unreadable, upload refuses with exit `2`. Run
 `plan` to recreate the observation, pass an explicit `--if-match ETAG`, or use
@@ -102,5 +102,5 @@ their change wholesale.
 
 - [Lint a policy](./lint-policy.md)
 - [Exit codes](../reference/exit-codes.md)
-- The [`tail-acl` README](../../README.md) has the authoritative command and
+- The [`tsacl` README](../../README.md) has the authoritative command and
   flag tables.

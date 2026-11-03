@@ -15,7 +15,7 @@ bytes are verbatim.
 
 ## Capture procedure
 
-Use a read-only API token on a scratch tailnet. When `TAIL_ACL_LIVE_USER` is
+Use a read-only API token on a scratch tailnet. When `TSACL_LIVE_USER` is
 omitted, the harness derives a concrete email selector from the deployed policy
 through the allowed `GET .../acl` request without printing or persisting it. Set
 it explicitly when the policy contains no concrete users. Set the optional SCIM
@@ -24,13 +24,13 @@ group only when it is known to be unmanaged or unsynced on that tailnet:
 ```sh
 export TAILSCALE_API_KEY=...
 export TAILSCALE_TAILNET=...
-export TAIL_ACL_LIVE_USER=alice@example.com # optional when present in the policy
-export TAIL_ACL_LIVE_SCIM_GROUP=group:unknown@example.com # optional probe C
-TAIL_ACL_LIVE=1 TAIL_ACL_CAPTURE=1 \
+export TSACL_LIVE_USER=alice@example.com # optional when present in the policy
+export TSACL_LIVE_SCIM_GROUP=group:unknown@example.com # optional probe C
+TSACL_LIVE=1 TSACL_CAPTURE=1 \
   go test ./integration/ -run LiveValidateEvidenceGate -v
 ```
 
-`TAIL_ACL_LIVE=1` is a mandatory opt-in. The CLI reads ambient
+`TSACL_LIVE=1` is a mandatory opt-in. The CLI reads ambient
 `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET`, so credentials alone must never
 cause `go test ./...` to contact the control plane. The test transport fails
 closed on anything other than `POST .../acl/validate` and `GET .../acl`.
@@ -41,7 +41,7 @@ The capture run writes:
 - `validate_<scenario>.json`: response bytes exactly as received, except for
   placeholder substitution of the configured user, SCIM group, and tailnet name.
   Matching folds ASCII case, because the control plane normalizes logins and
-  echoes them back lowercased while `TAIL_ACL_LIVE_USER` may be set in any case.
+  echoes them back lowercased while `TSACL_LIVE_USER` may be set in any case.
   A configured value shorter than four bytes aborts the run instead of being
   substituted: the v2 client's default tailnet `-` occurs inside ordinary probe
   text such as `not-a-user-or-host`, so replacing it would corrupt evidence
@@ -50,7 +50,7 @@ The capture run writes:
 - `validate_capture_manifest.json`: redacted request bodies, HTTP status,
   request and response content types, response byte counts, SHA-256 hashes, and
   derived key-shape summaries. Probe C records an explicit unavailable reason
-  when `TAIL_ACL_LIVE_SCIM_GROUP` is unset.
+  when `TSACL_LIVE_SCIM_GROUP` is unset.
 
 After substituting, the harness scans the redacted bytes for anything
 email-shaped and aborts on a hit, reporting only the offset and length so the

@@ -22,8 +22,8 @@ import (
 	"github.com/tailscale/hujson"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/observedstate"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/observedstate"
 )
 
 func TestInitBootstrapsTypedAuthoringWithoutOverwriting(t *testing.T) {
@@ -833,7 +833,7 @@ func TestPostureSetRequiresAtLeastOneExpr(t *testing.T) {
 	if code := exitCode(err); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "usage: tail-acl posture set NAME EXPR [EXPR ...]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: tsacl posture set NAME EXPR [EXPR ...]") {
 		t.Errorf("error = %v, want the posture set usage string", err)
 	}
 }
@@ -1694,7 +1694,7 @@ func TestJSONEnvelope(t *testing.T) {
 	if err = json.Unmarshal([]byte(stdout.String()), &res); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if res.SchemaVersion != schemaVersion || res.Tool != "tail-acl" || res.Command != "merge" ||
+	if res.SchemaVersion != schemaVersion || res.Tool != "tsacl" || res.Command != "merge" ||
 		res.Status != statusOK {
 		t.Errorf("envelope = %#v", res)
 	}
@@ -1726,7 +1726,7 @@ func TestPolicyTestHumanOutputAndExitCodes(t *testing.T) {
 			wantOutput: []string{
 				"PASS tests[0].accept[0] alice@example.com -> tag:web:443",
 				"PASS tests[0].deny[0] alice@example.com -> tag:web:22",
-				"tail-acl: 2 assertions: 2 passed, 0 failed",
+				"tsacl: 2 assertions: 2 passed, 0 failed",
 			},
 		},
 		{
@@ -1738,14 +1738,14 @@ func TestPolicyTestHumanOutputAndExitCodes(t *testing.T) {
 			wantCode: exitFailed,
 			wantOutput: []string{
 				"FAIL tests[0].deny[0] alice@example.com -> tag:web:443",
-				"tail-acl: 1 assertions: 0 passed, 1 failed",
+				"tsacl: 1 assertions: 0 passed, 1 failed",
 			},
 		},
 		{
 			name:       "missing tests",
 			policy:     `{"grants": []}`,
 			wantCode:   exitOK,
-			wantOutput: []string{"tail-acl: no policy tests declared"},
+			wantOutput: []string{"tsacl: no policy tests declared"},
 		},
 	}
 
@@ -2355,7 +2355,7 @@ func TestCheckHumanOutputAndExitCodes(t *testing.T) {
 			args:     []string{"--src", "alice@example.com", "--dst", "tag:web:443"},
 			wantCode: exitOK,
 			wantOutput: []string{
-				"tail-acl: reachable: alice@example.com -> tag:web:443",
+				"tsacl: reachable: alice@example.com -> tag:web:443",
 				"matched grant 0",
 			},
 		},
@@ -2364,7 +2364,7 @@ func TestCheckHumanOutputAndExitCodes(t *testing.T) {
 			args:     []string{"--src", "alice@example.com", "--dst", "tag:web", "--port", "443"},
 			wantCode: exitOK,
 			wantOutput: []string{
-				"tail-acl: reachable: alice@example.com -> tag:web:443",
+				"tsacl: reachable: alice@example.com -> tag:web:443",
 				"matched grant 0",
 			},
 		},
@@ -2373,7 +2373,7 @@ func TestCheckHumanOutputAndExitCodes(t *testing.T) {
 			args:     []string{"--src", "alice@example.com", "--dst", "tag:web:22"},
 			wantCode: exitFailed,
 			wantOutput: []string{
-				"tail-acl: not reachable: alice@example.com -> tag:web:22",
+				"tsacl: not reachable: alice@example.com -> tag:web:22",
 				"no network grant or ACL matched",
 			},
 		},
@@ -2805,8 +2805,8 @@ func TestVersionFlag(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(stdout.String(), "tail-acl ") {
-		t.Errorf("version = %q, want a \"tail-acl \" prefix", stdout.String())
+	if !strings.HasPrefix(stdout.String(), "tsacl ") {
+		t.Errorf("version = %q, want a \"tsacl \" prefix", stdout.String())
 	}
 }
 
@@ -2836,7 +2836,7 @@ func TestHelpDocumentsCheckAndExitCodes(t *testing.T) {
 	// entry covers.
 	for _, want := range []string{
 		"typed edits preserve comments in JSON and HuJSON",
-		"tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
+		"tsacl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved",
 		"check --src alice@example.com --dst tag:web:443",
 		lintSummary,
 		"# static policy hygiene findings",
@@ -2950,7 +2950,7 @@ func TestLeafCommandsHelpWorks(t *testing.T) {
 // that leaked down the whole command tree. cobra resolves a command's help
 // function by walking up to the nearest ancestor that set one, so the single
 // root.SetHelpFunc in newRootCommand answered --help for every descendant:
-// "tail-acl lint --help" printed the whole-tool banner, the entire command
+// "tsacl lint --help" printed the whole-tool banner, the entire command
 // catalog, every root example, and lint's own --severity/--wildcard/--config
 // listed under a "Global flags:" heading that they are not. Each command now
 // renders its own cobra help, which is the only rendering that separates a
@@ -2961,7 +2961,7 @@ func TestSubcommandHelpIsScopedToItsCommand(t *testing.T) {
 	// Fragments unique to the root page. Any of them in a subcommand's help
 	// means the override leaked down the tree again.
 	rootOnly := []string{
-		"tail-acl: pull, edit, query, merge",
+		"tsacl: pull, edit, query, merge",
 		"auto-approver remove",
 		"Global flags:",
 		"Exit codes:",
@@ -2977,7 +2977,7 @@ func TestSubcommandHelpIsScopedToItsCommand(t *testing.T) {
 			args: []string{cmdLint, "--help"},
 			want: []string{
 				lintSummary,
-				"Usage:\n  tail-acl lint",
+				"Usage:\n  tsacl lint",
 				"Flags:\n",
 				"--severity string",
 				"--wildcard string",
@@ -2993,12 +2993,12 @@ func TestSubcommandHelpIsScopedToItsCommand(t *testing.T) {
 			// differently from the catalog's "by zero-based index" — so
 			// finding it proves the page was rendered from the command tree
 			// rather than from commandCatalog.
-			want: []string{"Usage:\n  tail-acl grant", "Available Commands:", "Remove a grant by index"},
+			want: []string{"Usage:\n  tsacl grant", "Available Commands:", "Remove a grant by index"},
 		},
 		{
 			name: "nested leaf",
 			args: []string{cmdGrant, subAdd, "--help"},
-			want: []string{"Usage:\n  tail-acl grant add", "--src stringList", "--comment string"},
+			want: []string{"Usage:\n  tsacl grant add", "--src stringList", "--comment string"},
 		},
 		{
 			name: "long overrides short",
@@ -3070,7 +3070,7 @@ func TestSchemaFlagIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout.String()), &doc); err != nil {
 		t.Fatalf("schema is not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if doc.Name != "tail-acl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
+	if doc.Name != "tsacl" || len(doc.Commands) == 0 || doc.ExitCodes["2"] == "" {
 		t.Errorf("schema = %#v", doc)
 	}
 	if !slices.ContainsFunc(doc.Flags, func(schemaFlag schemaFlag) bool {
@@ -3154,12 +3154,12 @@ func schemaHasDenyFirstTestEdits(commands []schemaCommand) bool {
 // registered by addSubcommands, in both the bare-invocation and
 // unknown-subcommand shapes. The list is deliberately exhaustive rather than
 // representative: a parent added without an entry here is a command whose
-// "tail-acl <noun> bogus" exits 0, which is the exact regression this test
+// "tsacl <noun> bogus" exits 0, which is the exact regression this test
 // exists to catch. Without an explicit RunE, cobra treats these
 // parents as non-runnable and returns [flag.ErrHelp] before ValidateArgs or
 // PersistentPreRunE ever run, for *any* leftover args — not just none — which
-// let "tail-acl grant bogus" print help and exit 0 exactly like a bare
-// "tail-acl grant" slip through unnoticed. This is the coverage gap that let
+// let "tsacl grant bogus" print help and exit 0 exactly like a bare
+// "tsacl grant" slip through unnoticed. This is the coverage gap that let
 // that regression land undisclosed; see runParentCommand in commands.go for
 // the fix.
 func TestParentCommandsDistinguishBareFromUnknownSubcommand(t *testing.T) {
@@ -3490,10 +3490,10 @@ func TestStaleUploadRemediationUsesCommentPreservingPairMerge(t *testing.T) {
 	}
 	for _, want := range []string{
 		"upload refused",
-		"tail-acl --file <remote-policy.hujson> pull",
+		"tsacl --file <remote-policy.hujson> pull",
 		"hujson-merge --base",
 		"--add <local-change-snippet.hujson>",
-		"Do not use `tail-acl merge`",
+		"Do not use `tsacl merge`",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("remediation missing %q: %v", want, err)
@@ -3776,12 +3776,12 @@ func TestHumanOutputStatesCredentialClassOnItsOwnLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "tail-acl: authenticated with OAuth client credentials\n"
+	const want = "tsacl: authenticated with OAuth client credentials\n"
 	if !strings.Contains(stdout.String(), want) {
 		t.Errorf("stdout = %q, want a line reading %q", stdout.String(), want)
 	}
 	// The verdict line itself must read exactly as it does under an API key.
-	if !strings.Contains(stdout.String(), "tail-acl: "+path+" is valid\n") {
+	if !strings.Contains(stdout.String(), "tsacl: "+path+" is valid\n") {
 		t.Errorf("stdout = %q, want the unmodified verdict line", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "client-secret") {
@@ -4010,7 +4010,7 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 				"grants": [{"src": ["group:dev"], "dst": ["tag:web"], "ip": ["tcp:443"]}]
 			}`,
 			wantCode:   exitOK,
-			wantOutput: []string{"tail-acl: no policy hygiene findings"},
+			wantOutput: []string{"tsacl: no policy hygiene findings"},
 		},
 		{
 			name:     "errors present",
@@ -4019,7 +4019,7 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 			wantOutput: []string{
 				"ERROR dst-tag-no-owner grants[0].dst[0] tag:web",
 				"ERROR undefined-reference grants[0].src[0] group:missing",
-				"tail-acl: 2 findings: 2 error, 0 warn, 0 info",
+				"tsacl: 2 findings: 2 error, 0 warn, 0 info",
 			},
 		},
 		{
@@ -4032,7 +4032,7 @@ func TestLintHumanOutputAndExitCodes(t *testing.T) {
 			wantOutput: []string{
 				"ERROR undefined-reference ssh[0].src[0] group:ghost",
 				"ERROR dst-tag-no-owner sshTests[0].dst[0] tag:missing",
-				"tail-acl: 2 findings: 2 error, 0 warn, 0 info",
+				"tsacl: 2 findings: 2 error, 0 warn, 0 info",
 			},
 		},
 	}
@@ -4141,7 +4141,7 @@ func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 		"advisory (heuristic; not a defect, but -severity advice makes these fail this run):",
 		"ADVICE broad-rule-untested grants[0].dst[0] tag:db",
 		`  suggested test: {"src":"alice@example.com","deny":["tag:db:5432"]}`,
-		"tail-acl: 2 findings: 0 error, 0 warn, 1 info, 1 advice",
+		"tsacl: 2 findings: 0 error, 0 warn, 1 info, 1 advice",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
@@ -4150,7 +4150,7 @@ func TestLintAdviceHumanOutputIsLastAndASCII(t *testing.T) {
 	infoIndex := strings.Index(stdout.String(), "INFO unused-group")
 	caveatIndex := strings.Index(stdout.String(), "advisory (heuristic")
 	adviceIndex := strings.Index(stdout.String(), "ADVICE broad-rule-untested")
-	summaryIndex := strings.Index(stdout.String(), "tail-acl: 2 findings")
+	summaryIndex := strings.Index(stdout.String(), "tsacl: 2 findings")
 	if infoIndex < 0 || caveatIndex < 0 || adviceIndex < 0 || summaryIndex < 0 ||
 		infoIndex >= caveatIndex || caveatIndex >= adviceIndex || adviceIndex >= summaryIndex {
 		t.Errorf("finding order = info:%d caveat:%d advice:%d summary:%d; output:\n%s",
@@ -4450,7 +4450,7 @@ func TestLintHumanSummaryRendersBothSvcReferenceSets(t *testing.T) {
 	if code := exitCode(err); code != exitFailed {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitFailed, err)
 	}
-	want := "tail-acl: 1 finding: 0 error, 1 warn, 0 info; 2 svc references; " +
+	want := "tsacl: 1 finding: 0 error, 1 warn, 0 info; 2 svc references; " +
 		"1 online-checkable svc destination reference"
 	if !strings.Contains(stdout.String(), want) {
 		t.Errorf("stdout missing %q:\n%s", want, stdout.String())
@@ -4997,7 +4997,7 @@ func TestStreamEmitterHumanSeparatesRunsWithOneBlankLine(t *testing.T) {
 			t.Fatalf("emit: %v", err)
 		}
 	}
-	const want = "tail-acl: first\n\ntail-acl: second\n"
+	const want = "tsacl: first\n\ntsacl: second\n"
 	if out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
 	}
@@ -5021,7 +5021,7 @@ func TestSingleShotJSONStaysIndentedWithoutPolicyDigest(t *testing.T) {
 	); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "\n  \"tool\": \"tail-acl\"") {
+	if !strings.Contains(stdout.String(), "\n  \"tool\": \"tsacl\"") {
 		t.Errorf("single-shot JSON lost its indentation:\n%s", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "policy_digest") {
@@ -5344,7 +5344,7 @@ func TestWatchHumanSeparatesRunsAndEmitsNoANSI(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, watchPassingPolicy)
-	driver := &watchDriver{marker: "tail-acl: "}
+	driver := &watchDriver{marker: "tsacl: "}
 	var stderr strings.Builder
 
 	err := runWatchCancellable(t, path, formatHuman, driver, &stderr, func(cancel context.CancelFunc) {
@@ -5363,7 +5363,7 @@ func TestWatchHumanSeparatesRunsAndEmitsNoANSI(t *testing.T) {
 	if strings.Contains(driver.String(), "\x1b") {
 		t.Errorf("stdout contains an ANSI escape:\n%q", driver.String())
 	}
-	if !strings.Contains(driver.String(), "\n\ntail-acl: ") &&
+	if !strings.Contains(driver.String(), "\n\ntsacl: ") &&
 		!strings.Contains(driver.String(), "\n\nFAIL ") &&
 		!strings.Contains(driver.String(), "\n\nPASS ") {
 		t.Errorf("runs are not separated by a blank line:\n%s", driver)
@@ -5556,7 +5556,7 @@ func TestSchemaExitCode2MentionsWatch(t *testing.T) {
 
 // failingWriter stands in for a write that returns an error, such as a full
 // disk. It is not a closed pipe: on Unix, writing to a closed reader on real
-// stdout (`tail-acl test --watch | head -1`) dies by SIGPIPE (exit 141) instead
+// stdout (`tsacl test --watch | head -1`) dies by SIGPIPE (exit 141) instead
 // of returning an error, so that path never reaches watchTests at all — and it
 // only reaches SIGPIPE on the next save, since nothing is written in between.
 type failingWriter struct{}

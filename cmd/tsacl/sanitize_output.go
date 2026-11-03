@@ -6,12 +6,12 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/tailapi"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/tailapi"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
 )
 
-// sanitizeResultEnvelope rebuilds the structured, shareable tail-acl output
+// sanitizeResultEnvelope rebuilds the structured, shareable tsacl output
 // from zero. Commands that emit policy bytes, arbitrary policy fragments, or a
 // policy diff are rejected before their handlers run and never reach here.
 func sanitizeResultEnvelope(input *result, output *sanitize.Sanitizer) *result {

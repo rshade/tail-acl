@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 // colorEnabled encodes the machine contract: JSON never colors, --color=never is
@@ -197,7 +197,7 @@ func TestLintColorAlwaysPaintsSeverities(t *testing.T) {
 		ansiBlue + "INFO" + ansiReset + " unused-group",
 		ansiDim + "ADVICE" + ansiReset + " broad-rule-untested",
 		// Zero error/warn render green (all-clear); the info tally is blue.
-		"tail-acl: 2 findings: " + ansiGreen + "0 error" + ansiReset,
+		"tsacl: 2 findings: " + ansiGreen + "0 error" + ansiReset,
 		ansiGreen + "0 warn" + ansiReset,
 		ansiBlue + "1 info" + ansiReset,
 		ansiDim + "1 advice" + ansiReset,

@@ -1,10 +1,10 @@
 // Package policycore resolves Tailscale policy selectors against concrete
-// values. It is shared by tail-acl and tailnet-audit so both tools answer
+// values. It is shared by tsacl and tailnet-audit so both tools answer
 // "does this selector name this thing?" identically; two tools disagreeing
 // about one policy is worse than the duplication this replaces.
 //
 // Scope is deliberately narrow: entity resolution only. Port, protocol, and
-// via evaluation stay in tail-acl; posture expression handling lives in the
+// via evaluation stay in tsacl; posture expression handling lives in the
 // posture subpackage.
 package policycore
 

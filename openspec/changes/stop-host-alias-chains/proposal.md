@@ -2,7 +2,7 @@
 
 ## Why
 
-`tail-acl host set a b` writes a `hosts` value the control plane rejects
+`tsacl host set a b` writes a `hosts` value the control plane rejects
 (`ParseAddr("b"): unable to parse IP`), and a policy that already contains
 `{"a": "b"}` or `{"gw": "tag:web"}` used to expand as if the chain were a
 real address. `lint` already has a `host-not-address` finding; authoring
@@ -31,7 +31,7 @@ None.
 
 ## Impact
 
-`tail-acl host set` and `tail-acl lint`. JSON stays on stdout; the rejection
+`tsacl host set` and `tsacl lint`. JSON stays on stdout; the rejection
 is a usage error on stderr. Stacked on the mutation-message sanitizing
 change: the success path still records the alias and the address as edited
 values. Resolution behavior lives in the `policycore` change of this slug.

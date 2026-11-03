@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func newExternalTailnetAddCommand(deps *commandDeps) *cobra.Command {
@@ -76,7 +76,7 @@ func runExternalTailnetAdd(
 	commentSet, overwriteComment bool,
 ) (*result, error) {
 	if len(args) != 1 {
-		return nil, usagef("usage: tail-acl external-tailnet add ALIAS --external-id ID")
+		return nil, usagef("usage: tsacl external-tailnet add ALIAS --external-id ID")
 	}
 	comment, overwriteComment, err := commentFromFlags(commentSet, comment, overwriteComment)
 	if err != nil {
@@ -129,7 +129,7 @@ func runExternalTailnetAdd(
 
 func runExternalTailnetRemove(path string, args []string, force bool) (*result, error) {
 	if len(args) != 1 {
-		return nil, usagef("usage: tail-acl external-tailnet remove ALIAS")
+		return nil, usagef("usage: tsacl external-tailnet remove ALIAS")
 	}
 	policy, err := loadForEdit(path)
 	if err != nil {

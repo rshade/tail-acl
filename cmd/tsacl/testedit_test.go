@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestTestAddCreatesEntry(t *testing.T) {

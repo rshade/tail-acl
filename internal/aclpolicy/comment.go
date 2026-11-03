@@ -1,11 +1,11 @@
 package aclpolicy
 
-import "github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
+import "github.com/rshade/tsacl/pkg/policycore/hujsonedit"
 
 // PatchComment, PatchCommentOverwrite, and ValidateCommentText are
 // schema-agnostic HuJSON comment-authoring mechanics that live in
 // policycore/hujsonedit; these are thin re-exports so every existing call
-// site in this package and cmd/tail-acl keeps compiling unchanged.
+// site in this package and cmd/tsacl keeps compiling unchanged.
 
 // PatchComment authors text as a leading comment; see hujsonedit.PatchComment.
 func PatchComment(text string, segments ...string) PatchOperation {

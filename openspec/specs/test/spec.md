@@ -20,7 +20,7 @@ passes and exit 1 when any fails.
 - **WHEN** `test` runs against a policy whose declared `accept`/`deny`
   assertions are all satisfied by its grants
 - **THEN** stdout shows one `PASS` line per assertion and
-  `tail-acl: N assertions: N passed, 0 failed`, and the command exits 0
+  `tsacl: N assertions: N passed, 0 failed`, and the command exits 0
 
 #### Scenario: A failing assertion exits 1
 

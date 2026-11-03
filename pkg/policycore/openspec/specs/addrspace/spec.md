@@ -4,7 +4,7 @@
 
 Provide policy-agnostic address-space primitives — CIDR/address overlap
 comparison and 4via6 "via" prefix decoding — with no knowledge of ACL policy
-text or live device inventories, for `tail-acl` and `tailnet-audit` to build
+text or live device inventories, for `tsacl` and `tailnet-audit` to build
 their own overlap and site-ID checks on.
 
 ## Requirements

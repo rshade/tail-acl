@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
 )
 
 func TestParseLevel(t *testing.T) {

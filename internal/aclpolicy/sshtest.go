@@ -2,7 +2,7 @@ package aclpolicy
 
 import tailscale "tailscale.com/client/tailscale/v2"
 
-// SSHTest models a Tailscale SSH policy assertion. tail-acl preserves these
+// SSHTest models a Tailscale SSH policy assertion. tsacl preserves these
 // assertions but does not evaluate them; SSH policy has different targets and
 // verdicts from the network-level tests evaluator.
 type SSHTest struct {

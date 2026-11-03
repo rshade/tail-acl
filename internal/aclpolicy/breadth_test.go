@@ -7,7 +7,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestEvaluateLintBroadGolden(t *testing.T) {

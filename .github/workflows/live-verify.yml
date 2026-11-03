@@ -25,7 +25,7 @@
 # The job reads TAILSCALE_API_KEY and TAILSCALE_TAILNET from secrets stored on
 # the `live-verify` environment, so they are released only to an approved run on
 # main. Use a read-only API key or OAuth client, and keep it out of
-# repository-level secrets so no other workflow can read it. TAIL_ACL_CAPTURE
+# repository-level secrets so no other workflow can read it. TSACL_CAPTURE
 # is deliberately never set: it would rewrite fixtures.
 name: Live verify
 
@@ -83,7 +83,7 @@ jobs:
         env:
           TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TAILSCALE_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
-          TAIL_ACL_LIVE: "1"
+          TSACL_LIVE: "1"
         run: |
           set -euo pipefail
           : "${TAILSCALE_API_KEY:?set the TAILSCALE_API_KEY secret on the live-verify environment}"

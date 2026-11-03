@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 const ipsetMemberFixture = `{
@@ -25,7 +25,7 @@ func TestIPSetAddMemberFormsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, ipsetMemberFixture)
 
-	_, err := runTailACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
+	_, err := runTSACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
 		"--member", "ipset:base", "--member", "host:gw",
 		"--member", "add 10.0.0.0/8", "--member", "remove 10.1.0.0/16")
 	if err == nil {
@@ -43,7 +43,7 @@ func TestIPSetAddMemberFormsRoundTrip(t *testing.T) {
 		t.Errorf("rejected add modified the file:\n%s", got)
 	}
 
-	if _, err = runTailACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
+	if _, err = runTSACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
 		"--member", "add ipset:base", "--member", "add host:gw",
 		"--cidr", "10.5.1.2/16", "--member", "add 10.0.0.0/8", "--member", "remove 10.1.0.0/16"); err == nil {
 		t.Fatal("a --cidr member beside a remove was accepted")
@@ -51,7 +51,7 @@ func TestIPSetAddMemberFormsRoundTrip(t *testing.T) {
 		t.Errorf("--cidr beside remove error = %q", err)
 	}
 
-	stdout, err := runTailACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
+	stdout, err := runTSACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
 		"--member", "add ipset:base", "--member", "add host:gw",
 		"--member", "add 10.0.0.0/8", "--member", "remove 10.1.0.0/16")
 	if err != nil {
@@ -73,7 +73,7 @@ func TestIPSetAddMemberFormsRoundTrip(t *testing.T) {
 	}
 
 	written := readPolicy(t, path)
-	stdout, err = runTailACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
+	stdout, err = runTSACL(t, path, cmdIPSet, subAdd, "--name", "ipset:trimmed",
 		"--member", "add  ipset:base", "--member", "remove 10.1.2.3/16")
 	if err != nil {
 		t.Fatalf("repeat add: %v", err)
@@ -85,10 +85,10 @@ func TestIPSetAddMemberFormsRoundTrip(t *testing.T) {
 		t.Errorf("idempotent add changed the file:\n%s\nwant:\n%s", got, written)
 	}
 
-	if _, err = runTailACL(t, path, cmdLint); err != nil {
+	if _, err = runTSACL(t, path, cmdLint); err != nil {
 		t.Errorf("lint after an all-explicit set = %v", err)
 	}
-	if _, err = runTailACL(t, path, cmdIPSet, subRemove, "--name", "ipset:base"); err == nil ||
+	if _, err = runTSACL(t, path, cmdIPSet, subRemove, "--name", "ipset:base"); err == nil ||
 		!strings.Contains(err.Error(), "ipsets[ipset:trimmed][0]") {
 		t.Errorf("removing a nested ipset = %v, want refusal naming ipsets[ipset:trimmed][0]", err)
 	}
@@ -98,7 +98,7 @@ func TestIPSetAddCIDRFlagIsUnchanged(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, ipsetMemberFixture)
-	_, err := runTailACL(t, path, cmdIPSet, subAdd, "--name", "ipset:base", "--cidr", "host:gw")
+	_, err := runTSACL(t, path, cmdIPSet, subAdd, "--name", "ipset:base", "--cidr", "host:gw")
 	if err == nil {
 		t.Fatal("--cidr accepted a host: alias")
 	}
@@ -112,7 +112,7 @@ func TestIPSetAddCIDRFlagIsUnchanged(t *testing.T) {
 }
 
 // TestIPSetAddCIDRWritesBytesIdenticalToMain pins two existing --cidr
-// invocations to the exact bytes the tail-acl on main (978aef8) wrote for
+// invocations to the exact bytes the tsacl on main (978aef8) wrote for
 // them, captured before --member existed: merging canonicalized prefixes into
 // an existing ipset, and creating the ipsets object with a comment.
 func TestIPSetAddCIDRWritesBytesIdenticalToMain(t *testing.T) {
@@ -147,7 +147,7 @@ func TestIPSetAddCIDRWritesBytesIdenticalToMain(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), test.file)
 			writeTestPolicy(t, path, test.before)
-			if _, err := runTailACL(t, path, append([]string{cmdIPSet, subAdd}, test.args...)...); err != nil {
+			if _, err := runTSACL(t, path, append([]string{cmdIPSet, subAdd}, test.args...)...); err != nil {
 				t.Fatal(err)
 			}
 			if got := readPolicy(t, path); got != test.after {
@@ -168,7 +168,7 @@ func TestIPSetAddLintsHandWrittenMixedSet(t *testing.T) {
 		"tagOwners": {"tag:web": ["autogroup:admin"]},
 		"grants": [{"src": ["tag:web"], "dst": ["ipset:mixed"], "ip": ["tcp:80"]}],
 	}`)
-	stdout, err := runTailACL(t, path, cmdLint)
+	stdout, err := runTSACL(t, path, cmdLint)
 	if err == nil {
 		t.Fatal("lint passed a mixed ipset")
 	}

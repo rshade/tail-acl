@@ -4,7 +4,7 @@
 //	TAILSCALE_API_KEY=tskey-api-... TAILSCALE_TAILNET=example.com acl-upload
 //	acl-upload --file acl.json --tailnet example.com --api-key tskey-api-...
 //
-// It is a focused single-purpose helper; `tail-acl upload` is the same operation
+// It is a focused single-purpose helper; `tsacl upload` is the same operation
 // inside the AX-conformant flagship CLI (JSON envelope, exit-code scheme). The
 // upload confirmation is written to stdout; logs and errors go to stderr.
 package main
@@ -23,9 +23,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/rshade/tail-acl/internal/buildinfo"
-	"github.com/rshade/tail-acl/internal/tailapi"
-	"github.com/rshade/tail-acl/pkg/policycore/cliflags"
+	"github.com/rshade/tsacl/internal/buildinfo"
+	"github.com/rshade/tsacl/internal/tailapi"
+	"github.com/rshade/tsacl/pkg/policycore/cliflags"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".

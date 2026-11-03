@@ -22,7 +22,7 @@ A non-literal host currently falls through as a settled non-match.
 **Non-Goals:**
 
 - Changing ipset member grammar or `ResolveIPSet`.
-- Authoring or lint. Those are the `tail-acl` change of this slug.
+- Authoring or lint. Those are the `tsacl` change of this slug.
 - Removing the cycle guard.
 
 ## Decisions

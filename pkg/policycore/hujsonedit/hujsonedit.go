@@ -5,7 +5,7 @@
 // carries no knowledge of any particular document's fields — callers own
 // that; this package owns only the AST/patch mechanics.
 //
-// Extracted from tail-acl/internal/aclpolicy, which found these mechanics
+// Extracted from tsacl/internal/aclpolicy, which found these mechanics
 // were already entirely free of ACL-specific logic. The one schema-specific
 // concern that stayed behind is legacy/alternate top-level key spellings —
 // see ResolveKey.

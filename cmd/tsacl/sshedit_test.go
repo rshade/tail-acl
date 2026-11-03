@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
@@ -19,7 +19,7 @@ func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
 		}],
 		"sshTests": [{"src": "alice@example.com", "dst": ["tag:servers"], "accept": ["root"]}],
 	}`)
-	if _, err := runTailACL(t, path, "ssh", "add", "--action", "check",
+	if _, err := runTSACL(t, path, "ssh", "add", "--action", "check",
 		"--src", "autogroup:member", "--dst", "tag:servers", "--user", "root",
 		"--check-period", "12h", "--comment", "reviewed"); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
 	}
 
 	first := got
-	if _, err = runTailACL(t, path, "ssh", "add", "--action", "check",
+	if _, err = runTSACL(t, path, "ssh", "add", "--action", "check",
 		"--src", "autogroup:member", "--dst", "tag:servers", "--user", "root",
 		"--check-period", "12h", "--comment", "reviewed"); err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
 		t.Errorf("idempotent ssh add changed policy:\n%s", second)
 	}
 
-	if _, err = runTailACL(t, path, "ssh", "remove", "--action", "check",
+	if _, err = runTSACL(t, path, "ssh", "remove", "--action", "check",
 		"--src", "autogroup:member", "--dst", "tag:servers", "--user", "root",
 		"--check-period", "12h"); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestSSHCommandsPreserveExtensionsAndComment(t *testing.T) {
 func TestSSHHelpAndSchemaExposeSemantics(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{{"ssh", "add", "--help"}, {"ssh", "remove", "--help"}} {
-		stdout, err := runTailACL(t, "acl.json", args...)
+		stdout, err := runTSACL(t, "acl.json", args...)
 		if err != nil {
 			t.Errorf("run(%q): %v", args, err)
 			continue
@@ -73,7 +73,7 @@ func TestSSHHelpAndSchemaExposeSemantics(t *testing.T) {
 			}
 		}
 	}
-	stdout, err := runTailACL(t, "acl.json", "-schema")
+	stdout, err := runTSACL(t, "acl.json", "-schema")
 	if err != nil {
 		t.Fatal(err)
 	}

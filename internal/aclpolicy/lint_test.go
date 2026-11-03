@@ -7,7 +7,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestEvaluateLintGolden(t *testing.T) {
@@ -1144,7 +1144,7 @@ func findingsByID(report aclpolicy.LintReport, id string) []aclpolicy.LintFindin
 // TestEvaluateLintCountsNodeAttrAndViaReferences pins the two selector fields
 // the unused-definition walk once skipped. The omission was not merely a
 // missed finding: lint reported a live definition as unused and recommended
-// deleting it, and tail-acl's own definition removal would then carry that
+// deleting it, and tsacl's own definition removal would then carry that
 // recommendation out without asking for --force.
 func TestEvaluateLintCountsNodeAttrAndViaReferences(t *testing.T) {
 	t.Parallel()

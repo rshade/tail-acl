@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 
-`github.com/rshade/tail-acl` is a single Go module with two products:
+`github.com/rshade/tsacl` is a single Go module with two products:
 
-- `cmd/tail-acl`, `cmd/acl-upload`, and `cmd/hujson-merge` are the CLIs.
-  Treat `tail-acl`'s commands, flags, exit codes, and output as compatibility
+- `cmd/tsacl`, `cmd/acl-upload`, and `cmd/hujson-merge` are the CLIs.
+  Treat `tsacl`'s commands, flags, exit codes, and output as compatibility
   contracts.
 - `pkg/policycore/...` is the public library (`addrspace`, `cliflags`,
   `hujsonedit`, `ipcalc`, `posture`, `sanitize`) that other tools import.
@@ -50,7 +50,7 @@ for behavior changes and run `mise run test lint cross` before review. Golden
 files are byte-exact: regenerate with `go test ./... -update`, then inspect every
 changed fixture. Preserve authentic bytes under `testdata/`.
 
-The `live_verify` build tag and the `TAIL_ACL_LIVE=1` opt-in gate credentialed,
+The `live_verify` build tag and the `TSACL_LIVE=1` opt-in gate credentialed,
 read-only tests against a real, shared tailnet. They never run in ordinary CI;
 the `Live verify` workflow compiles them on PRs and runs them only on manual
 dispatch from `main`, after approval.

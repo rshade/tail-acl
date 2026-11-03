@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore"
 )
 
 func TestParseExternalSelector(t *testing.T) {

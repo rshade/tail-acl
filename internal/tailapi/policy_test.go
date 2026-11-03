@@ -13,7 +13,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tsacl/internal/tailapi"
 )
 
 func TestUploadAndValidateFile(t *testing.T) {

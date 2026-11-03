@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func TestNormalizeProducesStandardJSON(t *testing.T) {
@@ -87,7 +87,7 @@ func TestNormalizeRejectsInvalidHuJSON(t *testing.T) {
 
 // TestNormalizeRejectsDuplicateMembers locks normalize to the same refusal Load
 // makes. hujson keeps both members, so standardizing would emit a document whose
-// strict-JSON consumers resolve last-wins while tail-acl resolves first-wins —
+// strict-JSON consumers resolve last-wins while tsacl resolves first-wins —
 // handing an operator the member the tool itself discards.
 func TestNormalizeRejectsDuplicateMembers(t *testing.T) {
 	t.Parallel()
