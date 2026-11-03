@@ -11,13 +11,18 @@
 # vets the live_verify-tagged tests to prove they still compile; it never
 # executes them.
 #
-# live-verify runs only on workflow_dispatch and makes read-only Tailscale API
-# calls. It authenticates to Pulumi Cloud over OIDC and loads
-# TAILSCALE_API_KEY and TAILSCALE_TAILNET from Pulumi ESC, so nothing is stored
-# in GitHub secrets. Set the repository variables PULUMI_ORG and PULUMI_ESC_ENV
-# (for example `org/project/environment`) before dispatching it. The Go test
-# only reads the two plain environment variables and knows nothing about
-# Pulumi.
+# live-verify runs only on workflow_dispatch from main, behind the protected
+# `live-verify` environment, and makes read-only Tailscale API calls. It
+# authenticates to Pulumi Cloud over OIDC and loads TAILSCALE_API_KEY and
+# TAILSCALE_TAILNET from Pulumi ESC, so nothing is stored in GitHub secrets.
+# Set the repository variables PULUMI_ORG and PULUMI_ESC_ENV (for example
+# `org/project/environment`) before dispatching it. The Go test only reads the
+# two plain environment variables and knows nothing about Pulumi.
+#
+# The job executes repository code with those credentials, so a dispatch from
+# any other ref must never reach them: the ref check below and the
+# environment's required reviewers are the two gates, and the Pulumi OIDC
+# trust policy should accept only this repository's `live-verify` environment.
 name: Alpha live-verify
 
 on:
@@ -55,9 +60,10 @@ jobs:
 
   live-verify:
     name: Run live-verify against a real tailnet (opt-in)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
     timeout-minutes: 15
+    environment: live-verify
     permissions:
       contents: read
       id-token: write

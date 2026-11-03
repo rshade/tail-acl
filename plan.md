@@ -382,6 +382,13 @@ speculatively.
   - Variables `PULUMI_ORG` and `PULUMI_ESC_ENV` for `alpha-live-verify.yml`.
     `RUNNER_LABELS` stays unset while on GitHub-hosted runners.
   - Branch protection requiring the CI checks.
+  - Environment `live-verify` with required reviewers. `alpha-live-verify.yml`
+    runs repository code with Pulumi OIDC and tailnet credentials, so the job
+    only runs from `main` and waits for that approval.
+  - Pulumi side (outside this repo): restrict the OIDC trust policy to
+    `rshade/tail-acl`'s `live-verify` environment, and prefer a team or
+    organization token with only ESC read access over the personal token the
+    workflow requests today (`access_token:personal`).
   - Labels: `breaking-change-approved`.
   - Enable Renovate and private vulnerability reporting (`SECURITY.md` links
     to Security Advisories).
