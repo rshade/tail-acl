@@ -1,0 +1,96 @@
+# Opt-in, credentialed live-verify tier for pkg/policycore/alpha.
+#
+# Every other test here is pure and offline. That cannot validate a claim like
+# "this hand-modeled alpha struct still matches what the live API returns
+# today", because the pinned SDK has no such struct and the upstream shape is
+# explicitly unstable. This workflow is that opt-in tier, excluded from
+# ordinary CI.
+#
+# compile-check runs on PRs that touch pkg/policycore/alpha/** and needs no
+# credentials. A build tag nobody compiles by default rots unnoticed, so it
+# vets the live_verify-tagged tests to prove they still compile; it never
+# executes them.
+#
+# live-verify runs only on workflow_dispatch and makes read-only Tailscale API
+# calls. It authenticates to Pulumi Cloud over OIDC and loads
+# TAILSCALE_API_KEY and TAILSCALE_TAILNET from Pulumi ESC, so nothing is stored
+# in GitHub secrets. Set the repository variables PULUMI_ORG and PULUMI_ESC_ENV
+# (for example `org/project/environment`) before dispatching it. The Go test
+# only reads the two plain environment variables and knows nothing about
+# Pulumi.
+name: Alpha live-verify
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "pkg/policycore/alpha/**"
+      - ".github/workflows/alpha-live-verify.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-live-verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  compile-check:
+    name: Compile live_verify-tagged files (no credentials)
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: go vet with the live_verify tag
+        run: go vet -tags live_verify ./...
+
+  live-verify:
+    name: Run live-verify against a real tailnet (opt-in)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Require the Pulumi variables
+        env:
+          PULUMI_ORG: ${{ vars.PULUMI_ORG }}
+          PULUMI_ESC_ENV: ${{ vars.PULUMI_ESC_ENV }}
+        run: |
+          : "${PULUMI_ORG:?set the PULUMI_ORG repository variable}"
+          : "${PULUMI_ESC_ENV:?set the PULUMI_ESC_ENV repository variable}"
+
+      - name: Authenticate to Pulumi Cloud (OIDC)
+        uses: pulumi/auth-actions@v2
+        with:
+          organization: ${{ vars.PULUMI_ORG }}
+          requested-token-type: urn:pulumi:token-type:access_token:personal
+          scope: user:${{ vars.PULUMI_ORG }}
+
+      - name: Load tailnet credentials from Pulumi ESC
+        uses: pulumi/esc-action@v3
+        with:
+          environment: ${{ vars.PULUMI_ESC_ENV }}
+
+      - name: Run live-verify tests
+        run: |
+          set -euo pipefail
+          : "${TAILSCALE_API_KEY:?not injected, did the ESC step run?}"
+          : "${TAILSCALE_TAILNET:?not injected, did the ESC step run?}"
+          go test -tags live_verify ./pkg/policycore/alpha/... -run TestLiveVerify -v

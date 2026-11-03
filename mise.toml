@@ -1,0 +1,145 @@
+# Single source of truth for tool versions and project commands: local dev and
+# CI both read the pins and run the tasks from here (`mise run <task>`).
+[tools]
+go = "1.27.3"
+golangci-lint = "2.15.0"
+goreleaser = "2.18.3"
+actionlint = "1.7.12"
+gitleaks = "8.30.1"
+trufflehog = "3.99.4"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.9.0"
+"go:github.com/google/go-licenses/v2" = "2.0.1"
+# Node only provides the npm backend for the two CLIs below.
+node = "24"
+"npm:markdownlint-cli" = "0.50.0"
+# @commitlint/config-conventional installs nested inside the CLI, so
+# commitlint.config.js extends it without a second pin.
+"npm:@commitlint/cli" = "21.2.4"
+
+[tasks.lint]
+description = "Run every check"
+depends = ["lint-go", "fmt-check", "tidy-check", "go-version-check", "lint-md", "lint-actions", "lint-commit", "govulncheck", "license-check", "scan-secrets"]
+
+[tasks.build]
+description = "Build every package"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run the full test suite"
+run = "go test ./..."
+
+[tasks.vet]
+description = "go vet, including the opt-in live_verify build tag"
+shell = "bash -euo pipefail -c"
+run = '''
+go vet ./...
+go vet -tags live_verify ./...
+'''
+
+[tasks.cross]
+description = "Cross-compile for every released OS"
+shell = "bash -euo pipefail -c"
+run = '''
+for os in linux darwin windows; do
+  echo "==> GOOS=$os"
+  GOOS=$os GOARCH=amd64 go build ./...
+done
+'''
+
+[tasks.lint-go]
+description = "golangci-lint"
+run = "golangci-lint run ./..."
+
+[tasks.fmt-check]
+description = "Fail if any file is not gofmt -s clean"
+shell = "bash -euo pipefail -c"
+run = '''
+out=$(gofmt -s -l .)
+if [ -n "$out" ]; then
+  echo "gofmt -s needed:" >&2
+  echo "$out" >&2
+  exit 1
+fi
+'''
+
+[tasks.tidy-check]
+description = "Fail if go mod tidy would change go.mod or go.sum"
+shell = "bash -euo pipefail -c"
+run = '''
+go mod tidy
+git diff --exit-code -- go.mod go.sum
+'''
+
+[tasks.go-version-check]
+description = "Fail if the go directive in go.mod differs from the mise pin"
+shell = "bash -euo pipefail -c"
+run = '''
+want=$(mise current go)
+have=$(awk '/^go /{print $2; exit}' go.mod)
+if [ "$want" != "$have" ]; then
+  echo "go.mod says go $have, mise.toml pins $want" >&2
+  exit 1
+fi
+'''
+
+# jaxxstorm/vers (a tscli dependency) states Apache-2.0 in its README but ships
+# no LICENSE file, so go-licenses cannot classify it. Drop the --ignore once
+# upstream adds one.
+[tasks.license-check]
+description = "Fail on a dependency outside the license allowlist"
+run = "go-licenses check ./... --ignore github.com/jaxxstorm/vers --allowed_licenses=MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0"
+
+[tasks.release-check]
+description = "Validate .goreleaser.yaml and build a snapshot"
+shell = "bash -euo pipefail -c"
+run = '''
+goreleaser check
+goreleaser release --snapshot --clean --skip=publish
+'''
+
+[tasks.lint-md]
+description = "markdownlint all authored markdown"
+run = "markdownlint '**/*.md'"
+
+[tasks.lint-actions]
+description = "actionlint the GitHub workflows"
+run = "actionlint"
+
+[tasks.lint-commit]
+description = "commitlint the branch (COMMIT_FROM/COMMIT_TO override the range)"
+shell = "bash -euo pipefail -c"
+run = 'commitlint --from "${COMMIT_FROM:-$(git merge-base HEAD origin/main)}" --to "${COMMIT_TO:-HEAD}" --verbose'
+
+[tasks.govulncheck]
+description = "Scan Go dependencies for known vulnerabilities"
+run = "govulncheck ./..."
+
+[tasks.scan-secrets]
+description = "Run both secret scanners"
+depends = ["scan-gitleaks", "scan-trufflehog"]
+
+[tasks.scan-gitleaks]
+description = "gitleaks secret patterns (SCAN_BASE limits it to SCAN_BASE..SCAN_HEAD)"
+shell = "bash -euo pipefail -c"
+run = '''
+range=()
+if [ -n "${SCAN_BASE:-}" ]; then
+  range=(--log-opts "$SCAN_BASE..${SCAN_HEAD:-HEAD}")
+fi
+gitleaks git --no-banner --redact "${range[@]}"
+'''
+
+[tasks.scan-trufflehog]
+description = "trufflehog verified live credentials (SCAN_BASE limits it to commits after SCAN_BASE)"
+shell = "bash -euo pipefail -c"
+run = '''
+since=()
+if [ -n "${SCAN_BASE:-}" ]; then
+  since=(--since-commit "$SCAN_BASE")
+fi
+trufflehog git "file://$PWD" "${since[@]}" --branch HEAD --only-verified --fail --no-update
+'''
+
+[tasks.apidiff]
+description = "Incompatible pkg/ API changes since APIDIFF_BASE (default origin/main)"
+run = 'scripts/apidiff.sh "${APIDIFF_BASE:-origin/main}"'

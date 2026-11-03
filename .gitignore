@@ -1,0 +1,60 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Bare `go build` output beside go.mod
+/tail-acl
+/acl-upload
+/hujson-merge
+/bin/
+
+# goreleaser build output (snapshot and release)
+dist/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+!**/coverage.go
+*.coverprofile
+profile.cov
+
+# Per-machine mise overrides (mise.toml itself IS committed: it is the pin)
+mise.local.toml
+.mise.local.toml
+.mise/config.local.toml
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Policy-adjacent, observation-only ETag state. It is local to a working copy
+# and must never become policy input or committed intent.
+.tail-acl-state.json
+
+# Generated PR description (local only)
+PR_MESSAGE.md
+
+# sanitize-policy output: quantization is mechanical and the counts alone
+# fingerprint a tailnet, so a committed copy discards that protection.
+evidence.txt
+*-evidence.txt
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# Per-machine agent settings, workflow scratch, and agent worktrees
+.superpowers/
+.claude/settings.local.json
+.claude/workflow/
+.claude/worktrees/
+.playwright-mcp/

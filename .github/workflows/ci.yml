@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Run markdownlint
+        run: mise run lint-md
+
+      - name: Run actionlint
+        run: mise run lint-actions
+
+  commitlint:
+    name: Commit lint
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Lint PR commits
+        env:
+          COMMIT_FROM: ${{ github.event.pull_request.base.sha }}
+          COMMIT_TO: ${{ github.event.pull_request.head.sha }}
+        run: mise run lint-commit
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Run govulncheck
+        run: mise run govulncheck
+
+  validate:
+    name: Validate Go module
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: go.mod Go version matches mise.toml
+        run: mise run go-version-check
+
+      - name: gofmt -s
+        run: mise run fmt-check
+
+      - name: go mod tidy leaves no diff
+        run: mise run tidy-check
+
+      - name: go vet
+        run: mise run vet
+
+  test:
+    name: Build and test
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Build
+        run: mise run build
+
+      - name: Test
+        run: mise run test
+
+      - name: Cross-compile
+        run: mise run cross
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Run golangci-lint
+        run: mise run lint-go
+
+  license-check:
+    name: License allowlist
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Check dependency licenses
+        run: mise run license-check
+
+  release-check:
+    name: GoReleaser snapshot
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Validate and snapshot-build
+        run: mise run release-check

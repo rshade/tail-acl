@@ -1,0 +1,150 @@
+# Release automation: release-please (version, changelog, tag, GitHub Release)
+# feeding goreleaser (cross-compiled binaries).
+#
+# On every push to main, release-please opens or updates one release PR from
+# the unreleased conventional commits. Merging it cuts the vX.Y.Z tag and the
+# GitHub Release, and goreleaser attaches the cross-compiled archives.
+#
+# release-please pushes as github-actions[bot], so GitHub parks the
+# pull_request CI run on the release PR instead of starting it. To get CI on a
+# release PR: Actions tab, Release, "Run workflow" with approve_release_pr set
+# to true, wait for the PR to show CLEAN, then merge. Every merge to main moves
+# the release branch head, so rerun it right before merging if main moved.
+#
+# Repair path: "Run workflow" with repair_tag set to an existing vX.Y.Z tag
+# rebuilds and reattaches that release's archives without changing its tag.
+# To turn the workflow off without editing it: `gh workflow disable release.yml`.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      repair_tag:
+        description: Existing release tag to rebuild and reattach, for example v0.4.0
+        required: false
+        type: string
+      approve_release_pr:
+        description: Approve the parked CI run on the open release PR
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - name: Validate manual inputs
+        env:
+          REPAIR_TAG: ${{ inputs.repair_tag }}
+          APPROVE: ${{ inputs.approve_release_pr }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REPAIR_TAG" && "$APPROVE" == "true" ]]; then
+            echo "approve_release_pr cannot be combined with repair_tag" >&2
+            exit 1
+          fi
+          if [[ -n "$REPAIR_TAG" && ! "$REPAIR_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "repair_tag must look like vX.Y.Z, got $REPAIR_TAG" >&2
+            exit 1
+          fi
+
+      - name: Run release-please
+        id: rp
+        if: inputs.repair_tag == '' && inputs.approve_release_pr != true
+        uses: googleapis/release-please-action@v5
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Approve parked CI for the release PR
+        if: inputs.approve_release_pr == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          actions="repos/$GITHUB_REPOSITORY/actions"
+          branch="release-please--branches--main"
+
+          read -r number sha < <(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+            --json number,headRefOid --jq '.[0] | "\(.number) \(.headRefOid)"')
+          if [[ -z "${number:-}" ]]; then
+            echo "No open release PR (branch $branch); merge to main first so release-please opens one" >&2
+            exit 1
+          fi
+          echo "Release PR #$number is at ${sha:0:7}"
+
+          run_id=""
+          for attempt in 1 2 3 4 5 6; do
+            run_id=$(gh api "$actions/workflows/ci.yml/runs?head_sha=$sha&event=pull_request&status=action_required&per_page=1" \
+              --jq '.workflow_runs[0].id // empty') || run_id=""
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            echo "No parked CI run yet at ${sha:0:7} (attempt $attempt of 6)"
+            sleep 10
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "No parked pull_request CI run for #$number at ${sha:0:7}; it may already be running (gh pr checks $number)" >&2
+            exit 1
+          fi
+          if output=$(gh api -X POST "$actions/runs/$run_id/approve" --silent 2>&1); then
+            echo "Approved CI run $run_id for #$number; merge once the PR shows CLEAN"
+          else
+            echo "Could not approve CI run $run_id: $output" >&2
+            echo "Approve it by hand: gh api -X POST $actions/runs/$run_id/approve" >&2
+            exit 1
+          fi
+
+  goreleaser:
+    name: goreleaser
+    needs: release-please
+    if: inputs.repair_tag != '' || needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.repair_tag != '' && inputs.repair_tag || needs.release-please.outputs.tag_name }}
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Build artifacts with goreleaser
+        run: goreleaser release --clean --skip=publish
+
+      - name: Attach artifacts to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.repair_tag != '' && inputs.repair_tag || needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            dist/*.tar.gz \
+            dist/*.zip \
+            dist/checksums.txt \
+            --clobber

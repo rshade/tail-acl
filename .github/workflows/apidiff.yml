@@ -1,0 +1,37 @@
+# Gates incompatible changes to the public API under pkg/ on pull requests.
+# A deliberate break is acknowledged by adding the breaking-change-approved
+# label; use a feat!: or BREAKING CHANGE: commit so release-please bumps the
+# minor digit. Labeling re-runs the gate without re-running the rest of CI.
+name: API Diff
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apidiff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  apidiff:
+    name: Public API diff
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Diff pkg/ against the base branch
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}
+        env:
+          APIDIFF_BASE: ${{ github.event.pull_request.base.sha }}
+        run: mise run apidiff

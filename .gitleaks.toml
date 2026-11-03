@@ -1,0 +1,12 @@
+title = "tail-acl gitleaks config"
+
+[extend]
+useDefault = true
+
+# The tests assert the CLIs never echo an API key from the environment, so they
+# plant a placeholder key. Allowlist only that placeholder, only in those tests.
+[[allowlists]]
+description = "placeholder API key in the no-secret-in-output tests"
+condition = "AND"
+paths = ['''cmd/(acl-upload|tail-acl)/main_test\.go''']
+regexes = ['''tskey-api-SE''']

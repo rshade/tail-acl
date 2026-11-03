@@ -1,15 +1,7 @@
-# Run from THIS module directory (paths below are module-relative):
-#   cd tail-acl && GORELEASER_CURRENT_TAG=v0.2.0 goreleaser release --clean
-# git tags stay prefixed (tail-acl/vX.Y.Z); OSS goreleaser can't strip the
-# prefix, so the release workflow passes the clean semver via
-# GORELEASER_CURRENT_TAG and creates a job-local clean tag for validation.
-# release-please owns the prefixed tag, changelog, and GitHub
-# Release object; the workflow builds with `--skip=publish` and attaches the
-# dist/ archives via `gh release upload "<full-prefixed-tag>"` (goreleaser's
-# own publisher can't target a slash-prefixed tag).
-# Local smoke test: `GORELEASER_CURRENT_TAG=v0.2.0 goreleaser release --snapshot --clean`.
-# The env var is required because `git describe` ignores module tag prefixes
-# and can otherwise stamp a sibling module's version into this tool.
+# release-please owns the vX.Y.Z tag, changelog and GitHub Release object; the
+# release workflow builds with `--skip=publish` and attaches dist/ to that
+# release with `gh release upload`.
+# Local smoke test: `mise run release-check`.
 version: 2
 
 project_name: tail-acl

@@ -1,0 +1,15 @@
+# Normalize tracked text to LF in the repository and the working tree, so a
+# checkout on Windows (core.autocrlf=true by default) cannot rewrite files that
+# are compared byte-for-byte in tests.
+* text=auto eol=lf
+
+# testdata is evidence, not source. Captured command output must survive
+# round-tripping byte-for-byte: nrpt_tailscale.json, for example, is a single
+# minified line terminated by the authentic CRLF that PowerShell emitted, and
+# normalizing it would misrepresent what the parser was validated against.
+# Golden files live here too and are written with LF by the test helper, so
+# -text simply preserves them exactly rather than converting on checkout.
+#
+# `diff` is set alongside `-text` so git still renders these as textual diffs
+# instead of "Binary files differ" — golden review depends on readable diffs.
+**/testdata/** -text diff
