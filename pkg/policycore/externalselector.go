@@ -1,4 +1,4 @@
-package alpha
+package policycore
 
 import (
 	"fmt"

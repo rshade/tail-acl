@@ -1,0 +1,92 @@
+# Opt-in, credentialed live-verify tier.
+#
+# Every other test here is pure and offline. That cannot validate a claim like
+# "this vocabulary or response shape still matches what the real control plane
+# returns today". This workflow is that opt-in tier, excluded from ordinary CI.
+# It runs three read-only live tests:
+#
+#   - pkg/policycore/posture TestLiveVerifyCountryVocabulary re-derives the
+#     ip:country vocabulary from /acl/validate rejections and compares it to the
+#     fixture.
+#   - integration TestLiveValidate* probes the /acl/validate response shapes
+#     the validation gate depends on. The harness allows only POST validate and
+#     GET policy requests, and the endpoint never applies the policy.
+#   - integration TestLiveServiceLookupNameSpelling checks which Service name
+#     spelling the lookup endpoint accepts.
+#
+# The tailnet is shared, so live-verify never runs on a pull request: it runs
+# only on workflow_dispatch from main, after the change has merged, and waits
+# for the protected `live-verify` environment's required reviewer.
+#
+# compile-check runs on PRs that touch the live tests and needs no credentials.
+# A build tag nobody compiles by default rots unnoticed, so it vets the
+# live_verify-tagged tests to prove they still compile; it never executes them.
+#
+# The job reads TAILSCALE_API_KEY and TAILSCALE_TAILNET from secrets stored on
+# the `live-verify` environment, so they are released only to an approved run on
+# main. Use a read-only API key or OAuth client, and keep it out of
+# repository-level secrets so no other workflow can read it. TAIL_ACL_CAPTURE
+# is deliberately never set: it would rewrite fixtures.
+name: Live verify
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "pkg/policycore/posture/**"
+      - "integration/**"
+      - "internal/tailapi/**"
+      - ".github/workflows/live-verify.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  compile-check:
+    name: Compile live_verify-tagged files (no credentials)
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: go vet with the live_verify tag
+        run: go vet -tags live_verify ./...
+
+  live-verify:
+    name: Run live-verify against a real tailnet (opt-in)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    environment: live-verify
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5
+
+      - name: Run live-verify tests
+        env:
+          TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          TAILSCALE_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
+          TAIL_ACL_LIVE: "1"
+        run: |
+          set -euo pipefail
+          : "${TAILSCALE_API_KEY:?set the TAILSCALE_API_KEY secret on the live-verify environment}"
+          : "${TAILSCALE_TAILNET:?set the TAILSCALE_TAILNET secret on the live-verify environment}"
+          go test -tags live_verify ./pkg/policycore/posture/ -run TestLiveVerify -v
+          go test ./integration/ -run 'TestLive' -v

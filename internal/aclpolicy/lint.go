@@ -13,7 +13,6 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 
 	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/alpha"
 	"github.com/rshade/tail-acl/pkg/policycore/posture"
 )
 
@@ -1122,10 +1121,10 @@ func serviceInSSHFinding(rule, selector string) LintFinding {
 // form that does not parse yields external-tailnet-alias-unknown.
 func (l *refLinter) externalSelectorFinding(rule, selector string) (LintFinding, bool) {
 	selector = strings.TrimSpace(selector)
-	if !alpha.LooksLikeExternalSelector(selector) {
+	if !policycore.LooksLikeExternalSelector(selector) {
 		return LintFinding{}, false
 	}
-	parsed, err := alpha.ParseExternalSelector(selector)
+	parsed, err := policycore.ParseExternalSelector(selector)
 	if err != nil {
 		return externalTailnetAliasFinding(rule, selector, err.Error()), true
 	}
@@ -1163,10 +1162,10 @@ func incomingDisabledFindings(policy *tailscale.ACL, locator string, selectors [
 	var findings []LintFinding
 	for index, raw := range selectors {
 		selector := strings.TrimSpace(raw)
-		if !alpha.LooksLikeExternalSelector(selector) {
+		if !policycore.LooksLikeExternalSelector(selector) {
 			continue
 		}
-		parsed, err := alpha.ParseExternalSelector(selector)
+		parsed, err := policycore.ParseExternalSelector(selector)
 		if err != nil {
 			continue
 		}

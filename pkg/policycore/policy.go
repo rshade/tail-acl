@@ -11,7 +11,7 @@ import (
 //
 // It exists so a hand-modeled policy field has one home rather than widening
 // Matcher each time this repository models another. ExternalTailnets was the
-// first: declarative node sharing is alpha, and tailscale.v2.ACL carried no
+// first: declarative node sharing postdated the pinned SDK, and tailscale.v2.ACL carried no
 // externalTailnets field until v2.11.0. The SDK models it now, so the
 // hand-modeled field is gone and the promoted one serves; what stays here is
 // the read flag, which records a fact about the caller rather than the
