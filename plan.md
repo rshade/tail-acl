@@ -297,9 +297,9 @@ Steps, all done in the throwaway tree:
 Copy and trim from the monorepo:
 
 - [x] `.github/workflows/ci.yml`, `release.yml`, `alpha-live-verify.yml`
-      (path filter becomes `pkg/policycore/alpha/**`). Done; the Pulumi org and
-      ESC environment are now the `PULUMI_ORG` and `PULUMI_ESC_ENV` repository
-      variables instead of literals.
+      (path filter becomes `pkg/policycore/alpha/**`). Done; the live-verify
+      job reads its tailnet credentials from secrets on the `live-verify`
+      environment instead of Pulumi.
 - [x] Merge `pkg/policycore/.github`, `.claude`, and `.agents` into the root
       copies where worth keeping, then delete the nested ones. They were
       byte-identical to the root copies; deleted.
@@ -379,16 +379,14 @@ speculatively.
       needs it as its baseline with plain tags; without it, it tries to release
       the whole history.
 - [ ] Repository settings before the first PR:
-  - Variables `PULUMI_ORG` and `PULUMI_ESC_ENV` for `alpha-live-verify.yml`.
-    `RUNNER_LABELS` stays unset while on GitHub-hosted runners.
-  - Branch protection requiring the CI checks.
-  - Environment `live-verify` with required reviewers. `alpha-live-verify.yml`
-    runs repository code with Pulumi OIDC and tailnet credentials, so the job
-    only runs from `main` and waits for that approval.
-  - Pulumi side (outside this repo): restrict the OIDC trust policy to
-    `rshade/tail-acl`'s `live-verify` environment, and prefer a team or
-    organization token with only ESC read access over the personal token the
-    workflow requests today (`access_token:personal`).
+  - `RUNNER_LABELS` stays unset while on GitHub-hosted runners.
+  - Branch protection requiring the CI checks (the `Protect main` ruleset).
+  - Environment `live-verify` with required reviewers and a `main`-only
+    branch policy. `alpha-live-verify.yml` runs repository code with tailnet
+    credentials, so the job only runs from `main` and waits for that approval.
+  - Environment secrets `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` on
+    `live-verify` (never repository-level secrets), using a read-only API key
+    or OAuth client.
   - Labels: `breaking-change-approved`.
   - Enable Renovate and private vulnerability reporting (`SECURITY.md` links
     to Security Advisories).
