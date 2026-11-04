@@ -27,6 +27,10 @@
 # main. Use a read-only API key or OAuth client, and keep it out of
 # repository-level secrets so no other workflow can read it. TSACL_CAPTURE
 # is deliberately never set: it would rewrite fixtures.
+#
+# The probes need one real login to build a selector from. When the deployed
+# policy has no literal email, store one that exists on the tailnet as the
+# `live-verify` environment secret TSACL_LIVE_USER; it is never printed.
 name: Live verify
 
 on:
@@ -83,6 +87,7 @@ jobs:
         env:
           TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TAILSCALE_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
+          TSACL_LIVE_USER: ${{ secrets.TSACL_LIVE_USER }}
           TSACL_LIVE: "1"
         run: |
           set -uo pipefail
