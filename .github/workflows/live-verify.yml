@@ -85,8 +85,33 @@ jobs:
           TAILSCALE_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           TSACL_LIVE: "1"
         run: |
-          set -euo pipefail
+          set -uo pipefail
           : "${TAILSCALE_API_KEY:?set the TAILSCALE_API_KEY secret on the live-verify environment}"
           : "${TAILSCALE_TAILNET:?set the TAILSCALE_TAILNET secret on the live-verify environment}"
-          go test -tags live_verify ./pkg/policycore/posture/ -run TestLiveVerify -v
-          go test ./integration/ -run 'TestLive' -v
+
+          status=0
+          run_set() {
+            local name=$1
+            shift
+            local log
+            log=$(mktemp)
+            echo "::group::$name"
+            go test -count=1 -v "$@" 2>&1 | tee "$log"
+            local rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            local passed skipped
+            passed=$(grep -c '^--- PASS' "$log" || true)
+            skipped=$(grep -c '^--- SKIP' "$log" || true)
+            echo "$name: $passed passed, $skipped skipped"
+            if [[ "$rc" -ne 0 ]]; then
+              echo "::error::$name failed"
+              status=1
+            elif [[ "$passed" -eq 0 ]]; then
+              echo "::error::$name ran no passing test, so it proved nothing"
+              status=1
+            fi
+          }
+
+          run_set "posture vocabulary" -tags live_verify ./pkg/policycore/posture/ -run TestLiveVerify
+          run_set "control-plane probes" ./integration/ -run TestLive
+          exit "$status"
