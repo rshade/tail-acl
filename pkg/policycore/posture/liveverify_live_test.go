@@ -25,7 +25,8 @@ import (
 // and the server's rejection enumerates every code it accepts as "valid
 // values: AD, AE, ...". That list is compared against the fixture — the
 // source of truth — so a server-side vocabulary change fails here first
-// rather than surfacing as a lint false positive.
+// rather than surfacing as a lint false positive. The client appends "; []" to
+// the message, so the list ends at the first semicolon.
 func TestLiveVerifyCountryVocabulary(t *testing.T) {
 	t.Parallel()
 
@@ -46,12 +47,13 @@ func TestLiveVerifyCountryVocabulary(t *testing.T) {
 	}
 	message := err.Error()
 	const marker = "valid values: "
-	start := strings.Index(message, marker)
-	if start < 0 {
+	_, rest, found := strings.Cut(message, marker)
+	if !found {
 		t.Fatalf("the validation error does not enumerate valid values; the server's "+
 			"error shape changed: %s", message)
 	}
-	serverCodes := strings.Split(strings.TrimSpace(message[start+len(marker):]), ", ")
+	codeList, _, _ := strings.Cut(rest, ";")
+	serverCodes := strings.Split(strings.TrimSpace(codeList), ", ")
 
 	fixtureData, readErr := os.ReadFile("testdata/ip_country_vocabulary.txt")
 	if readErr != nil {
