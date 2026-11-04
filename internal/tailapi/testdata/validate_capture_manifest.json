@@ -42,7 +42,7 @@
     {
       "scenario": "c_scim_warning",
       "available": false,
-      "unavailable_reason": "TAIL_ACL_LIVE_SCIM_GROUP is unset; no SCIM warning channel was inferred"
+      "unavailable_reason": "TSACL_LIVE_SCIM_GROUP is unset; no SCIM warning channel was inferred"
     },
     {
       "scenario": "d_parse_error",

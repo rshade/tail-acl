@@ -68,7 +68,7 @@ died on the first malformed save would be useless.
 This one costs people real time, so it is worth stating precisely.
 
 ```sh
-tail-acl test --watch | head -1   # does NOT return you to a prompt
+tsacl test --watch | head -1   # does NOT return you to a prompt
 ```
 
 A broken pipe is only detected by *writing* to it. A watcher that has already

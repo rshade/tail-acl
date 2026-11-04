@@ -10,7 +10,7 @@ import (
 
 	"github.com/tailscale/hujson"
 
-	"github.com/rshade/tail-acl/pkg/policycore/hujsonedit"
+	"github.com/rshade/tsacl/pkg/policycore/hujsonedit"
 )
 
 func writeTemp(t *testing.T, content string) string {
@@ -155,7 +155,7 @@ func TestWritePatchResolveKeyIsInvokedForAliasedTopLevelKey(t *testing.T) {
 	t.Parallel()
 	// The document spells its top-level key "Foo" (legacy casing); the caller
 	// authors operations against the canonical lowercase "foo" and supplies a
-	// resolver that bridges the two, mirroring tail-acl's resolveTopLevelKey.
+	// resolver that bridges the two, mirroring tsacl's resolveTopLevelKey.
 	path := writeTemp(t, `{"Foo": {}}`+"\n")
 
 	invoked := false

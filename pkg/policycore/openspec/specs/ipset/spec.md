@@ -6,7 +6,7 @@ Define the one member grammar for Tailscale ipset definitions that every tool
 in this repository shares: how a raw member is classified into an operation
 (`add`, `remove`, or implicit), a kind (prefix, range, `host:` alias, or
 `ipset:` reference), and a canonical target, and the rule that a set which
-removes anything must spell every member as an explicit operation. tail-acl
+removes anything must spell every member as an explicit operation. tsacl
 authors and lints with it; resolvers adopt it separately.
 
 ## Requirements

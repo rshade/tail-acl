@@ -6,12 +6,12 @@ node can own, or references to definitions that were renamed away.
 
 This guide covers running the check, triaging what it reports, and turning the
 result into a gate. The full finding table lives in the
-[`tail-acl` README](../../README.md).
+[`tsacl` README](../../README.md).
 
 ## Run it
 
 ```sh
-tail-acl --file acl/acl.hujson lint
+tsacl --file acl/acl.hujson lint
 ```
 
 The run is pure: no credentials, no network. Every finding carries a stable
@@ -21,7 +21,7 @@ hint, and a decision trace.
 For a machine consumer, take the JSON envelope:
 
 ```sh
-tail-acl --format json --file acl/acl.hujson lint
+tsacl --format json --file acl/acl.hujson lint
 ```
 
 ## Triage by severity
@@ -48,10 +48,10 @@ With no `-severity`, `lint` reports everything but fails only on `warn` and
 on:
 
 ```sh
-tail-acl --file acl/acl.hujson lint                   # show all; fail on warn and error
-tail-acl --file acl/acl.hujson lint -severity error   # show/fail on only hard breakage
-tail-acl --file acl/acl.hujson lint -severity warn    # show/fail on warn and error
-tail-acl --file acl/acl.hujson lint -severity advice  # show/fail on everything
+tsacl --file acl/acl.hujson lint                   # show all; fail on warn and error
+tsacl --file acl/acl.hujson lint -severity error   # show/fail on only hard breakage
+tsacl --file acl/acl.hujson lint -severity warn    # show/fail on warn and error
+tsacl --file acl/acl.hujson lint -severity advice  # show/fail on everything
 ```
 
 The value is one floor, not an exact inclusion list: `-severity warn` already
@@ -61,7 +61,7 @@ and unnecessary. When an explicit floor withholds findings, the versioned JSON
 trailer names what it withheld —
 
 ```text
-tail-acl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows/fails on all)
+tsacl: no findings at or above warn; 2 total: 0 error, 0 warn, 1 info, 1 advice (-severity advice shows/fails on all)
 ```
 
 That example comes from an explicit `-severity warn`. A policy with nothing to
@@ -75,9 +75,9 @@ exempts that shape from `undefined-reference` by default and reports the count
 instead:
 
 ```sh
-tail-acl --file acl/acl.hujson lint                              # exempt, counted
-tail-acl --file acl/acl.hujson lint -scim-domains corp.example   # only this domain
-tail-acl --file acl/acl.hujson lint -strict-scim-groups          # no exemption
+tsacl --file acl/acl.hujson lint                              # exempt, counted
+tsacl --file acl/acl.hujson lint -scim-domains corp.example   # only this domain
+tsacl --file acl/acl.hujson lint -strict-scim-groups          # no exemption
 ```
 
 The exemption is a name-shape heuristic, so it cannot tell you whether a synced
@@ -93,8 +93,8 @@ Services are destination-only — a `svc:` on a rule's source side is a
 `svc-in-source` warning.
 
 ```sh
-tail-acl --file acl/acl.hujson lint                     # offline: shape only
-tail-acl --file acl/acl.hujson lint -online-validation  # also: does it exist?
+tsacl --file acl/acl.hujson lint                     # offline: shape only
+tsacl --file acl/acl.hujson lint -online-validation  # also: does it exist?
 ```
 
 `-online-validation` needs `--tailnet` plus either `--api-key` or an OAuth
@@ -125,7 +125,7 @@ Advisories are visible by default but sit below the default failure floor. To
 make them gate the run, lower the floor explicitly:
 
 ```sh
-tail-acl --file acl/acl.hujson lint -severity advice
+tsacl --file acl/acl.hujson lint -severity advice
 ```
 
 That exits `1` while any advisory stands — deliberate, since you are asking to
@@ -135,7 +135,7 @@ When the policy supplies a concrete port, the advisory includes a compact JSON
 test to paste into `tests`. That gives you a deny-first authoring loop:
 
 1. Paste the suggested assertion into the policy's `tests`.
-2. Run `tail-acl --file acl/acl.hujson test`. It goes red, because the broad
+2. Run `tsacl --file acl/acl.hujson test`. It goes red, because the broad
    grant does reach that destination.
 3. Narrow the grant until the test goes green.
 4. The deny assertion now covers the destination, so the advisory goes quiet.
@@ -163,7 +163,7 @@ config rather than lowering the threshold:
 ```
 
 ```sh
-tail-acl --file acl/acl.hujson lint -config acl/lint.hujson
+tsacl --file acl/acl.hujson lint -config acl/lint.hujson
 ```
 
 Unknown fields fail the run instead of silently discarding an exclusion.
@@ -173,7 +173,7 @@ fragments reorder grants.
 ## Gate it in CI
 
 ```sh
-tail-acl --file acl/acl.hujson lint -severity warn
+tsacl --file acl/acl.hujson lint -severity warn
 ```
 
 Exit `0` means nothing at or above the threshold; exit `1` means there is. The
@@ -208,5 +208,5 @@ settles a typo.
 
 ## Related
 
-- [Adopt tail-acl for an existing tailnet](./bootstrap-existing-tailnet.md)
+- [Adopt tsacl for an existing tailnet](./bootstrap-existing-tailnet.md)
 - [Offline evaluation and safety](../explanation/offline-evaluation.md)

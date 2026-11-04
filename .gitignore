@@ -6,7 +6,7 @@
 *.dylib
 
 # Bare `go build` output beside go.mod
-/tail-acl
+/tsacl
 /acl-upload
 /hujson-merge
 /bin/
@@ -38,7 +38,7 @@ go.work.sum
 
 # Policy-adjacent, observation-only ETag state. It is local to a working copy
 # and must never become policy input or committed intent.
-.tail-acl-state.json
+.tsacl-state.json
 
 # Generated PR description (local only)
 PR_MESSAGE.md

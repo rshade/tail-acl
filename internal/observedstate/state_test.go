@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/observedstate"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/observedstate"
 )
 
 func TestRecordKeepsTailnetsIndependent(t *testing.T) {

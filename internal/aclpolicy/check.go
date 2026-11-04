@@ -7,8 +7,8 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
 )
 
 // RuleKind identifies the policy section holding the rule that decided a

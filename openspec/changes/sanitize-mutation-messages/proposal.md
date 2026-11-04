@@ -36,7 +36,7 @@ route CIDRs survive `identity`, and operational names survive `strict`.
 
 ## Impact
 
-- `tail-acl` command results only. No flag, schema, or envelope field.
+- `tsacl` command results only. No flag, schema, or envelope field.
 - `policycore` is not modified. Registration reuses `registerSelector`
   and `Sanitizer.Value`.
 - Stderr warnings and `--comment` text are unchanged.

@@ -11,7 +11,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore"
 )
 
 // autoApproversKey* are the JSON member names an autoApprovers edit targets.
@@ -316,7 +316,7 @@ func validateAutoApproverSelectors(approvers []string) ([]string, error) {
 // form is a domain autogroup despite its user: prefix. Other colon-prefixed
 // values are selector namespaces, not login names, even if they contain an @.
 // Autogroup names are intentionally accepted by prefix so a newly introduced
-// Tailscale autogroup does not require a tail-acl release before it can be used.
+// Tailscale autogroup does not require a tsacl release before it can be used.
 func isAutoApproverSelector(selector string) bool {
 	switch {
 	case strings.HasPrefix(selector, "group:"):

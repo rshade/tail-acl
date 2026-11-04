@@ -11,8 +11,8 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/pkg/policycore"
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
 )
 
 // AssertionStatus is the machine-readable outcome of one policy assertion.
@@ -744,7 +744,7 @@ func firstGate(gates ...string) string {
 // no HaveRoles parameter is needed to keep it honest.
 //
 // Naming a CLI flag from this package is deliberate: aclpolicy is internal to
-// tail-acl, not a shared library, so the flag is always the right remedy here.
+// tsacl, not a shared library, so the flag is always the right remedy here.
 // policycore, which tailnet-audit also imports, stays free of CLI vocabulary.
 func selectorGate(field string, matched bool, selector, query string) string {
 	if matched || selector == "" {

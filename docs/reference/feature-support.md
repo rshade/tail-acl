@@ -1,6 +1,6 @@
 # Feature support
 
-This page lists which Tailscale policy features `tail-acl` and the
+This page lists which Tailscale policy features `tsacl` and the
 `policycore` library handle, and how completely. It is documentation, not a
 versioning contract: Tailscale moves features between alpha, beta, and general
 availability on its own schedule, and this project's version numbers do not

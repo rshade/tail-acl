@@ -1,6 +1,6 @@
 {
 	// Provenance: both rule forms were validated against the control plane
-	// (example.ts.net) on 2026-10-02 with `tail-acl validate`. The grant
+	// (example.ts.net) on 2026-10-02 with `tsacl validate`. The grant
 	// form's accept assertion failed server-side (want: Accept, got: Drop); the
 	// acls form's deny assertion held (policy valid). Locally every assertion is
 	// indeterminate until posture expressions evaluate offline

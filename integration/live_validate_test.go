@@ -25,24 +25,24 @@ import (
 
 	"github.com/tailscale/hujson"
 
-	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tsacl/internal/tailapi"
 )
 
 const (
-	liveValidateEnv       = "TAIL_ACL_LIVE"
-	liveValidateCapture   = "TAIL_ACL_CAPTURE"
-	liveValidateUser      = "TAIL_ACL_LIVE_USER"
-	liveValidateSCIMGroup = "TAIL_ACL_LIVE_SCIM_GROUP"
+	liveValidateEnv       = "TSACL_LIVE"
+	liveValidateCapture   = "TSACL_CAPTURE"
+	liveValidateUser      = "TSACL_LIVE_USER"
+	liveValidateSCIMGroup = "TSACL_LIVE_SCIM_GROUP"
 	liveValidateTimeout   = 30 * time.Second
 	validateTestdataDir   = "../internal/tailapi/testdata"
 )
 
 // TestLiveValidateEvidenceGate probes the response shapes that decide issue
 // #52. The endpoint does not apply the submitted policy. An explicit opt-in is
-// still required because tail-acl credentials commonly exist in the ambient
+// still required because tsacl credentials commonly exist in the ambient
 // shell, and a plain go test ./... must never make live control-plane calls.
 //
-// TAIL_ACL_CAPTURE=1 writes redacted response bytes and a provenance manifest
+// TSACL_CAPTURE=1 writes redacted response bytes and a provenance manifest
 // under internal/tailapi/testdata. Review every capture before committing it.
 func TestLiveValidateEvidenceGate(t *testing.T) {
 	t.Parallel()
@@ -221,7 +221,7 @@ func liveValidateBaseURL(t *testing.T) *url.URL {
 
 // liveValidateUserFromPolicy keeps discovery on the issue's read-only
 // allowlist. It extracts a concrete email-valued selector from the deployed
-// policy without printing or persisting the identity. TAIL_ACL_LIVE_USER remains
+// policy without printing or persisting the identity. TSACL_LIVE_USER remains
 // the explicit fallback for policies expressed entirely through autogroups.
 func liveValidateUserFromPolicy(
 	t *testing.T,
@@ -449,7 +449,7 @@ func redactValidationBytes(
 }
 
 // replaceASCIIFold replaces every case-insensitive occurrence of old. The
-// control plane normalizes logins, so a mixed-case TAIL_ACL_LIVE_USER must
+// control plane normalizes logins, so a mixed-case TSACL_LIVE_USER must
 // still match the lowercase identity the server echoes back. Folding is ASCII
 // only so the lowered copy stays byte-aligned with the original, which
 // [bytes.ToLower] does not guarantee for every rune.

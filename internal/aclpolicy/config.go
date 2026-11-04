@@ -23,7 +23,7 @@ func LoadLintConfig(path string) (*LintConfig, error) {
 		return nil, err
 	}
 	var config LintConfig
-	if err = decodeHuJSON(path, raw, "a tail-acl lint config", &config); err != nil {
+	if err = decodeHuJSON(path, raw, "a tsacl lint config", &config); err != nil {
 		return nil, err
 	}
 	return &config, nil

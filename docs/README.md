@@ -1,12 +1,12 @@
-# tail-acl documentation
+# tsacl documentation
 
 The documentation is organized by the task it helps you complete. The
-[`tail-acl` README](../README.md) remains the primary reference for commands
-and flags; `tail-acl --help` and `tail-acl --schema` are authoritative.
+[`tsacl` README](../README.md) remains the primary reference for commands
+and flags; `tsacl --help` and `tsacl --schema` are authoritative.
 
 ## How-to guides
 
-- [Adopt tail-acl for an existing tailnet](how-to/bootstrap-existing-tailnet.md)
+- [Adopt tsacl for an existing tailnet](how-to/bootstrap-existing-tailnet.md)
 - [Lint a policy and act on the findings](how-to/lint-policy.md)
 - [Watch policy tests while editing](how-to/watch-policy-tests.md)
 - [Gate policy changes in CI](how-to/gate-policy-changes-in-ci.md)

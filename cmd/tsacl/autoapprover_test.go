@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 // autoApproverPolicy carries comments in each position the writer must
 // preserve: on the document, trailing a member, leading a member, and inside
 // the autoApprovers section itself.
 const autoApproverPolicy = `{
-	// Platform-owned policy. Edit with tail-acl only.
+	// Platform-owned policy. Edit with tsacl only.
 	"tagOwners": {
 		"tag:exit-node": ["autogroup:admin"], // approved by network-team
 	},
@@ -43,11 +43,11 @@ func TestAutoApproverAddThenRemoveReturnsOriginalBytes(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, autoApproverPolicy)
 
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:neteng"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "remove", "--route", "10.0.0.0/8", "--approver", "group:neteng"); err != nil {
 			t.Fatal(err)
 		}
@@ -66,11 +66,11 @@ func TestAutoApproverAddThenRemoveReturnsOriginalBytes(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, base)
 
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "add", "--exit-node", "--approver", "group:ops"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "remove", "--exit-node", "--approver", "group:ops"); err != nil {
 			t.Fatal(err)
 		}
@@ -99,11 +99,11 @@ func TestAutoApproverRemoveEmptiesButKeepsCommentedBlocks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, base)
 
-	if _, err := runTailACL(t, path,
+	if _, err := runTSACL(t, path,
 		"auto-approver", "remove", "--route", "10.0.0.0/8", "--approver", "group:neteng"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runTailACL(t, path,
+	if _, err := runTSACL(t, path,
 		"auto-approver", "remove", "--exit-node", "--approver", "tag:exit-node"); err != nil {
 		t.Fatal(err)
 	}
@@ -130,12 +130,12 @@ func TestAutoApproverAddIsIdempotent(t *testing.T) {
 	writeTestPolicy(t, path, autoApproverPolicy)
 	command := []string{"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:neteng"}
 
-	if _, err := runTailACL(t, path, command...); err != nil {
+	if _, err := runTSACL(t, path, command...); err != nil {
 		t.Fatal(err)
 	}
 	first := readPolicy(t, path)
 
-	stdout, err := runTailACL(t, path, command...)
+	stdout, err := runTSACL(t, path, command...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestAutoApproverAddMergesIntoExistingRouteAndCanonicalizes(t *testing.T) {
 
 	// 192.168.0.9/24 masks to the existing 192.168.0.0/24 key, so the approver
 	// must merge into that list rather than fork a second key.
-	if _, err := runTailACL(t, path,
+	if _, err := runTSACL(t, path,
 		"auto-approver", "add", "--route", "192.168.0.9/24", "--approver", "tag:router"); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestAutoApproverRemovePrunesEmptyRouteKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, autoApproverPolicy)
 
-	stdout, err := runTailACL(t, path,
+	stdout, err := runTSACL(t, path,
 		"auto-approver", "remove", "--route", "192.168.0.0/24", "--approver", "group:neteng")
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestAutoApproverRemoveIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, autoApproverPolicy)
 
-	stdout, err := runTailACL(t, path,
+	stdout, err := runTSACL(t, path,
 		"auto-approver", "remove", "--route", "192.168.0.0/24", "--approver", "group:ghost")
 	if err != nil {
 		t.Fatal(err)
@@ -238,12 +238,12 @@ func TestAutoApproverCommentAuthoring(t *testing.T) {
 		command := []string{"auto-approver", "add",
 			"--route", "10.0.0.0/8", "--approver", "group:neteng", "--comment", comment}
 
-		if _, err := runTailACL(t, path, command...); err != nil {
+		if _, err := runTSACL(t, path, command...); err != nil {
 			t.Fatal(err)
 		}
 		assertCommentsOn(t, path, []string{comment}, "autoApprovers", "routes", "10.0.0.0/8")
 
-		stdout, err := runTailACL(t, path, command...)
+		stdout, err := runTSACL(t, path, command...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +259,7 @@ func TestAutoApproverCommentAuthoring(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, autoApproverPolicy)
 
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "add", "--exit-node", "--approver", "group:ops",
 			"--comment", "Ops can approve exits too"); err != nil {
 			t.Fatal(err)
@@ -273,7 +273,7 @@ func TestAutoApproverCommentAuthoring(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, autoApproverPolicy)
 
-		stdout, err := runTailACL(t, path,
+		stdout, err := runTSACL(t, path,
 			"auto-approver", "add", "--exit-node", "--approver", "group:ops",
 			"--comment", "Now the only note", "--overwrite-comment")
 		if err != nil {
@@ -296,7 +296,7 @@ func TestAutoApproverAddCommentOnlyEditIsNotReportedAsAnAddition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, autoApproverPolicy)
 
-	stdout, err := runTailACL(t, path,
+	stdout, err := runTSACL(t, path,
 		"auto-approver", "add", "--route", "192.168.0.0/24", "--approver", "group:neteng",
 		"--comment", "Documented after the fact")
 	if err != nil {
@@ -351,7 +351,7 @@ func TestAutoApproverResolvesNonMaskedRouteKey(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, nonMaskedRoutePolicy)
 
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:ops"); err != nil {
 			t.Fatal(err)
 		}
@@ -372,7 +372,7 @@ func TestAutoApproverResolvesNonMaskedRouteKey(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, nonMaskedRoutePolicy)
 
-		stdout, err := runTailACL(t, path,
+		stdout, err := runTSACL(t, path,
 			"auto-approver", "remove", "--route", "10.0.0.0/8", "--approver", "group:neteng")
 		if err != nil {
 			t.Fatal(err)
@@ -389,7 +389,7 @@ func TestAutoApproverResolvesNonMaskedRouteKey(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "acl.hujson")
 		writeTestPolicy(t, path, nonMaskedRoutePolicy)
 
-		if _, err := runTailACL(t, path,
+		if _, err := runTSACL(t, path,
 			"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:ops",
 			"--comment", "Legacy unmasked key"); err != nil {
 			t.Fatal(err)
@@ -404,13 +404,13 @@ func TestAutoApproverEditsPreserveCommentsAndKeyOrder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, autoApproverPolicy)
 
-	if _, err := runTailACL(t, path,
+	if _, err := runTSACL(t, path,
 		"auto-approver", "add", "--route", "10.0.0.0/8", "--approver", "group:neteng"); err != nil {
 		t.Fatal(err)
 	}
 	output := readPolicy(t, path)
 	for _, preserved := range []string{
-		"// Platform-owned policy. Edit with tail-acl only.",
+		"// Platform-owned policy. Edit with tsacl only.",
 		"// approved by network-team",
 		"// Lab subnet behind the dev router.",
 		"// Exit nodes auto-approved for tagged devices.",
@@ -467,7 +467,7 @@ func TestAutoApproverUsageErrorsLeaveFileUntouched(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acl.hujson")
 			writeTestPolicy(t, path, autoApproverPolicy)
 
-			_, err := runTailACL(t, path, command...)
+			_, err := runTSACL(t, path, command...)
 			if code := exitCode(err); code != exitUsage {
 				t.Errorf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 			}
@@ -485,10 +485,10 @@ func TestAutoApproverParentCommand(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, autoApproverPolicy)
 
-	if _, err := runTailACL(t, path, "auto-approver"); err != nil {
+	if _, err := runTSACL(t, path, "auto-approver"); err != nil {
 		t.Errorf("bare auto-approver: %v", err)
 	}
-	if _, err := runTailACL(t, path, "auto-approver", "bogus"); exitCode(err) != exitUsage {
+	if _, err := runTSACL(t, path, "auto-approver", "bogus"); exitCode(err) != exitUsage {
 		t.Errorf("unknown verb exit = %d, want %d (error %v)", exitCode(err), exitUsage, err)
 	}
 }
@@ -503,7 +503,7 @@ func TestAutoApproverRemoveRejectsInvalidRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := runTailACL(t, path, "auto-approver", "remove", "--route", "10.0.0.0/33", "--approver", "group:ops")
+	_, err := runTSACL(t, path, "auto-approver", "remove", "--route", "10.0.0.0/33", "--approver", "group:ops")
 	if code := exitCode(err); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (error %v)", code, exitUsage, err)
 	}

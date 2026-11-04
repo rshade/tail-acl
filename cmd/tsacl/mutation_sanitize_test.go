@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize/sanitizetest"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize/sanitizetest"
 )
 
 func TestMutationMessagesSanitizeEditedIdentities(t *testing.T) {
@@ -161,7 +161,7 @@ func assertMutationMessage(t *testing.T, testCase mutationMessageCase) {
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, testCase.policy)
 	args := mutationArgs(testCase.level, testCase.format, testCase.args)
-	stdout, err := runTailACL(t, path, args...)
+	stdout, err := runTSACL(t, path, args...)
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, stdout)
 	}

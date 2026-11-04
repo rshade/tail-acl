@@ -24,7 +24,7 @@ func TestNodeAttrCommandsMergeRemoveAndPreserveApp(t *testing.T) {
 		}
 	],
 }`)
-	if _, err := runTailACL(t, path, "nodeattr", "add", "--target", "tag:two", "--target", "tag:one",
+	if _, err := runTSACL(t, path, "nodeattr", "add", "--target", "tag:two", "--target", "tag:one",
 		"--attr", "service-expose"); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestNodeAttrCommandsMergeRemoveAndPreserveApp(t *testing.T) {
 	if strings.Count(output, `"service-expose"`) != 1 {
 		t.Fatalf("attribute was not merged into one entry:\n%s", output)
 	}
-	if _, err := runTailACL(t, path, "nodeattr", "add", "--target", "tag:app", "--attr", "funnel",
+	if _, err := runTSACL(t, path, "nodeattr", "add", "--target", "tag:app", "--attr", "funnel",
 		"--comment", "operator-owned"); err != nil {
 		t.Fatal(err)
 	}
@@ -49,14 +49,14 @@ func TestNodeAttrCommandsMergeRemoveAndPreserveApp(t *testing.T) {
 			t.Errorf("nodeattr add lost %q:\n%s", preserved, output)
 		}
 	}
-	if _, err := runTailACL(t, path, "nodeattr", "add", "--target", "tag:new", "--attr", "funnel",
+	if _, err := runTSACL(t, path, "nodeattr", "add", "--target", "tag:new", "--attr", "funnel",
 		"--comment", "new-entry"); err != nil {
 		t.Fatal(err)
 	}
 	if output = readPolicy(t, path); !strings.Contains(output, "// new-entry") {
 		t.Errorf("comment on a new entry in an existing nodeAttrs array was not attached:\n%s", output)
 	}
-	if _, err := runTailACL(t, path, "nodeattr", "remove", "--target", "tag:one", "--target", "tag:two",
+	if _, err := runTSACL(t, path, "nodeattr", "remove", "--target", "tag:one", "--target", "tag:two",
 		"--attr", "funnel"); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestNodeAttrUsageAndSchema(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.json")
 	writeTestPolicy(t, path, `{}`)
-	_, err := runTailACL(t, path, "nodeattr", "add", "--target", "tag:app",
+	_, err := runTSACL(t, path, "nodeattr", "add", "--target", "tag:app",
 		"--attr", "funnel", "--ip-pool", "100.81.0.0/16")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("attr/ip-pool combination exit = %d, want %d (%v)", exitCode(err), exitUsage, err)
@@ -82,12 +82,12 @@ func TestNodeAttrUsageAndSchema(t *testing.T) {
 	if got := readPolicy(t, path); got != "{}" {
 		t.Fatalf("usage error changed policy: %q", got)
 	}
-	_, err = runTailACL(t, path, "nodeattr", "remove", "--index", "0", "--target", "tag:app")
+	_, err = runTSACL(t, path, "nodeattr", "remove", "--index", "0", "--target", "tag:app")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("index/field combination exit = %d, want %d (%v)", exitCode(err), exitUsage, err)
 	}
 	for _, args := range [][]string{{"nodeattr", "add", "--help"}, {"nodeattr", "remove", "--help"}} {
-		stdout, helpErr := runTailACL(t, path, args...)
+		stdout, helpErr := runTSACL(t, path, args...)
 		if helpErr != nil {
 			t.Fatalf("help %q: %v", args, helpErr)
 		}
@@ -97,7 +97,7 @@ func TestNodeAttrUsageAndSchema(t *testing.T) {
 			}
 		}
 	}
-	stdout, err := runTailACL(t, path, "-schema")
+	stdout, err := runTSACL(t, path, "-schema")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestNodeAttrRemoveByIndex(t *testing.T) {
 		{"target": ["tag:drop"], "attr": ["nextdns"]},
 	],
 }`)
-	if _, err := runTailACL(t, path, "nodeattr", "remove", "--index", "1"); err != nil {
+	if _, err := runTSACL(t, path, "nodeattr", "remove", "--index", "1"); err != nil {
 		t.Fatalf("remove --index 1: %v", err)
 	}
 	got := readPolicy(t, path)
@@ -130,7 +130,7 @@ func TestNodeAttrRemoveByIndex(t *testing.T) {
 	if !strings.Contains(got, "tag:keep") {
 		t.Errorf("entry 0 was removed too:\n%s", got)
 	}
-	_, err := runTailACL(t, path, "nodeattr", "remove", "--index", "7")
+	_, err := runTSACL(t, path, "nodeattr", "remove", "--index", "7")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("out-of-range index exit = %d, want %d (%v)", exitCode(err), exitUsage, err)
 	}

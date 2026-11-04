@@ -17,7 +17,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 const DefaultBaseURL = "https://api.tailscale.com"
@@ -204,7 +204,7 @@ func NewClient(config Config) (*tailscale.Client, error) {
 // Tailscale client's Auth interface, and exists rather than using the pinned
 // client's own tailscale.OAuth for one reason: that implementation builds its
 // token source over a bare [context.Background] with no HTTP client, so the
-// token request runs on [http.DefaultClient]. tail-acl documents a 30s bound on
+// token request runs on [http.DefaultClient]. tsacl documents a 30s bound on
 // "every Tailscale API request" and an interrupt contract for a command that is
 // mid-request; an unbounded token fetch on a transport the caller never
 // configured breaks both, and it is the one request that must succeed before

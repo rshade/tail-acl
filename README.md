@@ -1,28 +1,28 @@
-# tail-acl
+# tsacl
 
-> **Note: this repository is in transition.** `tail-acl` and the `policycore`
+> **Note: this repository is in transition.** `tsacl` and the `policycore`
 > library are moving here from their previous home. Until this note is
 > removed, treat the release downloads and the `go get` module versions as
 > unverified, and wait for the note to go away before using them.
 
 Compile, normalize, validate, test, check, lint, plan, and upload a Tailscale ACL policy.
-`tail-acl` makes typed edits to a policy file, deep-merges commented HuJSON
+`tsacl` makes typed edits to a policy file, deep-merges commented HuJSON
 sources into one strict-JSON policy, runs its native network assertions,
 ad-hoc reachability checks, and static hygiene lints locally, and talks to
 Tailscale's policy-file API to validate a candidate, diff it against the live
 tailnet, or upload it.
 
-> **Module** `github.com/rshade/tail-acl`. Conforms to the AX
+> **Module** `github.com/rshade/tsacl`. Conforms to the AX
 > conventions in [`docs/reference/ax-conventions.md`](docs/reference/ax-conventions.md):
 > the command result goes to **stdout** (human text, or a versioned JSON
 > envelope with `-format json`); logs and errors go to **stderr**.
 
-It ships three binaries: `tail-acl` (the primary CLI), plus the focused helpers
+It ships three binaries: `tsacl` (the primary CLI), plus the focused helpers
 `hujson-merge` (the merge engine) and `acl-upload` (upload/validate). The
-helpers' behaviour is also available as `tail-acl merge` / `tail-acl upload`;
-prefer `tail-acl` for the full AX-conformant contract.
+helpers' behaviour is also available as `tsacl merge` / `tsacl upload`;
+prefer `tsacl` for the full AX-conformant contract.
 
-This README is the primary documentation, and `tail-acl --help` / `--schema`
+This README is the primary documentation, and `tsacl --help` / `--schema`
 are the authoritative command catalogs. Task guides and longer discussions
 have their own pages under [`docs/`](./docs/README.md) — adopting an existing
 tailnet, [linting a policy](./docs/how-to/lint-policy.md),
@@ -35,9 +35,9 @@ closed or passing open.
 ## Build
 
 ```sh
-go build -o tail-acl ./cmd/tail-acl
+go build -o tsacl ./cmd/tsacl
 # stamp a release version:
-go build -ldflags "-X main.version=v0.1.0" -o tail-acl ./cmd/tail-acl
+go build -ldflags "-X main.version=v0.1.0" -o tsacl ./cmd/tsacl
 ```
 
 `mise run build` compiles every package; the release workflow builds the three
@@ -47,30 +47,30 @@ binaries for each supported OS and architecture with GoReleaser.
 
 ```sh
 # Typed edits (comments and key order survive in .json and .hujson):
-tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
-tail-acl --file acl.json grant remove --index 0
-tail-acl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
-tail-acl --file acl.json group remove --name group:eng --force  # only when orphaning is intentional
-tail-acl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
-tail-acl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
-tail-acl --file acl.json ipset remove --name ipset:office --force  # only when orphaning is intentional
-tail-acl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
-tail-acl --file acl.json ssh remove --action check --src autogroup:member --dst tag:server --user root --check-period 12h
-tail-acl --file acl.json nodeattr add --target tag:k8s --attr funnel
-tail-acl --file acl.json nodeattr add --target tag:example-range --ip-pool 100.81.0.0/16
-tail-acl --file acl.json nodeattr remove --target tag:k8s --attr funnel
-tail-acl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
-tail-acl --file acl.json host set web 100.64.0.10
-tail-acl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
-tail-acl --file acl.json posture remove posture:labCompliant
-tail-acl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng
-tail-acl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
-tail-acl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
-tail-acl --file acl.json test add --src alice@example.com --deny tag:db:5432
-tail-acl --file acl.json test add --src alice@example.com --accept tag:web:443
-tail-acl --file acl.json test remove --src alice@example.com --deny tag:db:5432
+tsacl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443
+tsacl --file acl.json grant remove --index 0
+tsacl --file acl.json group add --name group:eng --member alice@example.com --member bob@example.com
+tsacl --file acl.json group remove --name group:eng --force  # only when orphaning is intentional
+tsacl --file acl.json ipset add --name ipset:office --cidr 10.0.0.0/8
+tsacl --file acl.json ipset add --name ipset:trimmed --member 'add ipset:office' --member 'remove 10.1.0.0/16'
+tsacl --file acl.json ipset remove --name ipset:office --force  # only when orphaning is intentional
+tsacl --file acl.json ssh add --action check --src autogroup:member --dst tag:server --user root --check-period 12h
+tsacl --file acl.json ssh remove --action check --src autogroup:member --dst tag:server --user root --check-period 12h
+tsacl --file acl.json nodeattr add --target tag:k8s --attr funnel
+tsacl --file acl.json nodeattr add --target tag:example-range --ip-pool 100.81.0.0/16
+tsacl --file acl.json nodeattr remove --target tag:k8s --attr funnel
+tsacl --file acl.hujson tag-owner add tag:web autogroup:admin  # comments preserved
+tsacl --file acl.json host set web 100.64.0.10
+tsacl --file acl.json posture set posture:labCompliant "custom:labCompliant == true"
+tsacl --file acl.json posture remove posture:labCompliant
+tsacl --file acl.hujson auto-approver add --route 10.0.0.0/8 --approver group:neteng
+tsacl --file acl.hujson auto-approver add --exit-node --approver tag:exit-node
+tsacl --file acl.hujson auto-approver remove --route 10.0.0.0/8 --approver group:neteng
+tsacl --file acl.json test add --src alice@example.com --deny tag:db:5432
+tsacl --file acl.json test add --src alice@example.com --accept tag:web:443
+tsacl --file acl.json test remove --src alice@example.com --deny tag:db:5432
 # Author a posture test: the attributes are written into the entry's srcPostureAttrs
-tail-acl --file acl.json test add --src alice@example.com \
+tsacl --file acl.json test add --src alice@example.com \
   --src-posture-attr node:os=linux --src-posture-attr ip:country=KP \
   --deny bbb:443 --deny nyc-svc:443
 
@@ -78,62 +78,62 @@ tail-acl --file acl.json test add --src alice@example.com \
 # expression at all, and `--comment` must precede it (every valid expression
 # starts with a node:/custom:/ip: namespace, so this one is then rejected as
 # unparseable rather than as an unrecognized flag):
-tail-acl --file acl.json posture set posture:lab --comment "note" -- "-1 < custom:score"
+tsacl --file acl.json posture set posture:lab --comment "note" -- "-1 < custom:score"
 
 # Author a comment on the entry the command creates:
-tail-acl --file acl.json grant add --src tag:app --dst tag:db --ip tcp:5432 \
+tsacl --file acl.json grant add --src tag:app --dst tag:db --ip tcp:5432 \
   --comment "Database access for application nodes"
-tail-acl --file acl.hujson host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
-tail-acl --file acl.json host set web 100.64.0.10 --comment "Now the canary" --overwrite-comment
-tail-acl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
+tsacl --file acl.hujson host set web 100.64.0.10 --comment "Legacy monitoring endpoint"
+tsacl --file acl.json host set web 100.64.0.10 --comment "Now the canary" --overwrite-comment
+tsacl --file acl.json grant add --src autogroup:member --dst tag:web --ip tcp:443 --src-posture posture:labCompliant
 
 # Compile commented HuJSON sources into one strict-JSON policy:
-tail-acl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
+tsacl --file acl/acl.generated.json merge --dir initial-30 --dir peer-relay-internal
 
 # Strip HuJSON comments and trailing commas for jq and other JSON tooling:
-tail-acl --file acl/acl.generated.json normalize | jq -r '.'
+tsacl --file acl/acl.generated.json normalize | jq -r '.'
 
 # Run the policy's top-level tests locally (no credentials or network):
-tail-acl --file acl/acl.generated.json test
-tail-acl -format json --file acl/acl.generated.json test
-tail-acl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
-tail-acl --indeterminate=fail --file acl/acl.generated.json test  # fail CI if proof is incomplete
-tail-acl --file acl/acl.generated.json test --watch  # re-run on every save, Ctrl-C to stop
-tail-acl -format json --file acl/acl.generated.json test --watch  # NDJSON, one verdict per line
+tsacl --file acl/acl.generated.json test
+tsacl -format json --file acl/acl.generated.json test
+tsacl -strict --file acl/acl.generated.json test  # fail on any unparseable rule
+tsacl --indeterminate=fail --file acl/acl.generated.json test  # fail CI if proof is incomplete
+tsacl --file acl/acl.generated.json test --watch  # re-run on every save, Ctrl-C to stop
+tsacl -format json --file acl/acl.generated.json test --watch  # NDJSON, one verdict per line
 
 # Ask one reachability question locally (no credentials or network):
-tail-acl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
-tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
-tail-acl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
-tail-acl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
+tsacl --file acl/acl.generated.json check --src alice@example.com --dst tag:web:443
+tsacl --file acl/acl.generated.json check --src tag:app --dst tag:db --port 5432
+tsacl -format json --file acl/acl.generated.json check --src group:dev --dst web:443
+tsacl --file acl/acl.generated.json check --src tag:app --dst tag:dns:53 --proto udp
 # Answer through a posture gate by supplying the device's attributes:
-tail-acl --file acl/acl.generated.json check --src alice@example.com --dst bbb:443 \
+tsacl --file acl/acl.generated.json check --src alice@example.com --dst bbb:443 \
   --posture-attr ip:country=KP --posture-attrs-complete
 
 # Statically lint policy hygiene (no credentials or network):
-tail-acl --file acl/acl.generated.json lint
-tail-acl --file acl/acl.generated.json lint -severity error   # only report and fail on errors
-tail-acl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
-tail-acl --file acl/acl.generated.json lint -config acl/lint.hujson
+tsacl --file acl/acl.generated.json lint
+tsacl --file acl/acl.generated.json lint -severity error   # only report and fail on errors
+tsacl --file acl/acl.generated.json lint -wildcard any      # flag every standalone *
+tsacl --file acl/acl.generated.json lint -config acl/lint.hujson
 
 # Talk to the tailnet (needs TAILSCALE_TAILNET plus an API key or OAuth client):
-tail-acl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
-tail-acl --file acl/acl.generated.json validate   # server-side validation
-tail-acl --file acl/acl.generated.json plan       # read-only diff vs the live policy
-tail-acl --file acl/acl.generated.json upload     # apply, guarded by plan's ETag
+tsacl --file acl/acl.generated.json pull       # bootstrap from the deployed policy
+tsacl --file acl/acl.generated.json validate   # server-side validation
+tsacl --file acl/acl.generated.json plan       # read-only diff vs the live policy
+tsacl --file acl/acl.generated.json upload     # apply, guarded by plan's ETag
 
 # Machine surfaces:
-tail-acl -schema                                   # machine-readable command/flag catalog
-tail-acl --version                                 # version + VCS revision
-tail-acl -format json --file acl.json grant add …  # JSON result envelope on stdout
+tsacl -schema                                   # machine-readable command/flag catalog
+tsacl --version                                 # version + VCS revision
+tsacl -format json --file acl.json grant add …  # JSON result envelope on stdout
 
 # Query without an external jq installation:
-tail-acl --file acl.hujson jq '.grants[] | .src'
+tsacl --file acl.hujson jq '.grants[] | .src'
 ```
 
 ### Query a policy
 
-`tail-acl jq PROGRAM` standardizes JSON or HuJSON before evaluating PROGRAM
+`tsacl jq PROGRAM` standardizes JSON or HuJSON before evaluating PROGRAM
 with the embedded [gojq](https://github.com/itchyny/gojq) engine. The command
 is read-only and does not provide jq-style in-place editing.
 
@@ -155,7 +155,7 @@ what marks the stream truncated. Every line emitted is still a complete JSON
 value either way.
 
 A query that matches nothing is a success: it exits `0` with an empty
-`results` array. `tail-acl` deliberately does not inherit jq's own `-e`
+`results` array. `tsacl` deliberately does not inherit jq's own `-e`
 convention, under which an empty or false result sets a non-zero exit — `1`
 here means a policy assertion failed, and overloading it would break every
 caller that branches on the [exit codes](#exit-codes) below.
@@ -167,11 +167,11 @@ policy, or evaluation error exits 2 with the diagnostic on stderr.
 
 ### Bootstrap an existing tailnet
 
-When adopting `tail-acl` for a tailnet whose policy was authored in the admin
+When adopting `tsacl` for a tailnet whose policy was authored in the admin
 console, pull the deployed policy before making local edits:
 
 ```bash
-tail-acl --file acl/acl.hujson pull
+tsacl --file acl/acl.hujson pull
 ```
 
 `pull` writes the deployed bytes verbatim, including comments and key order, and
@@ -206,7 +206,7 @@ fails every request rather than only the privileged ones.
 
 `lint --online-validation` is the exception. It also reads the `vip-services`
 endpoint, which no published OAuth scope covers, so a scoped OAuth client is
-denied there. Rather than failing the run, `tail-acl` skips the `svc-unknown`
+denied there. Rather than failing the run, `tsacl` skips the `svc-unknown`
 findings, logs the reason to stderr, and reports everything else — the
 SCIM-group-sync warnings need only `policy_file:read` and still land, as do all
 offline findings. Use `--api-key` when you need `svc-unknown` coverage; an API
@@ -324,14 +324,14 @@ a spelling the decoder behind it would have accepted. A key it cannot place is
 reported as `not modeled by this build` rather than as an invalid key: Tailscale
 ships policy keys in alpha and beta ahead of GA, so an unmodeled key is
 routinely a real one the pinned client has not caught up to, and the message
-must not read as grounds for deleting live policy. Run `tail-acl --version` for
+must not read as grounds for deleting live policy. Run `tsacl --version` for
 the pin. Nested schema errors remain strict, so an edit never silently discards
 data the pinned types do not model.
 
 Like every other command, it refuses a policy containing the same object member
 twice rather than emit one. HuJSON resolves a duplicate first-wins while the
 strict-JSON tools downstream resolve it last-wins, so passing the document
-through would answer an operator with the member `tail-acl` itself discards.
+through would answer an operator with the member `tsacl` itself discards.
 Comments and trailing commas are overwritten with spaces rather than removed,
 which keeps every byte offset aligned with the HuJSON source and makes the two
 diffable against each other.
@@ -383,7 +383,7 @@ the `NO_COLOR` environment variable to any non-empty value disables color under
 
 ### Upload concurrency safety
 
-`plan` and `pull` write the ETag they observed to `.tail-acl-state.json` beside
+`plan` and `pull` write the ETag they observed to `.tsacl-state.json` beside
 `--file`; a successful `upload` replaces it with the new ETag. The versioned
 state file is gitignored, stores one entry per tailnet, and records observation
 only. It is never parsed as policy, merged, validated, or uploaded. Keeping it
@@ -404,7 +404,7 @@ It cannot be combined with `--if-match` and is intentionally not the default.
 
 If the server rejects a stale ETag, pull the deployed policy to a separate file
 and reconcile it through `hujson-merge --base ... --add ...`, the pair-merge
-path that preserves HuJSON comments. Do not use `tail-acl merge` for this
+path that preserves HuJSON comments. Do not use `tsacl merge` for this
 reconciliation: its directory merge deliberately standardizes output to strict
 JSON and removes comments. Review the result and run `plan` again before retrying.
 
@@ -449,7 +449,7 @@ unmodified, so no transformation step is needed:
 ```bash
 curl -H "Authorization: Bearer $TAILSCALE_API_KEY" \
   "https://api.tailscale.com/api/v2/tailnet/$TAILSCALE_TAILNET/users" > roster.json
-tail-acl --roster roster.json check --src alice@example.com --dst tag:audit:8443
+tsacl --roster roster.json check --src alice@example.com --dst tag:audit:8443
 ```
 
 A hand-authored map is equivalent, and easier for a small tailnet:
@@ -486,7 +486,7 @@ unsettled against the query, the whole group reports exit `10` rather than
 answering on the members it could read.
 
 The file lists login names. Treat it as exactly as sensitive as the policy it
-accompanies. `tail-acl` only reads it — it is never written, cached, or uploaded,
+accompanies. `tsacl` only reads it — it is never written, cached, or uploaded,
 and a login reaches the output only when it is the identity you asked about.
 
 ## Design
@@ -581,7 +581,7 @@ Three responses deliberately do not produce a pass or a fail:
   taken. Calling that combination valid would risk a green run on a rejection
   whose reason lived only in the message; calling it invalid would fail every
   warning-bearing policy if the server simply narrates warnings there. Until a
-  capture settles it, `tail-acl` reports that it cannot tell.
+  capture settles it, `tsacl` reports that it cannot tell.
 - **A detail carrying neither `errors` nor `warnings` exits `10`.** The pinned
   client already dropped one documented per-detail field, which is the whole
   reason this command owns its request — so an entry this client cannot read is
@@ -621,7 +621,7 @@ unambiguous; `--src-posture` is a *reference* sitting alongside other
 fully-qualified selector flags (`--src`, `--dst`), where the prefix carries
 meaning and silently inventing one would hide a typo. Authoring does not validate
 that a referenced posture is actually defined — that dangling-reference check is
-`tail-acl lint`'s job (the `undefined-reference` rule), not authoring's.
+`tsacl lint`'s job (the `undefined-reference` rule), not authoring's.
 
 `posture set` does validate each *expression* before writing, against the
 `policycore/posture` grammar and vocabularies. An expression the control plane
@@ -694,7 +694,7 @@ Local evaluation assumes the policy's rule selectors are valid. An undefined
 `group:`, host alias, or `ipset:` *selector* on a rule matches nothing locally
 even though the control plane rejects that policy; an undefined reference
 *inside* a defined ipset is different, because it leaves the set unreadable,
-and a verdict that reaches it is `indeterminate`. `tail-acl lint` catches a
+and a verdict that reaches it is `indeterminate`. `tsacl lint` catches a
 dangling rule selector; it does **not** yet check the members inside an
 ipset, and it does **not** catch an unreadable port or protocol, so it will
 not predict an exit `10` from either. Server-side `validate` is the only
@@ -1030,7 +1030,7 @@ The `broad-rule-untested` advice tier is heuristic, not a declaration that the
 policy is defective. It closes a deny-first authoring loop: lint identifies an
 all-port grant with no asserted boundary and, when the policy supplies a
 concrete port, emits a compact JSON test to paste into `tests`. The local
-`tail-acl test` run then goes red because the broad grant reaches that target;
+`tsacl test` run then goes red because the broad grant reaches that target;
 narrowing the grant makes the test green, and the deny assertion makes the
 advisory quiet. Only `deny` assertions count as coverage; coverage compares the
 destination host selector exactly and ignores source and port. Tailscale policy
@@ -1082,9 +1082,9 @@ as an unavailable control plane.
 a second terminal rather than a command you keep retyping.
 
 ```bash
-tail-acl --file acl.hujson test --watch              # human output, blank line between runs
-tail-acl -format json --file acl.hujson test --watch # NDJSON, one envelope per line
-tail-acl --file acl.hujson test --watch --validate   # adds explicit read-only server validation
+tsacl --file acl.hujson test --watch              # human output, blank line between runs
+tsacl -format json --file acl.hujson test --watch # NDJSON, one envelope per line
+tsacl --file acl.hujson test --watch --validate   # adds explicit read-only server validation
 ```
 
 Four decisions are worth knowing:
@@ -1105,7 +1105,7 @@ Four decisions are worth knowing:
   signals the watcher's *own* failures: an unreadable `--file`, a non-positive `--interval`, a flag
   combination that cannot apply, or a write that fails and returns an error, such as a full disk. A save
   that cannot be parsed is none of those — it prints nothing on stdout, logs once to stderr, and leaves the
-  loop running. Piping into a reader that exits early, e.g. `tail-acl test --watch | head -1`, does **not**
+  loop running. Piping into a reader that exits early, e.g. `tsacl test --watch | head -1`, does **not**
   return you to a prompt: a broken pipe is only detected by writing, and a watcher that has already graded
   the current file writes nothing until that file changes, so it keeps polling. The *next* save is what
   fails to write, and the outcome there is platform-specific — on Unix the Go runtime raises `SIGPIPE` on

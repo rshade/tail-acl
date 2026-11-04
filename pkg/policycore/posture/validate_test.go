@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
 )
 
 // diagnosticCase pins one expression's diagnostics as an ordered list of
@@ -284,7 +284,7 @@ func TestValidateUnknownCountry(t *testing.T) {
 }
 
 // TestDiagnosticKindLevels pins which kinds block: every kind except
-// DiagnosticUnknownAttribute is error-level. tail-acl's lint mapping and
+// DiagnosticUnknownAttribute is error-level. tsacl's lint mapping and
 // posture set's accept/warn decision both rest on this.
 func TestDiagnosticKindLevels(t *testing.T) {
 	t.Parallel()

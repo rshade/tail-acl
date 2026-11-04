@@ -37,6 +37,6 @@ None.
 ## Impact
 
 `policycore/address.go` and `policycore/resolvable.go`. Callers that treated
-a host alias chain as a CIDR, including `tail-acl check`, stop agreeing with
+a host alias chain as a CIDR, including `tsacl check`, stop agreeing with
 a policy the control plane rejects. Literal host values are unchanged.
-`tail-acl` authors and lints the same rule in its own change of this slug.
+`tsacl` authors and lints the same rule in its own change of this slug.

@@ -3,7 +3,7 @@
 ## Purpose
 
 Detect the literal `*` selector in a port-stripped selector list, for
-callers such as tail-acl's overbroad-wildcard advisory, without treating any
+callers such as tsacl's overbroad-wildcard advisory, without treating any
 autogroup as a wildcard.
 
 ## Requirements

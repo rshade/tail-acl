@@ -14,8 +14,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/observedstate"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/observedstate"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 	testAPIKey  = "tskey-api-integration-test"
 )
 
-func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
+func TestTSACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	t.Parallel()
 	const originalPolicy = `// integration-test base policy
 {
@@ -51,7 +51,7 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	originalPath := filepath.Join(tempDir, "original.hujson")
 	goodPath := writePolicy(t, tempDir, "good.hujson", goodPolicy)
 	badPath := writePolicy(t, tempDir, "bad.hujson", badPolicy)
-	binary := buildTailACL(t, tempDir)
+	binary := buildTSACL(t, tempDir)
 
 	api := newPolicyAPIServer(t, originalPolicy)
 	server := httptest.NewServer(api)
@@ -125,7 +125,7 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	assertContains(t, output, "plan valid; no changes", "ETag "+goodETag)
 
 	output = runner.mustFail(t, "--file", originalPath, "--if-match", trimETag(originalETag), "upload")
-	assertContains(t, output, "upload refused", "tail-acl --file <remote-policy.hujson> pull", "hujson-merge --base")
+	assertContains(t, output, "upload refused", "tsacl --file <remote-policy.hujson> pull", "hujson-merge --base")
 	api.assertPolicy(t, goodPolicy)
 
 	output = runner.mustSucceed(t, "--file", originalPath, "--if-match", trimETag(goodETag), "upload")
@@ -137,7 +137,7 @@ func TestTailACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	api.assertRequestCounts(t, 5, 1, 1, 2)
 }
 
-func TestTailACLValidationWarningClassification(t *testing.T) {
+func TestTSACLValidationWarningClassification(t *testing.T) {
 	t.Parallel()
 	runner, api := newValidationRunner(t)
 
@@ -206,7 +206,7 @@ func TestTailACLValidationWarningClassification(t *testing.T) {
 	api.assertRequestCounts(t, 4, 0, 0, 0)
 }
 
-func TestTailACLValidationFailureClassification(t *testing.T) {
+func TestTSACLValidationFailureClassification(t *testing.T) {
 	t.Parallel()
 	runner, api := newValidationRunner(t)
 
@@ -288,7 +288,7 @@ func newValidationRunner(t *testing.T) (cliRunner, *policyAPIServer) {
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
 	return cliRunner{
-		binary: buildTailACL(t, t.TempDir()),
+		binary: buildTSACL(t, t.TempDir()),
 		env: []string{
 			"TAILSCALE_API_KEY=" + testAPIKey,
 			"TAILSCALE_TAILNET=" + testTailnet,
@@ -312,7 +312,7 @@ func exitCodeOf(t *testing.T, err error) int {
 	return exitErr.ExitCode()
 }
 
-func TestTailACLTypedEditPreservesSSHExtensions(t *testing.T) {
+func TestTSACLTypedEditPreservesSSHExtensions(t *testing.T) {
 	t.Parallel()
 	const originalPolicy = `{
 	"ssh": [{
@@ -334,7 +334,7 @@ func TestTailACLTypedEditPreservesSSHExtensions(t *testing.T) {
 
 	tempDir := t.TempDir()
 	path := writePolicy(t, tempDir, "acl.json", originalPolicy)
-	runner := cliRunner{binary: buildTailACL(t, tempDir)}
+	runner := cliRunner{binary: buildTSACL(t, tempDir)}
 	runner.mustSucceed(
 		t,
 		"--file", path,
@@ -372,7 +372,7 @@ func (r cliRunner) mustSucceed(t *testing.T, args ...string) string {
 	t.Helper()
 	output, err := r.run(t, args...)
 	if err != nil {
-		t.Fatalf("tail-acl %s failed: %v\n%s", strings.Join(args, " "), err, output)
+		t.Fatalf("tsacl %s failed: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return output
 }
@@ -381,7 +381,7 @@ func (r cliRunner) mustFail(t *testing.T, args ...string) string {
 	t.Helper()
 	output, err := r.run(t, args...)
 	if err == nil {
-		t.Fatalf("tail-acl %s unexpectedly succeeded:\n%s", strings.Join(args, " "), output)
+		t.Fatalf("tsacl %s unexpectedly succeeded:\n%s", strings.Join(args, " "), output)
 	}
 	return output
 }
@@ -405,17 +405,17 @@ func (r cliRunner) runSplit(t *testing.T, args ...string) (string, string, error
 	return stdout.String(), stderr.String(), err
 }
 
-func buildTailACL(t *testing.T, tempDir string) string {
+func buildTSACL(t *testing.T, tempDir string) string {
 	t.Helper()
 	moduleRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(tempDir, "tail-acl")
-	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/tail-acl")
+	binary := filepath.Join(tempDir, "tsacl")
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/tsacl")
 	cmd.Dir = moduleRoot
 	if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
-		t.Fatalf("building tail-acl: %v\n%s", buildErr, output)
+		t.Fatalf("building tsacl: %v\n%s", buildErr, output)
 	}
 	return binary
 }

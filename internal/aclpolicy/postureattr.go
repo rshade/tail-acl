@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rshade/tail-acl/pkg/policycore/posture"
+	"github.com/rshade/tsacl/pkg/policycore/posture"
 )
 
 // ParsePostureAttr parses one KEY=VALUE posture attribute, the form check's

@@ -1,4 +1,4 @@
-// Package observedstate persists control-plane versions observed by tail-acl.
+// Package observedstate persists control-plane versions observed by tsacl.
 // The state is observation only: policy parsing and classification never read it.
 package observedstate
 
@@ -16,7 +16,7 @@ const (
 	// FileName is deliberately policy-adjacent and gitignored. One file can
 	// safely serve every tailnet addressed from the policy directory because
 	// entries are keyed by tailnet.
-	FileName      = ".tail-acl-state.json"
+	FileName      = ".tsacl-state.json"
 	schemaVersion = "1"
 	stateFileMode = 0o600
 )
@@ -114,7 +114,7 @@ func decode(contents []byte) (state, error) {
 
 func writeAtomic(path string, contents []byte) error {
 	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".tail-acl-state-*")
+	temp, err := os.CreateTemp(dir, ".tsacl-state-*")
 	if err != nil {
 		return fmt.Errorf("creating temporary file: %w", err)
 	}

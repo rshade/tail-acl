@@ -1,6 +1,6 @@
 // Package addrspace provides policy-agnostic address-space primitives for
 // comparing route CIDRs and deriving site IDs from Tailscale 4via6 prefixes.
-// It knows nothing about ACL policy text or live device inventories: tail-acl
+// It knows nothing about ACL policy text or live device inventories: tsacl
 // and tailnet-audit supply their own CIDR strings and classify the results.
 package addrspace
 

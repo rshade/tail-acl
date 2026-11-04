@@ -1,12 +1,13 @@
-title = "tail-acl gitleaks config"
+title = "tsacl gitleaks config"
 
 [extend]
 useDefault = true
 
 # The tests assert the CLIs never echo an API key from the environment, so they
 # plant a placeholder key. Allowlist only that placeholder, only in those tests.
+# The tail-acl path keeps pre-rename history clean, since gitleaks scans every commit.
 [[allowlists]]
 description = "placeholder API key in the no-secret-in-output tests"
 condition = "AND"
-paths = ['''cmd/(acl-upload|tail-acl)/main_test\.go''']
+paths = ['''cmd/(acl-upload|tsacl|tail-acl)/main_test\.go''']
 regexes = ['''tskey-api-SE''']

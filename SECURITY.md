@@ -4,14 +4,14 @@
 
 Report suspected vulnerabilities privately through GitHub Security Advisories:
 
-<https://github.com/rshade/tail-acl/security/advisories/new>
+<https://github.com/rshade/tsacl/security/advisories/new>
 
 Do not report vulnerabilities through public GitHub issues, pull requests, or
 Discussions before coordinated disclosure.
 
 Please include:
 
-- The affected `tail-acl` version, commit, or branch.
+- The affected `tsacl` version, commit, or branch.
 - A concise impact statement.
 - Reproduction steps or a minimal proof of concept.
 - Any relevant logs or output with API keys, tailnet names, and other personal
@@ -28,12 +28,12 @@ The maintainer aims to:
   closure.
 
 These are targets, not legal guarantees. Reports involving credential exposure,
-a way to make `tail-acl` upload a policy the operator did not approve, or a
+a way to make `tsacl` upload a policy the operator did not approve, or a
 bypass of the `--if-match` ETag guard are prioritized.
 
 ## Supported Versions
 
-`tail-acl` is pre-v1.0. Patch releases (`0.x.PATCH`) are backward-compatible and
+`tsacl` is pre-v1.0. Patch releases (`0.x.PATCH`) are backward-compatible and
 are the preferred vehicle for security fixes. Minor releases (`0.MINOR.0`) may
 contain breaking changes.
 
@@ -45,7 +45,7 @@ contain breaking changes.
 
 ## Disclosure Policy
 
-`tail-acl` follows coordinated disclosure. Keep vulnerability details private
+`tsacl` follows coordinated disclosure. Keep vulnerability details private
 until a fix or documented mitigation is available, unless there is active
 exploitation. The default embargo target is up to 90 days from acknowledgment,
 adjusted by mutual agreement for severity, patch complexity, and downstream
@@ -53,7 +53,7 @@ impact.
 
 ## Scope Notes
 
-- `tail-acl` reads a Tailscale API key or OAuth credentials from the
+- `tsacl` reads a Tailscale API key or OAuth credentials from the
   environment. Reports about secrets reaching logs, error output, or the
-  `.tail-acl-state.json` file are in scope.
+  `.tsacl-state.json` file are in scope.
 - `pkg/policycore` is a public library. Reports about it are in scope.

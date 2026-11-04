@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/internal/tailapi"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize/sanitizetest"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/tailapi"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize/sanitizetest"
 )
 
 func TestSanitizedOutputTypesRequireExplicitFieldDecisions(t *testing.T) {

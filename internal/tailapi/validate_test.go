@@ -15,7 +15,7 @@ import (
 
 	tailscale "tailscale.com/client/tailscale/v2"
 
-	"github.com/rshade/tail-acl/internal/tailapi"
+	"github.com/rshade/tsacl/internal/tailapi"
 )
 
 func TestValidatePolicyResponseMatrix(t *testing.T) {
@@ -215,7 +215,7 @@ func assertValidationRequest(t *testing.T, request *http.Request) {
 	if request.Header.Get("Content-Type") != "application/hujson" {
 		t.Errorf("Content-Type = %q", request.Header.Get("Content-Type"))
 	}
-	if request.Header.Get("User-Agent") != "tail-acl-test" {
+	if request.Header.Get("User-Agent") != "tsacl-test" {
 		t.Errorf("User-Agent = %q", request.Header.Get("User-Agent"))
 	}
 	username, password, ok := request.BasicAuth()
@@ -239,7 +239,7 @@ func runValidationMatrixCase(t *testing.T, server *httptest.Server, testCase val
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.UserAgent = "tail-acl-test"
+	client.UserAgent = "tsacl-test"
 	result, err := tailapi.ValidatePolicy(t.Context(), client, []byte(`{"grants": []}`))
 	if kind := validationErrorKindOf(err); kind != testCase.wantKind {
 		t.Fatalf("error kind = %q, want %q (error %v)", kind, testCase.wantKind, err)

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize"
-	"github.com/rshade/tail-acl/pkg/policycore/sanitize/sanitizetest"
+	"github.com/rshade/tsacl/internal/aclpolicy"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize"
+	"github.com/rshade/tsacl/pkg/policycore/sanitize/sanitizetest"
 )
 
 func TestExternalTailnetAddPreservesCommentAndRepeats(t *testing.T) {
@@ -21,7 +21,7 @@ func TestExternalTailnetAddPreservesCommentAndRepeats(t *testing.T) {
 }
 `
 	writeTestPolicy(t, path, original)
-	if _, err := runTailACL(t, path,
+	if _, err := runTSACL(t, path,
 		"external-tailnet", "add", "partner", "--external-id", "tn-123", "--allow-incoming",
 	); err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestExternalTailnetAddPreservesCommentAndRepeats(t *testing.T) {
 		t.Fatalf("alias = %+v, present=%t", declaration, ok)
 	}
 	afterFirst := readPolicy(t, path)
-	if _, err = runTailACL(t, path,
+	if _, err = runTSACL(t, path,
 		"external-tailnet", "add", "partner", "--external-id", "tn-123", "--allow-incoming",
 	); err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestExternalTailnetRemovePreservesComment(t *testing.T) {
 	},
 }
 `)
-	if _, err := runTailACL(t, path, "external-tailnet", "remove", "partner"); err != nil {
+	if _, err := runTSACL(t, path, "external-tailnet", "remove", "partner"); err != nil {
 		t.Fatal(err)
 	}
 	got := readPolicy(t, path)
@@ -92,7 +92,7 @@ func TestExternalTailnetListJSONIsEmptyWhenSectionIsAbsent(t *testing.T) {
 	"grants": [],
 }
 `)
-	raw, err := runTailACL(t, path, "-format", "json", "external-tailnet", "list")
+	raw, err := runTSACL(t, path, "-format", "json", "external-tailnet", "list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestExternalTailnetRemoveRefusesThenForces(t *testing.T) {
 	"grants": [{"src": ["group://partner/eng"], "dst": ["autogroup:self"], "ip": ["*"]}]
 }
 `)
-	_, err := runTailACL(t, path, "external-tailnet", "remove", "partner")
+	_, err := runTSACL(t, path, "external-tailnet", "remove", "partner")
 	if err == nil || exitCode(err) == exitUsage {
 		t.Fatalf("remove error = %v, want a failed removal", err)
 	}
@@ -132,7 +132,7 @@ func TestExternalTailnetRemoveRefusesThenForces(t *testing.T) {
 	if _, ok := loaded.ExternalTailnets["partner"]; !ok {
 		t.Fatal("alias was removed without --force")
 	}
-	if _, err = runTailACL(t, path, "external-tailnet", "remove", "partner", "--force"); err != nil {
+	if _, err = runTSACL(t, path, "external-tailnet", "remove", "partner", "--force"); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err = aclpolicy.Load(path)
@@ -152,7 +152,7 @@ func TestExternalTailnetRemoveRejectsInvalidAliasAsUsage(t *testing.T) {
 }
 `
 	writeTestPolicy(t, path, original)
-	_, err := runTailACL(t, path, "external-tailnet", "remove", "bad/alias")
+	_, err := runTSACL(t, path, "external-tailnet", "remove", "bad/alias")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("remove error = %v, exit = %d, want %d", err, exitCode(err), exitUsage)
 	}
@@ -202,7 +202,7 @@ func TestExternalTailnetMutationsSanitizeAlias(t *testing.T) {
 					[]string{"--sanitize", string(variant.level), "-format", variant.format},
 					testCase.args...,
 				)
-				stdout, err := runTailACL(t, path, args...)
+				stdout, err := runTSACL(t, path, args...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -222,14 +222,14 @@ func TestExternalTailnetListHumanAndJSON(t *testing.T) {
 	"externalTailnets": {"partner": {"externalID": "tn-123", "allowIncomingConnections": true}}
 }
 `)
-	human, err := runTailACL(t, path, "external-tailnet", "list")
+	human, err := runTSACL(t, path, "external-tailnet", "list")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(human, "partner") || !strings.Contains(human, "allowIncomingConnections=true") {
 		t.Errorf("human = %q", human)
 	}
-	raw, err := runTailACL(t, path, "-format", "json", "external-tailnet", "list")
+	raw, err := runTSACL(t, path, "-format", "json", "external-tailnet", "list")
 	if err != nil {
 		t.Fatal(err)
 	}

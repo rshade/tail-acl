@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 // colorMode is the resolved value of --color. auto is the default: color only

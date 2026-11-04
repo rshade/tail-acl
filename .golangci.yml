@@ -1,7 +1,7 @@
 # This file is licensed under the terms of the MIT license https://opensource.org/license/mit
 # Copyright (c) 2021-2025 Marat Reimers
 
-## golangci-lint config for tail-acl.
+## golangci-lint config for tsacl.
 #
 # Targets the golangci-lint version pinned in mise.toml.
 # Match that version locally to reproduce lint results (`mise run lint-go`).
@@ -9,8 +9,8 @@
 # Adapted (very strict "golden config", MIT) from:
 #   https://github.com/maratori/golangci-lint-config
 #
-# Repo-specific changes from upstream (each marked "tail-acl:" below):
-#   - goimports.local-prefixes -> github.com/rshade/tail-acl
+# Repo-specific changes from upstream (each marked "tsacl:" below):
+#   - goimports.local-prefixes -> github.com/rshade/tsacl
 #   - forbidigo allowed in the CLI output layer (main.go, cmd/) per the AX
 #     "sacred stdout" convention; still forbidden elsewhere so internal packages
 #     return data instead of printing.
@@ -40,9 +40,9 @@ formatters:
       # A list of prefixes, which, if set, checks import paths
       # with the given prefixes are grouped after 3rd-party packages.
       # Default: []
-      # tail-acl: this repo's module prefix (upstream placeholder was github.com/my/project).
+      # tsacl: this repo's module prefix (upstream placeholder was github.com/my/project).
       local-prefixes:
-        - github.com/rshade/tail-acl
+        - github.com/rshade/tsacl
 
     golines:
       # Target maximum line length.
@@ -447,7 +447,7 @@ linters:
       - common-false-positives
     # Excluding configuration per-path, per-linter, per-text and per-source.
     rules:
-      # tail-acl: the CLI output layer is allowed to write to stdout
+      # tsacl: the CLI output layer is allowed to write to stdout
       # (AX "sacred stdout" convention). main.go and cmd/ packages assemble
       # human/JSON output; internal packages stay forbidden so they return data.
       - path: '(^|/)main\.go$'

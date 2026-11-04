@@ -11,7 +11,7 @@ server-side validation.
 ## Local save-and-check loop
 
 ```sh
-tail-acl --file acl.hujson test --watch
+tsacl --file acl.hujson test --watch
 ```
 
 The first result prints immediately. After that, the suite re-runs when the
@@ -21,7 +21,7 @@ Set a different poll interval when the default `500ms` is wrong for your
 editor or filesystem:
 
 ```sh
-tail-acl --file acl.hujson test --watch --interval 1s
+tsacl --file acl.hujson test --watch --interval 1s
 ```
 
 The interval must be a positive duration. A non-positive value exits `2`.
@@ -29,7 +29,7 @@ The interval must be a positive duration. A non-positive value exits `2`.
 ## Machine-readable stream
 
 ```sh
-tail-acl --format json --file acl.hujson test --watch
+tsacl --format json --file acl.hujson test --watch
 ```
 
 Under `--format json` the stream is NDJSON: one result envelope per line.
@@ -49,7 +49,7 @@ endpoint. It is legal only together with `--watch`:
 export TAILSCALE_TAILNET=example.com
 export TAILSCALE_API_KEY=tskey-api-...
 
-tail-acl --file acl.hujson test --watch --validate
+tsacl --file acl.hujson test --watch --validate
 ```
 
 Each stable snapshot is evaluated locally *and* submitted unchanged to the
@@ -78,7 +78,7 @@ Four properties matter in practice:
 Interrupt it directly, with Ctrl-C.
 
 Do **not** stop it by closing its reader — piping into something that exits
-after one record, such as `tail-acl test --watch | head -1`, does not return
+after one record, such as `tsacl test --watch | head -1`, does not return
 you to a prompt. See
 [Why watch mode behaves the way it does](../explanation/watch-mode.md) for the
 mechanism and the platform-specific exit codes.
@@ -91,7 +91,7 @@ long-running stream has no single final verdict to report.
 Use a single-shot run in CI:
 
 ```sh
-tail-acl --indeterminate=fail --file acl.hujson test
+tsacl --indeterminate=fail --file acl.hujson test
 ```
 
 Exit `2` still signals the watcher's *own* failures — an unreadable `--file`,

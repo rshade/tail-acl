@@ -7,7 +7,7 @@ import (
 	tailscale "tailscale.com/client/tailscale/v2"
 	"tailscale.com/types/ipproto"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 // TestKnownIPProtocolsMatchTailscale is the provenance guard for the

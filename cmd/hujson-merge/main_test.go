@@ -10,7 +10,7 @@ import (
 
 	"github.com/tailscale/hujson"
 
-	"github.com/rshade/tail-acl/internal/aclpolicy"
+	"github.com/rshade/tsacl/internal/aclpolicy"
 )
 
 func mustParse(t *testing.T, s string) hujson.Value {

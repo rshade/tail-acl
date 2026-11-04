@@ -52,30 +52,8 @@ the embedded 16-bit site ID only for valid `/96` through `/128` via prefixes.
 
 ## Subnet arithmetic
 
-`ipcalc.Split` divides a parent CIDR into equal-sized child prefixes of a target
-bit length. It works for both IPv4 and IPv6 and returns the children alongside
-the exact child count as a `*big.Int` — since IPv6 splitting can exceed uint64
-range, the count is always computed this way even when the full list cannot be
-materialized. When the count would exceed `MaxMaterializedChildren` (65536),
-`Split` returns `(nil, count, ErrTooManyChildren)` so the caller can report the
-count without enumerating all children.
-
-`ipcalc.Unmap4In6` rewrites an IPv4-mapped IPv6 prefix (`::ffff:a.b.c.d/n`) to
-its equivalent plain IPv4 prefix. `ok` is false if the prefix is not a 4-in-6
-address, or if its bit length is too short to represent a valid IPv4 prefix
-once the 96-bit mapping prefix is removed. A caller that supports IPv6 can
-preserve the original prefix when `ok` is false.
-
-`ipcalc.Info` reports the classic block facts for an IPv4 prefix — network
-address, broadcast address, usable host range, and usable-host count — as a
-`BlockInfo`. Host bits are masked off first, so an address inside a block
-yields the facts for its containing block. `Broadcast` is the zero `netip.Addr`
-(`IsValid() == false`) for a `/31` (RFC 3021 point-to-point) and a `/32`
-(host route), which reserve no network or broadcast address; for both, every
-address in the block is usable. `UsableHosts` is a `*big.Int`, like `Split`'s
-count, so an IPv6 extension cannot change the field's type. A non-IPv4 prefix
-returns `ErrIPv6NotSupported` — including a 4-in-6 prefix, which callers must
-normalize with `Unmap4In6` before calling.
+Subnet arithmetic lives in its own package, [`pkg/ipcalc`](../../ipcalc/README.md),
+because it has nothing to do with policy.
 
 ## Output sanitization
 
@@ -114,7 +92,7 @@ library.
 `hujsonedit` provides schema-agnostic, comment-preserving RFC 6902 edits to
 HuJSON documents. It carries no knowledge of any particular document's
 fields — callers own that; the package owns only the AST/patch mechanics.
-Extracted from `tail-acl/internal/aclpolicy` once `tail-ipam` needed the same
+Extracted from `tsacl/internal/aclpolicy` once `tail-ipam` needed the same
 mechanics and the generic layer was already visibly separable from
 ACL-specific code.
 
@@ -129,7 +107,7 @@ the parsed document — pass `nil` when the schema has none.
 ```go
 err := hujsonedit.WritePatch(path, nil,
     hujsonedit.PatchAdd(entry, "acls", "-"),
-    hujsonedit.PatchComment("added by tail-acl grant add", "acls", "-"),
+    hujsonedit.PatchComment("added by tsacl grant add", "acls", "-"),
 )
 ```
 

@@ -5,7 +5,7 @@
 // Posture evaluation reference policy (Features write-up 04).
 // Provenance: all seven tests below were confirmed PASSING on the control plane
 // (tailnet example.ts.net) via
-//   pulumi env run example-lab/tailscale -- bin/tail-acl --file <this file> validate
+//   pulumi env run example-lab/tailscale -- bin/tsacl --file <this file> validate
 // on 2026-10-02; the capture lives in this repo's session records
 // (/tmp/posture-probes/captures/f04-reference.txt). Every verdict the local
 // evaluator produces for this file must reproduce those server verdicts exactly.
