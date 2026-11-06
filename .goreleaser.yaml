@@ -16,24 +16,6 @@ builds:
       - -s -w -X main.version={{ .Version }}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
-  - id: hujson-merge
-    main: ./cmd/hujson-merge
-    binary: hujson-merge
-    env:
-      - CGO_ENABLED=0
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-    goos: [linux, darwin, windows]
-    goarch: [amd64, arm64]
-  - id: acl-upload
-    main: ./cmd/acl-upload
-    binary: acl-upload
-    env:
-      - CGO_ENABLED=0
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-    goos: [linux, darwin, windows]
-    goarch: [amd64, arm64]
 
 archives:
   - formats: [tar.gz]

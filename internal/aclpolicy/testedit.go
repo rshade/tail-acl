@@ -169,6 +169,9 @@ func RemoveAssertions(
 	for _, removal := range slices.Backward(removals) {
 		edit.Operations = append(edit.Operations, applyTestRemoval(policy, removal)...)
 	}
+	if len(edit.Operations) != 0 {
+		edit.Operations = append(edit.Operations, PatchPruneEmpty("tests"))
+	}
 	return edit, nil
 }
 

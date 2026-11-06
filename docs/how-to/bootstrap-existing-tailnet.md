@@ -78,8 +78,8 @@ tsacl --file acl/acl.hujson upload
 rather than silently clobbering a change someone else made through the admin
 console in the meantime. If it is rejected, pull the deployed policy to a
 separate file, reconcile through the comment-preserving
-`hujson-merge --base ... --add ...` path, review, re-plan, and retry. Do not use
-`tsacl merge` for this recovery: its directory merge removes comments.
+`tsacl merge --base ... --add ...` path, review, re-plan, and retry. Do not use
+`tsacl merge --dir` for this recovery: the directory merge removes comments.
 
 If the state file is absent or unreadable, upload refuses with exit `2`. Run
 `plan` to recreate the observation, pass an explicit `--if-match ETAG`, or use

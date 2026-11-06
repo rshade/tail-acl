@@ -195,8 +195,8 @@ func TestAutoApproverRemovePrunesEmptyRouteKey(t *testing.T) {
 	if strings.Contains(output, "192.168.0.0/24") {
 		t.Errorf("emptied route key was not pruned:\n%s", output)
 	}
-	if !strings.Contains(output, `"routes"`) {
-		t.Errorf("routes block was deleted instead of emptied:\n%s", output)
+	if strings.Contains(output, `"routes"`) {
+		t.Errorf("emptied routes block was not pruned:\n%s", output)
 	}
 	// The exitNode sibling — member and comment — must survive the prune.
 	assertCommentsOn(t, path,

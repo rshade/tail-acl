@@ -609,17 +609,29 @@ func newAutoApproverRemoveCommand(deps *commandDeps) *cobra.Command {
 
 func newMergeCommand(deps *commandDeps) *cobra.Command {
 	var dirs stringListFlag
+	var base, add, outPath string
 	cmd := &cobra.Command{
 		Use:   cmdMerge,
-		Short: "Compile ACL sources in directories into one policy",
-		Args:  cobra.NoArgs,
+		Short: mergeSummary,
+		Long: mergeSummary + ".\n\n" +
+			"--dir compiles every file named acl.json, acl.hujson, *.acl.json or *.acl.hujson in the\n" +
+			"given directories into standard JSON (comments are stripped). --base and --add deep-merge\n" +
+			"one snippet into a base policy, keeping the base's HuJSON comments and the comments on keys the\n" +
+			"snippet adds.",
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			out, err := runMerge(deps.opts.file, []string(dirs))
+			out, err := runMerge(mergeRequest{
+				file: deps.opts.file, dirs: []string(dirs), base: base, add: add, out: outPath,
+			})
 			*deps.result = out
 			return err
 		},
 	}
 	cmd.Flags().Var(&dirs, "dir", "directory containing ACL files; may be repeated")
+	cmd.Flags().StringVar(&base, "base", "", "base policy for a comment-preserving pair merge; requires --add")
+	cmd.Flags().StringVar(&add, "add", "", "snippet to deep-merge into --base; requires --base")
+	cmd.Flags().StringVar(&outPath, "out", "",
+		"output file; defaults to --file with --dir and to --base with --base/--add")
 	return cmd
 }
 

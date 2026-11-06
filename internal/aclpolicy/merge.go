@@ -38,7 +38,10 @@ func MergeDirectories(dirs []string, outputPath string) ([]byte, []string, error
 		return nil, nil, err
 	}
 	if len(paths) == 0 {
-		return nil, nil, fmt.Errorf("no ACL .json or .hujson files found in %s", strings.Join(dirs, ", "))
+		return nil, nil, fmt.Errorf(
+			"no ACL files found in %s; merge reads files named acl.json, acl.hujson, *.acl.json or *.acl.hujson",
+			strings.Join(dirs, ", "),
+		)
 	}
 
 	merged, err := parseFile(paths[0])

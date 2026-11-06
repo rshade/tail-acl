@@ -17,10 +17,9 @@ tailnet, or upload it.
 > the command result goes to **stdout** (human text, or a versioned JSON
 > envelope with `-format json`); logs and errors go to **stderr**.
 
-It ships three binaries: `tsacl` (the primary CLI), plus the focused helpers
-`hujson-merge` (the merge engine) and `acl-upload` (upload/validate). The
-helpers' behaviour is also available as `tsacl merge` / `tsacl upload`;
-prefer `tsacl` for the full AX-conformant contract.
+It ships one binary, `tsacl`, and two Go libraries (`pkg/policycore` and
+`pkg/ipcalc`). Merging and uploading are the `tsacl merge` and `tsacl upload`
+commands.
 
 This README is the primary documentation, and `tsacl --help` / `--schema`
 are the authoritative command catalogs. Task guides and longer discussions
@@ -249,7 +248,7 @@ access tokens are refreshed in memory and are not written to disk.
 | `auto-approver remove` | Remove approvers; an emptied route key or `exitNode` member is pruned rather than left as an empty list |
 | `test add` | Add repeatable `--deny DST:PORT` / `--accept DST:PORT` assertions for `--src`, with repeatable `--src-posture-attr KEY=VALUE` for posture tests; merges by source and attribute set and never renumbers existing assertion IDs |
 | `test remove` | Remove matching assertions for `--src` (with `--src-posture-attr` for an exact attribute-set match), pruning empty keys and entries; may renumber later assertion IDs |
-| `merge` | Deep-merge every ACL `.json`/`.hujson` file across `--dir`s into the `--file` output |
+| `merge` | `--dir` (repeatable) deep-merges every `acl.*`/`*.acl.*` `.json`/`.hujson` file into strict JSON at `--out` (default `--file`); `--base` with `--add` merges one snippet into a base and keeps HuJSON comments, writing `--out` (default `--base`) |
 | `normalize` | Emit `--file` as standard JSON on stdout for `jq`, `gron`, `fx`, and `yq` (read-only) |
 | `validate` | Validate the policy (and its policy tests) via the Tailscale API |
 | `test` | Evaluate every top-level network `tests` `accept`/`deny` assertion locally; `sshTests` is preserved but not evaluated (`-strict` rejects unparseable network rules; `--indeterminate` controls the exit policy for unsettleable assertions; `--watch` re-runs on every change and never exits non-zero for a verdict) |
@@ -403,9 +402,9 @@ non-empty `--if-match` do not depend on the state file for their precondition.
 It cannot be combined with `--if-match` and is intentionally not the default.
 
 If the server rejects a stale ETag, pull the deployed policy to a separate file
-and reconcile it through `hujson-merge --base ... --add ...`, the pair-merge
-path that preserves HuJSON comments. Do not use `tsacl merge` for this
-reconciliation: its directory merge deliberately standardizes output to strict
+and reconcile it through `tsacl merge --base ... --add ...`, the pair-merge
+path that preserves HuJSON comments. Do not use `tsacl merge --dir` for this
+reconciliation: the directory merge deliberately standardizes output to strict
 JSON and removes comments. Review the result and run `plan` again before retrying.
 
 ### Exit codes
@@ -503,13 +502,15 @@ the other.
 Typed edits apply an RFC 6902 patch to either `.json` or `.hujson` input.
 **Comments, key order, and the key's own spelling survive** — a policy authored
 in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
-the last entry from a block empties it rather than deleting the key, so a
-comment attached to that block is not carried out with it. One member-level
-exception sharpens that rule for `auto-approver remove`: an approver list that
-empties takes its member with it (the route key under `routes`, or the
-`exitNode` member itself), because `"10.0.0.0/8": []` reads as a
-configured-but-empty approval rather than an absent one — the same rule
-`test remove` applies to emptied assertion keys.
+the last entry from a block deletes the emptied block too, so an add followed by
+a remove returns the file to its original shape and `plan` shows no diff against
+a live policy that never had the block. The prune is comment-aware: a block with
+a comment attached to its key, its value, or its interior is emptied but kept, so
+no authored text is carried out with its last entry. An approver list that
+empties under `auto-approver remove` takes its member with it (the route key
+under `routes`, or the `exitNode` member itself), because `"10.0.0.0/8": []`
+reads as a configured-but-empty approval rather than an absent one; the same
+rule applies to emptied assertion keys under `test remove`.
 
 Authoring commands can also **write** a comment. `--comment TEXT`
 attaches `// TEXT` to the exact node the command authored: the new `grants`
@@ -555,11 +556,11 @@ own first keeps that reformat out of the review for the real change. Authoring a
 comment onto a compact array or object expands it, because HuJSON always expands
 a composite whose leading extra contains a newline.
 
-`merge` has two paths:
-`MergePair` preserves comments (single base + snippet), while `MergeDirectories`
-calls `Standardize()` and strips comments, which is why compiled output is
-comment-free strict JSON. `plan` validates the candidate server-side before
-diffing, so a broken policy fails the plan rather than the upload.
+`merge` has two paths. `--base` with `--add` preserves comments (a single base
+plus a snippet), while `--dir` standardizes the result and strips comments,
+which is why compiled output is comment-free strict JSON. `plan` validates the
+candidate server-side before diffing, so a broken policy fails the plan rather
+than the upload.
 
 Server validation warnings are non-fatal. A response in which every detail has
 one or more `warnings`, no `errors`, and no `message` exits `0`; each warning is

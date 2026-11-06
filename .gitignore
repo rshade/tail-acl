@@ -7,8 +7,6 @@
 
 # Bare `go build` output beside go.mod
 /tsacl
-/acl-upload
-/hujson-merge
 /bin/
 
 # goreleaser build output (snapshot and release)

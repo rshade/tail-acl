@@ -17,8 +17,8 @@ func TestVersionCarriesToolAndReleaseString(t *testing.T) {
 
 func TestVersionFallsBackToDev(t *testing.T) {
 	t.Parallel()
-	got := buildinfo.Version("acl-upload", "dev")
-	if !strings.HasPrefix(got, "acl-upload dev") {
-		t.Errorf("Version() = %q, want an \"acl-upload dev\" prefix", got)
+	got := buildinfo.Version("tsacl", "dev")
+	if !strings.HasPrefix(got, "tsacl dev") {
+		t.Errorf("Version() = %q, want an \"tsacl dev\" prefix", got)
 	}
 }

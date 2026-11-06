@@ -204,10 +204,9 @@ func AddExitNodeApprovers(policy *Policy, approvers []string) (AutoApproverEdit,
 // hand-edited input. A list emptied by the removal takes its key with it:
 // "10.0.0.0/8": [] reads as a configured-but-empty approval rather than an
 // absent one, the same rule test remove applies to an emptied assertion key.
-// The prune stops at the member: an emptied routes or autoApprovers block is
-// emptied, never deleted, so a comment attached to the block is not carried
-// out with its last entry — the rule grant remove and posture remove already
-// apply to the top-level policy keys.
+// An emptied routes or autoApprovers block is pruned too, unless a comment is
+// attached to it: PatchPruneEmpty never deletes authored text, the rule every
+// remove command applies to its container.
 func RemoveRouteApprovers(policy *Policy, route string, approvers []string) (AutoApproverEdit, error) {
 	route, approvers, err := validateAutoApproverEdit(route, approvers)
 	if err != nil {
@@ -229,6 +228,7 @@ func RemoveRouteApprovers(policy *Policy, route string, approvers []string) (Aut
 	if len(indexes) == len(existing) {
 		edit.Operations = append(edit.Operations,
 			PatchRemove(autoApproversKey, autoApproversRoutesKey, route))
+		edit.Operations = append(edit.Operations, pruneAutoApprovers(autoApproversRoutesKey)...)
 		return edit, nil
 	}
 	// Element removals walk backward so earlier indexes stay valid, the same
@@ -243,7 +243,8 @@ func RemoveRouteApprovers(policy *Policy, route string, approvers []string) (Aut
 // RemoveExitNodeApprovers removes every occurrence of each named approver
 // from the exit-node list. An emptied list takes the exitNode member with it
 // — member-level pruning, exactly as RemoveRouteApprovers treats an emptied
-// route key — while the autoApprovers block itself is emptied, never deleted.
+// route key — and the autoApprovers block follows if it is left empty and
+// uncommented.
 func RemoveExitNodeApprovers(policy *Policy, approvers []string) (AutoApproverEdit, error) {
 	approvers, err := validateAutoApproverSelectors(approvers)
 	if err != nil {
@@ -262,6 +263,7 @@ func RemoveExitNodeApprovers(policy *Policy, approvers []string) (AutoApproverEd
 	if len(indexes) == len(existing) {
 		edit.Operations = append(edit.Operations,
 			PatchRemove(autoApproversKey, autoApproversExitNodeKey))
+		edit.Operations = append(edit.Operations, pruneAutoApprovers("")...)
 		return edit, nil
 	}
 	for _, index := range slices.Backward(indexes) {
@@ -269,6 +271,17 @@ func RemoveExitNodeApprovers(policy *Policy, approvers []string) (AutoApproverEd
 			autoApproversKey, autoApproversExitNodeKey, strconv.Itoa(index)))
 	}
 	return edit, nil
+}
+
+// pruneAutoApprovers lists the comment-aware prunes that follow a removal:
+// the emptied member's section (routes, when given) and then the autoApprovers
+// block. Each is dropped only if it is empty and carries no comment.
+func pruneAutoApprovers(section string) []PatchOperation {
+	var operations []PatchOperation
+	if section != "" {
+		operations = append(operations, PatchPruneEmpty(autoApproversKey, section))
+	}
+	return append(operations, PatchPruneEmpty(autoApproversKey))
 }
 
 func validateAutoApproverEdit(route string, approvers []string) (string, []string, error) {

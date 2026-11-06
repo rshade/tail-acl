@@ -143,6 +143,9 @@ func RemoveNodeAttr(policy *Policy, spec NodeAttrSpec) (NodeAttrEdit, error) {
 				nodeAttrsKey, strconv.Itoa(index), field, strconv.Itoa(valueIndex)))
 		}
 	}
+	if len(edit.Operations) != 0 {
+		edit.Operations = append(edit.Operations, PatchPruneEmpty(nodeAttrsKey))
+	}
 	return edit, nil
 }
 
@@ -155,7 +158,7 @@ func RemoveNodeAttrAt(policy *Policy, index int) (NodeAttrEdit, error) {
 	}
 	return NodeAttrEdit{
 		EntryIndex: index,
-		Operations: []PatchOperation{PatchRemove(nodeAttrsKey, strconv.Itoa(index))},
+		Operations: []PatchOperation{PatchRemove(nodeAttrsKey, strconv.Itoa(index)), PatchPruneEmpty(nodeAttrsKey)},
 	}, nil
 }
 

@@ -47,6 +47,12 @@ func PatchRemove(segments ...string) PatchOperation {
 	return hujsonedit.PatchRemove(segments...)
 }
 
+// PatchPruneEmpty constructs a comment-aware prune of an emptied container; see
+// hujsonedit.PatchPruneEmpty.
+func PatchPruneEmpty(segments ...string) PatchOperation {
+	return hujsonedit.PatchPruneEmpty(segments...)
+}
+
 // JSONPointer returns an RFC 6901 pointer for path segments; see hujsonedit.JSONPointer.
 func JSONPointer(segments ...string) string {
 	return hujsonedit.JSONPointer(segments...)

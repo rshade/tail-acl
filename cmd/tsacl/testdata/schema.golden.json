@@ -112,8 +112,8 @@
     },
     {
       "name": "merge",
-      "summary": "Compile ACL sources in directories into one policy",
-      "usage": "merge --dir DIR [--dir DIR ...]"
+      "summary": "Merge ACL sources: compile directories (--dir) or merge one snippet into a base (--base, --add)",
+      "usage": "merge (--dir DIR [--dir DIR ...] | --base FILE --add FILE) [--out FILE]"
     },
     {
       "name": "normalize",

@@ -256,7 +256,7 @@ func TestNodeAttrAddAndRemoveAreIdempotentAndPruneDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !remove.Changed() || len(remove.Operations) != 3 {
+	if !remove.Changed() || len(remove.Operations) != 4 {
 		t.Fatalf("remove edit = %#v, want both duplicate entries", remove)
 	}
 	if err = aclpolicy.WritePatch(path, remove.Operations...); err != nil {
