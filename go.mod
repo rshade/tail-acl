@@ -7,7 +7,7 @@ require (
 	github.com/itchyny/gojq v0.12.20
 	github.com/jaxxstorm/tscli v0.12.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
