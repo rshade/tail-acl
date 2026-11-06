@@ -490,9 +490,10 @@ func TestTypedEditsRespectLegacyCapitalizedKeys(t *testing.T) {
 	}
 }
 
-// Removing the last entry prunes the container under the spelling the file
-// uses, and leaves the rest of the document alone.
-func TestGrantRemovePrunesLegacyCapitalizedKey(t *testing.T) {
+// Removing the last grant must keep the explicit empty array: without any
+// acls or grants section Tailscale applies its allow-all default, so a prune
+// would turn deny-all into allow-all.
+func TestGrantRemoveKeepsEmptyGrantsDenyAll(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, `{
@@ -505,8 +506,8 @@ func TestGrantRemovePrunesLegacyCapitalizedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := readPolicy(t, path)
-	if strings.Contains(strings.ToLower(output), "grants") {
-		t.Errorf("emptied Grants key was not pruned:\n%s", output)
+	if !strings.Contains(output, `"Grants": []`) {
+		t.Errorf("emptied Grants key was pruned, which falls back to allow-all:\n%s", output)
 	}
 	if !strings.Contains(output, "// Authored in the legacy capitalized style.") ||
 		!strings.Contains(output, `"Hosts"`) {

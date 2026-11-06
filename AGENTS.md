@@ -61,7 +61,9 @@ dispatch from `main`, after approval.
 Every `remove` command ends with `PatchPruneEmpty` for the container it
 emptied, so add-then-remove restores the original file shape. The prune skips
 any container that carries a comment, so authored text is never deleted with
-its last entry. `tsacl merge --dir` writes standard JSON and strips comments;
+its last entry. `grant remove` is the exception: it keeps `"grants": []`,
+because a policy with neither `acls` nor `grants` is allow-all, not deny-all.
+`tsacl merge --dir` writes standard JSON and strips comments;
 `tsacl merge --base --add` keeps them and is the stale-ETag reconciliation
 path. `tsacl` is the only shipped binary.
 

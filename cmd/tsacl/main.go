@@ -1154,12 +1154,12 @@ func runGrantRemove(path string, index int) (*result, error) {
 	if index < 0 || index >= len(policy.Grants) {
 		return nil, usagef("grant index %d is out of range; policy has %d grants", index, len(policy.Grants))
 	}
-	// Remove the element, then prune "grants" only if it is empty and carries
-	// no comment: deleting a commented key would carry its comments out with
-	// it, which is the data loss this command exists to avoid.
-	if err = aclpolicy.WritePatch(
-		path, aclpolicy.PatchRemove("grants", strconv.Itoa(index)), aclpolicy.PatchPruneEmpty("grants"),
-	); err != nil {
+	// Remove the element and keep the key, even when it empties. Security: a
+	// policy with neither "acls" nor "grants" falls back to Tailscale's
+	// allow-all default, while an explicit empty array denies everything, so
+	// pruning the last grant would silently open the tailnet. Keeping the key
+	// also keeps its comments.
+	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("grants", strconv.Itoa(index))); err != nil {
 		return nil, err
 	}
 	return grantResult(commandGrantRemove, statusOK,

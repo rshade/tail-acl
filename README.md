@@ -502,7 +502,9 @@ the other.
 Typed edits apply an RFC 6902 patch to either `.json` or `.hujson` input.
 **Comments, key order, and the key's own spelling survive** — a policy authored
 in the legacy capitalized style (`"TagOwners"`) keeps that spelling. Removing
-the last entry from a block deletes the emptied block too, so an add followed by
+the last entry from a block deletes the emptied block too (except `grants`,
+which stays as `"grants": []` because a policy with no `acls` or `grants` falls
+back to Tailscale's allow-all default), so an add followed by
 a remove returns the file to its original shape and `plan` shows no diff against
 a live policy that never had the block. The prune is comment-aware: a block with
 a comment attached to its key, its value, or its interior is emptied but kept, so
