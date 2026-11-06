@@ -73,8 +73,10 @@ CI runs gitleaks (patterns, including a Tailscale key rule and a rule for any
 MagicDNS name other than `example.ts.net`) and trufflehog (verified live
 credentials) as required checks. An advisory trufflehog job lists unverified
 findings by detector and location only. Run `mise run install-hooks` once per
-clone: it writes a fixed pre-commit hook under `.git` that runs `scan-staged`,
-so a commit that stages a secret is blocked locally.
+clone: it writes a fixed pre-commit hook under `.git` that runs `gitleaks` on the
+staged changes (not a mise task, so a checked-out branch cannot change what
+runs), and refuses if `core.hooksPath` is set. A commit that stages a secret
+is blocked locally.
 Actions are pinned by commit SHA; Renovate keeps the pins current.
 
 ## Spec-Driven Changes (OpenSpec)

@@ -162,15 +162,27 @@ description = "gitleaks over the staged changes (the pre-commit check)"
 run = "gitleaks git --staged --no-banner --redact"
 
 [tasks.install-hooks]
-description = "Install a pre-commit hook that runs scan-staged"
+description = "Install a pre-commit hook that runs gitleaks on the staged changes"
 shell = "bash -euo pipefail -c"
 run = '''
-# A fixed script under .git, not core.hooksPath at a tracked directory: a hook
-# directory inside the working tree would let any checked-out branch change
-# what runs on your next commit.
-hook="$(git rev-parse --git-path hooks)/pre-commit"
+# The hook lives in the real git directory and calls gitleaks directly. It does
+# not use core.hooksPath (a tracked hook directory would let any checked-out
+# branch change what runs on your next commit) and does not run a mise task
+# (that would execute whatever the checked-out mise.toml defines). It still
+# reads .gitleaks.toml from the working tree, which is data, not code.
+if [ -n "$(git config --get core.hooksPath || true)" ]; then
+  echo "core.hooksPath is set; refusing to install. Unset it or install the hook there by hand." >&2
+  exit 1
+fi
+hook="$(git rev-parse --git-common-dir)/hooks/pre-commit"
 mkdir -p "$(dirname "$hook")"
-printf '#!/usr/bin/env bash\nset -euo pipefail\nexec mise run scan-staged\n' > "$hook"
+rm -f "$hook"
+cat > "$hook" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+command -v gitleaks >/dev/null || { echo "pre-commit: gitleaks not found; run mise install" >&2; exit 1; }
+exec gitleaks git --staged --no-banner --redact
+HOOK
 chmod +x "$hook"
 echo "installed $hook"
 '''
