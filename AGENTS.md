@@ -4,7 +4,7 @@
 
 `github.com/rshade/tsacl` is a single Go module with two products:
 
-- `cmd/tsacl`, `cmd/acl-upload`, and `cmd/hujson-merge` are the CLIs.
+- `cmd/tsacl` is the CLI.
   Treat `tsacl`'s commands, flags, exit codes, and output as compatibility
   contracts.
 - `pkg/policycore/...` is the public library (`addrspace`, `cliflags`,
@@ -55,6 +55,17 @@ The `live_verify` build tag and the `TSACL_LIVE=1` opt-in gate credentialed,
 read-only tests against a real, shared tailnet. They never run in ordinary CI;
 the `Live verify` workflow compiles them on PRs and runs them only on manual
 dispatch from `main`, after approval.
+
+## Editing Conventions
+
+Every `remove` command ends with `PatchPruneEmpty` for the container it
+emptied, so add-then-remove restores the original file shape. The prune skips
+any container that carries a comment, so authored text is never deleted with
+its last entry. `grant remove` is the exception: it keeps `"grants": []`,
+because a policy with neither `acls` nor `grants` is allow-all, not deny-all.
+`tsacl merge --dir` writes standard JSON and strips comments;
+`tsacl merge --base --add` keeps them and is the stale-ETag reconciliation
+path. `tsacl` is the only shipped binary.
 
 ## Spec-Driven Changes (OpenSpec)
 

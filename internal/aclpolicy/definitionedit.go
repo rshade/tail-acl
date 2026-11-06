@@ -287,6 +287,7 @@ func RemoveDefinition(policy *Policy, kind DefinitionKind, name string, force bo
 		Existed: true,
 		Operations: []PatchOperation{
 			PatchRemove(topLevel, name),
+			PatchPruneEmpty(topLevel),
 		},
 	}, nil
 }

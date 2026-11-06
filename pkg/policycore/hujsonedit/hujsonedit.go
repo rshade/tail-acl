@@ -12,6 +12,7 @@
 package hujsonedit
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,7 @@ type PatchOperation struct {
 	segments []string
 	value    any
 	hasValue bool
+	prune    bool
 
 	comment          string
 	commentSegments  []string
@@ -60,6 +62,17 @@ func PatchAdd(value any, segments ...string) PatchOperation {
 // PatchRemove constructs an RFC 6902 remove operation targeting segments.
 func PatchRemove(segments ...string) PatchOperation {
 	return PatchOperation{op: "remove", segments: segments}
+}
+
+// PatchPruneEmpty constructs an operation that deletes the object member at
+// segments, but only when its value is an empty object or array and no comment
+// is attached to the member, its value, or the container's interior. It runs
+// after every RFC 6902 operation in the same call, so a removal that empties a
+// container can be followed by its prune. A container that still holds data, or
+// that carries a comment, is left alone: the prune never discards authored
+// text. List inner containers before the outer ones that hold them.
+func PatchPruneEmpty(segments ...string) PatchOperation {
+	return PatchOperation{op: "", segments: segments, prune: true}
 }
 
 // JSONPointer returns an RFC 6901 pointer for path segments. Escaping each
@@ -180,11 +193,80 @@ func PatchBytes(data []byte, resolve ResolveKey, operations ...PatchOperation) (
 	if err = value.Patch(rawPatch); err != nil {
 		return nil, fmt.Errorf("applying patch: %w", err)
 	}
+	if err = applyPrunes(&value, resolve, operations); err != nil {
+		return nil, err
+	}
 	if err = applyComments(&value, resolve, operations); err != nil {
 		return nil, err
 	}
 	value.Format()
 	return value.Pack(), nil
+}
+
+// applyPrunes deletes each PatchPruneEmpty target that is an empty,
+// comment-free container. A target that does not resolve is skipped: the
+// prune is opportunistic and an absent member needs no removal.
+func applyPrunes(value *hujson.Value, resolve ResolveKey, operations []PatchOperation) error {
+	for _, operation := range operations {
+		if !operation.prune || len(operation.segments) == 0 {
+			continue
+		}
+		segments := slices.Clone(operation.segments)
+		if resolve != nil {
+			segments[0] = resolve(*value, segments[0])
+		}
+		if !prunable(value, segments) {
+			continue
+		}
+		raw, err := json.Marshal([]map[string]string{{"op": "remove", "path": JSONPointer(segments...)}})
+		if err != nil {
+			return fmt.Errorf("encoding prune: %w", err)
+		}
+		if err = value.Patch(raw); err != nil {
+			return fmt.Errorf("pruning %s: %w", JSONPointer(segments...), err)
+		}
+	}
+	return nil
+}
+
+// prunable reports whether the object member at segments holds an empty object
+// or array with no comment anywhere around it.
+func prunable(document *hujson.Value, segments []string) bool {
+	node := document
+	var member *hujson.ObjectMember
+	for _, segment := range segments {
+		object, ok := node.Value.(*hujson.Object)
+		if !ok {
+			return false
+		}
+		index := memberIndex(object, segment)
+		if index < 0 {
+			return false
+		}
+		member = &object.Members[index]
+		node = &member.Value
+	}
+	if member == nil {
+		return false
+	}
+	extras := []hujson.Extra{
+		member.Name.BeforeExtra, member.Name.AfterExtra, member.Value.BeforeExtra, member.Value.AfterExtra,
+	}
+	if slices.ContainsFunc(extras, hasComment) {
+		return false
+	}
+	switch container := member.Value.Value.(type) {
+	case *hujson.Object:
+		return len(container.Members) == 0 && !hasComment(container.AfterExtra)
+	case *hujson.Array:
+		return len(container.Elements) == 0 && !hasComment(container.AfterExtra)
+	default:
+		return false
+	}
+}
+
+func hasComment(extra hujson.Extra) bool {
+	return bytes.Contains(extra, []byte("//")) || bytes.Contains(extra, []byte("/*"))
 }
 
 // applyComments authors each operation's comment onto the already-patched

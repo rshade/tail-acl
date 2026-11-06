@@ -470,13 +470,16 @@ func TestTypedEditsRespectLegacyCapitalizedKeys(t *testing.T) {
 			[]string{"grant", "add", "--src", "tag:app", "--dst", "tag:db", "--ip", "tcp:5432"},
 			`"tag:app"`,
 		},
-		{commandGrantRemove, []string{"grant", "remove", "--index", "0"}, `"Grants": []`},
+		{commandGrantRemove, []string{"grant", "remove", "--index", "0"}, `"group:keep"`},
 	}
 	const original = `{
 	// Authored in the legacy capitalized style.
 	"TagOwners": {"tag:web": ["group:ops"]},
 	"Hosts": {"legacy": "100.64.0.9"},
-	"Grants": [{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+	"Grants": [
+		{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]},
+		{"src": ["group:keep"], "dst": ["tag:web"], "ip": ["tcp:80"]},
+	],
 }
 `
 	for _, testCase := range testCases {
@@ -484,6 +487,31 @@ func TestTypedEditsRespectLegacyCapitalizedKeys(t *testing.T) {
 			t.Parallel()
 			assertLegacyKeysSurvive(t, testCase.name, testCase.command, testCase.want, original)
 		})
+	}
+}
+
+// Removing the last grant must keep the explicit empty array: without any
+// acls or grants section Tailscale applies its allow-all default, so a prune
+// would turn deny-all into allow-all.
+func TestGrantRemoveKeepsEmptyGrantsDenyAll(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "acl.hujson")
+	writeTestPolicy(t, path, `{
+	// Authored in the legacy capitalized style.
+	"Hosts": {"legacy": "100.64.0.9"},
+	"Grants": [{"src": ["group:old"], "dst": ["tag:web"], "ip": ["tcp:443"]}],
+}
+`)
+	if _, err := runTSACL(t, path, "grant", "remove", "--index", "0"); err != nil {
+		t.Fatal(err)
+	}
+	output := readPolicy(t, path)
+	if !strings.Contains(output, `"Grants": []`) {
+		t.Errorf("emptied Grants key was pruned, which falls back to allow-all:\n%s", output)
+	}
+	if !strings.Contains(output, "// Authored in the legacy capitalized style.") ||
+		!strings.Contains(output, `"Hosts"`) {
+		t.Errorf("edit disturbed the rest of the document:\n%s", output)
 	}
 }
 
@@ -3491,9 +3519,9 @@ func TestStaleUploadRemediationUsesCommentPreservingPairMerge(t *testing.T) {
 	for _, want := range []string{
 		"upload refused",
 		"tsacl --file <remote-policy.hujson> pull",
-		"hujson-merge --base",
+		"tsacl merge --base",
 		"--add <local-change-snippet.hujson>",
-		"Do not use `tsacl merge`",
+		"Do not use `tsacl merge --dir`",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("remediation missing %q: %v", want, err)
@@ -3508,10 +3536,13 @@ func TestStaleUploadRemediationUsesCommentPreservingPairMerge(t *testing.T) {
 	addPath := filepath.Join(tempDir, "snippet.hujson")
 	writeTestPolicy(t, basePath, "// remote comment\n{\n\t\"groups\": {},\n}\n")
 	writeTestPolicy(t, addPath, "{\n\t// local comment\n\t\"hosts\": {\"ci\": \"100.64.0.1\"},\n}\n")
-	merged, mergeErr := aclpolicy.MergePair(basePath, addPath)
-	if mergeErr != nil {
+	reconciled := filepath.Join(tempDir, "reconciled.hujson")
+	if _, mergeErr := runTSACL(
+		t, reconciled, "merge", "--base", basePath, "--add", addPath, "--out", reconciled,
+	); mergeErr != nil {
 		t.Fatal(mergeErr)
 	}
+	merged := []byte(readPolicy(t, reconciled))
 	for _, want := range []string{"// remote comment", "// local comment"} {
 		if !bytes.Contains(merged, []byte(want)) {
 			t.Errorf("comment-preserving remediation dropped %q:\n%s", want, merged)

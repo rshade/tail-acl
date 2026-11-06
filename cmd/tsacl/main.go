@@ -1154,9 +1154,11 @@ func runGrantRemove(path string, index int) (*result, error) {
 	if index < 0 || index >= len(policy.Grants) {
 		return nil, usagef("grant index %d is out of range; policy has %d grants", index, len(policy.Grants))
 	}
-	// Remove the element, never the whole "grants" key: dropping the key would
-	// carry its comments out with it, which is the data loss this command
-	// exists to avoid. An empty array reloads as an empty slice.
+	// Remove the element and keep the key, even when it empties. Security: a
+	// policy with neither "acls" nor "grants" falls back to Tailscale's
+	// allow-all default, while an explicit empty array denies everything, so
+	// pruning the last grant would silently open the tailnet. Keeping the key
+	// also keeps its comments.
 	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("grants", strconv.Itoa(index))); err != nil {
 		return nil, err
 	}
@@ -1727,8 +1729,10 @@ func runPostureRemove(path string, args []string) (*result, error) {
 		res.Edited = []editedValue{editedSelector(canonical)}
 		return res, nil
 	}
-	// Remove the member, never the whole "postures" key — see runGrantRemove.
-	if err = aclpolicy.WritePatch(path, aclpolicy.PatchRemove("postures", canonical)); err != nil {
+	// Remove the member, then prune "postures" if nothing is left — see runGrantRemove.
+	if err = aclpolicy.WritePatch(
+		path, aclpolicy.PatchRemove("postures", canonical), aclpolicy.PatchPruneEmpty("postures"),
+	); err != nil {
 		return nil, err
 	}
 	res := newResult(commandPostureRemove, statusOK,
@@ -2017,11 +2021,31 @@ func commentOperations(path, comment string, overwrite bool, segments ...string)
 	return []aclpolicy.PatchOperation{commentPatch(comment, overwrite, segments...)}, nil
 }
 
-func runMerge(path string, dirs []string) (*result, error) {
-	if len(dirs) == 0 {
-		return nil, usagef("merge requires at least one --dir")
+const mergeSummary = "Merge ACL sources: compile directories (--dir) or merge one snippet into a base (--base, --add)"
+
+type mergeRequest struct {
+	file, base, add, out string
+	dirs                 []string
+}
+
+func runMerge(req mergeRequest) (*result, error) {
+	pair := req.base != "" || req.add != ""
+	switch {
+	case pair && len(req.dirs) != 0:
+		return nil, usagef("merge takes either --dir or --base with --add, not both")
+	case pair && (req.base == "" || req.add == ""):
+		return nil, usagef("merge --base and --add must be given together")
+	case !pair && len(req.dirs) == 0:
+		return nil, usagef("merge requires at least one --dir, or --base with --add")
 	}
-	data, paths, err := aclpolicy.MergeDirectories(dirs, path)
+	if pair {
+		return runMergePair(req.base, req.add, req.out)
+	}
+	path := req.out
+	if path == "" {
+		path = req.file
+	}
+	data, paths, err := aclpolicy.MergeDirectories(req.dirs, path)
 	if err != nil {
 		return nil, err
 	}
@@ -2031,6 +2055,27 @@ func runMerge(path string, dirs []string) (*result, error) {
 	merged := len(paths)
 	res := newResult(cmdMerge, statusOK, fmt.Sprintf("merged %d ACL files into %s", merged, path))
 	res.File = path
+	res.MergedFiles = &merged
+	return res, nil
+}
+
+// runMergePair deep-merges one snippet into a base policy and, unlike the
+// directory path, keeps the HuJSON comments and layout of both inputs. It is
+// the reconciliation step after a stale-ETag upload refusal.
+func runMergePair(base, add, out string) (*result, error) {
+	if out == "" {
+		out = base
+	}
+	data, err := aclpolicy.MergePair(base, add)
+	if err != nil {
+		return nil, err
+	}
+	if err = aclpolicy.WriteRaw(out, data); err != nil {
+		return nil, err
+	}
+	merged := 2
+	res := newResult(cmdMerge, statusOK, fmt.Sprintf("merged %s into %s", add, out))
+	res.File = out
 	res.MergedFiles = &merged
 	return res, nil
 }
@@ -3442,9 +3487,9 @@ func isPreconditionFailed(err error) bool {
 const staleUploadRemediation = "deployed policy changed since the last observation; upload refused. " +
 	"Pull the deployed policy to a separate file with `tsacl --file <remote-policy.hujson> pull`, " +
 	"then reconcile through the comment-preserving pair merge " +
-	"`hujson-merge --base <remote-policy.hujson> --add <local-change-snippet.hujson> --out <reconciled-policy.hujson>`. " +
+	"`tsacl merge --base <remote-policy.hujson> --add <local-change-snippet.hujson> --out <reconciled-policy.hujson>`. " +
 	"Review the result and run `tsacl --file <reconciled-policy.hujson> plan` before retrying. " +
-	"Do not use `tsacl merge` for this reconciliation; its directory merge standardizes away HuJSON comments"
+	"Do not use `tsacl merge --dir` for this reconciliation; the directory merge standardizes away HuJSON comments"
 
 func apiClient(opts options, httpClient *http.Client, apiURL, requiredScope string) (*tailscale.Client, error) {
 	if opts.tailnet == "" {
@@ -3656,7 +3701,7 @@ func commandCatalog() []schemaCommand {
 			"List externalTailnets aliases",
 			"external-tailnet list",
 		},
-		{cmdMerge, "Compile ACL sources in directories into one policy", "merge --dir DIR [--dir DIR ...]"},
+		{cmdMerge, mergeSummary, "merge (--dir DIR [--dir DIR ...] | --base FILE --add FILE) [--out FILE]"},
 		{cmdNormalize, "Emit the policy as standard JSON for general-purpose JSON tools", cmdNormalize},
 		{cmdValidate, "Validate the policy via the Tailscale API", cmdValidate},
 		{

@@ -1,8 +1,7 @@
-package main
+package aclpolicy_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,8 +126,8 @@ func TestMergeInto(t *testing.T) {
 
 func TestRepositoryRelayMergeIsIdempotent(t *testing.T) {
 	t.Parallel()
-	basePath := filepath.Join("testdata", "acl.hujson")
-	addPath := filepath.Join("testdata", "peer-relay.acl.hujson")
+	basePath := filepath.Join("testdata", "merge_base.hujson")
+	addPath := filepath.Join("testdata", "merge_peer_relay.hujson")
 
 	first, err := aclpolicy.MergePair(basePath, addPath)
 	if err != nil {
@@ -159,83 +158,6 @@ func TestMergePreservesComments(t *testing.T) {
 	}
 	if !strings.Contains(got, "tag:b") {
 		t.Errorf("added key missing from result:\n%s", got)
-	}
-}
-
-func TestDirectoryModeMergesACLFilesInOrder(t *testing.T) {
-	t.Parallel()
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
-	writeTestFile(t, filepath.Join(dir1, "10-base.acl.hujson"), `{
-		// comments are accepted as input
-		"grants": [{"src": ["base"], "dst": ["*"]}],
-		"tagOwners": {"tag:base": ["autogroup:admin"]},
-		"version": 1,
-	}`)
-	writeTestFile(t, filepath.Join(dir1, "20.acl.json"), `{
-		"grants": [{"src": ["second"], "dst": ["*"]}],
-		"version": 2
-	}`)
-	writeTestFile(t, filepath.Join(dir1, "package.json"), `{"mustNotAppear": true}`)
-	writeTestFile(t, filepath.Join(dir2, "extra.acl.hujson"), `{
-		"tagOwners": {"tag:extra": ["autogroup:admin"]},
-		"version": 3,
-	}`)
-
-	var stdout, stderr bytes.Buffer
-	if err := run([]string{"--dir", dir1, "--out", "-", "--dir", dir2}, &stdout, &stderr); err != nil {
-		t.Fatalf("run directory mode: %v", err)
-	}
-	if !json.Valid(stdout.Bytes()) {
-		t.Fatalf("directory output is not standard JSON:\n%s", stdout.String())
-	}
-
-	var got map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal output: %v", err)
-	}
-	if got["version"] != float64(3) {
-		t.Errorf("version = %#v, want 3 (last directory wins)", got["version"])
-	}
-	if _, ok := got["mustNotAppear"]; ok {
-		t.Error("generic package.json was merged")
-	}
-	grants, ok := got["grants"].([]any)
-	if !ok || len(grants) != 2 {
-		t.Errorf("grants = %#v, want two appended grants", got["grants"])
-	}
-	tagOwners, ok := got["tagOwners"].(map[string]any)
-	if !ok || len(tagOwners) != 2 {
-		t.Errorf("tagOwners = %#v, want two merged owners", got["tagOwners"])
-	}
-	if strings.Contains(stdout.String(), "comments are accepted") {
-		t.Error("directory output retained a HuJSON comment instead of producing standard JSON")
-	}
-}
-
-func TestDirectoryModeExcludesOutputOnRerun(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "base.acl.hujson"), `{"grants": [{"src": ["base"]}]}`)
-	out := filepath.Join(dir, "acl.json")
-
-	for i := range 2 {
-		if err := mergeDirectories([]string{dir}, out, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
-			t.Fatalf("mergeDirectories run %d: %v", i+1, err)
-		}
-	}
-	b, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		Grants []any `json:"grants"`
-	}
-	if err = json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal output: %v", err)
-	}
-	if len(got.Grants) != 1 {
-		t.Errorf("rerun duplicated generated acl.json: got %d grants, want 1", len(got.Grants))
 	}
 }
 
@@ -271,47 +193,6 @@ func TestIsACLFilename(t *testing.T) {
 	for name, want := range tests {
 		if got := aclpolicy.IsACLFilename(name); got != want {
 			t.Errorf("isACLFilename(%q) = %v, want %v", name, got, want)
-		}
-	}
-}
-
-// TestBothDashSpellingsAccepted guards against losing single-dash long-flag
-// support (-schema, -version) when the flag parser moved from stdlib flag to
-// pflag; see policycore/cliflags.Normalize. run returns error, not an exit
-// code, so this checks err == nil rather than the brief's sketched code != 0.
-func TestBothDashSpellingsAccepted(t *testing.T) {
-	t.Parallel()
-
-	for _, args := range [][]string{{"-schema"}, {"--schema"}, {"-version"}, {"--version"}} {
-		t.Run(args[0], func(t *testing.T) {
-			t.Parallel()
-
-			var stdout, stderr bytes.Buffer
-			if err := run(args, &stdout, &stderr); err != nil {
-				t.Fatalf("run(%q) = %v, want nil (stderr: %s)", args, err, stderr.String())
-			}
-			if stdout.Len() == 0 {
-				t.Errorf("run(%q) wrote nothing to stdout", args)
-			}
-		})
-	}
-}
-
-func TestHelpCarriesTheAuditableCLIContract(t *testing.T) {
-	t.Parallel()
-
-	var stdout, stderr bytes.Buffer
-	if err := run([]string{"--help"}, &stdout, &stderr); err != nil {
-		t.Fatalf("run(--help): %v (stderr: %s)", err, stderr.String())
-	}
-	for _, section := range []string{"Examples:", "Exit codes:"} {
-		if !strings.Contains(stdout.String(), section) {
-			t.Errorf("help is missing %q:\n%s", section, stdout.String())
-		}
-	}
-	for _, value := range stdout.Bytes() {
-		if value >= 0x80 {
-			t.Fatalf("help contains non-ASCII bytes: %q", stdout.String())
 		}
 	}
 }

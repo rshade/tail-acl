@@ -125,7 +125,7 @@ func TestTSACLPlanValidateApplyRestoreWorkflow(t *testing.T) {
 	assertContains(t, output, "plan valid; no changes", "ETag "+goodETag)
 
 	output = runner.mustFail(t, "--file", originalPath, "--if-match", trimETag(originalETag), "upload")
-	assertContains(t, output, "upload refused", "tsacl --file <remote-policy.hujson> pull", "hujson-merge --base")
+	assertContains(t, output, "upload refused", "tsacl --file <remote-policy.hujson> pull", "tsacl merge --base")
 	api.assertPolicy(t, goodPolicy)
 
 	output = runner.mustSucceed(t, "--file", originalPath, "--if-match", trimETag(goodETag), "upload")

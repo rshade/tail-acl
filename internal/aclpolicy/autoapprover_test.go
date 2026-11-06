@@ -319,18 +319,17 @@ func TestRemoveRouteApproversPrunesEmptiedRouteKey(t *testing.T) {
 		_, policy := removeRoutes(t,
 			`{"autoApprovers": {"routes": {"10.0.0.0/8": ["group:a", "group:a"]}}}`,
 			"group:a")
-		if policy.AutoApprovers == nil || len(policy.AutoApprovers.Routes) != 0 {
-			t.Errorf("autoApprovers = %v, want routes emptied", policy.AutoApprovers)
+		if policy.AutoApprovers != nil {
+			t.Errorf("autoApprovers = %v, want the emptied block pruned", policy.AutoApprovers)
 		}
 	})
 }
 
-// A block emptied by a removal is emptied, never deleted — the rule grant
-// remove and posture remove already apply to top-level keys, so a comment
-// attached to the block is not carried out with its last entry.
-func TestRemoveRouteApproversEmptiesBlocksWithoutDeletingThem(t *testing.T) {
+// A block emptied by a removal is pruned unless a comment is attached to it,
+// so authored text is never carried out with the block's last entry.
+func TestRemoveRouteApproversPrunesEmptiedBlocksUnlessCommented(t *testing.T) {
 	t.Parallel()
-	t.Run("last route key empties routes but keeps the block and exitNode", func(t *testing.T) {
+	t.Run("last route key prunes routes but keeps the block and exitNode", func(t *testing.T) {
 		t.Parallel()
 		raw, policy := removeRoutes(t,
 			`{"autoApprovers": {"routes": {"10.0.0.0/8": ["group:neteng"]}, "exitNode": ["tag:exit"]}}`,
@@ -341,20 +340,26 @@ func TestRemoveRouteApproversEmptiesBlocksWithoutDeletingThem(t *testing.T) {
 		if !slices.Equal(policy.AutoApprovers.ExitNode, []string{"tag:exit"}) {
 			t.Errorf("exitNode = %v, want preserved", policy.AutoApprovers.ExitNode)
 		}
-		if !strings.Contains(raw, `"routes"`) {
-			t.Errorf("routes block was deleted instead of emptied:\n%s", raw)
+		if strings.Contains(raw, `"routes"`) {
+			t.Errorf("emptied routes block was not pruned:\n%s", raw)
 		}
 	})
-	t.Run("emptying the last member keeps the section", func(t *testing.T) {
+	t.Run("emptying the last member prunes the section", func(t *testing.T) {
 		t.Parallel()
 		raw, policy := removeRoutes(t,
 			`{"autoApprovers": {"routes": {"10.0.0.0/8": ["group:neteng"]}}, "grants": []}`,
 			"group:neteng")
-		if policy.AutoApprovers == nil {
-			t.Error("autoApprovers was deleted instead of emptied")
+		if policy.AutoApprovers != nil || strings.Contains(raw, "autoApprovers") {
+			t.Errorf("emptied autoApprovers block was not pruned:\n%s", raw)
 		}
-		if !strings.Contains(raw, "autoApprovers") {
-			t.Errorf("autoApprovers block was deleted instead of emptied:\n%s", raw)
+	})
+	t.Run("a comment on the block keeps it", func(t *testing.T) {
+		t.Parallel()
+		raw, policy := removeRoutes(t,
+			"{\n\t// owned by netops\n\t\"autoApprovers\": {\"routes\": {\"10.0.0.0/8\": [\"group:neteng\"]}},\n}\n",
+			"group:neteng")
+		if policy.AutoApprovers == nil || !strings.Contains(raw, "// owned by netops") {
+			t.Errorf("commented block was pruned with its comment:\n%s", raw)
 		}
 	})
 	t.Run("services survives an emptied routes block", func(t *testing.T) {
@@ -385,7 +390,7 @@ func TestRemoveExitNodeApprovers(t *testing.T) {
 			t.Errorf("exitNode = %v, want [tag:b]", policy.AutoApprovers.ExitNode)
 		}
 	})
-	t.Run("emptied list prunes the member but keeps the section", func(t *testing.T) {
+	t.Run("emptied list prunes the member and then the empty section", func(t *testing.T) {
 		t.Parallel()
 		raw, policy := removeExitNode(t,
 			`{"autoApprovers": {"routes": {"10.0.0.0/8": ["group:ops"]}, "exitNode": ["tag:exit"]}}`,
@@ -398,11 +403,8 @@ func TestRemoveExitNodeApprovers(t *testing.T) {
 		}
 
 		raw, policy = removeExitNode(t, `{"autoApprovers": {"exitNode": ["tag:exit"]}}`, "tag:exit")
-		if policy.AutoApprovers == nil {
-			t.Error("autoApprovers was deleted instead of emptied")
-		}
-		if !strings.Contains(raw, "autoApprovers") {
-			t.Errorf("autoApprovers block was deleted instead of emptied:\n%s", raw)
+		if policy.AutoApprovers != nil || strings.Contains(raw, "autoApprovers") {
+			t.Errorf("emptied autoApprovers block was not pruned:\n%s", raw)
 		}
 	})
 }

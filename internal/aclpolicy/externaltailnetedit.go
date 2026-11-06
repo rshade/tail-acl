@@ -108,7 +108,7 @@ func RemoveExternalTailnet(policy *Policy, alias string, force bool) (ExternalTa
 			}
 		}
 	}
-	edit.Operations = []PatchOperation{PatchRemove(externalTailnetsKey, alias)}
+	edit.Operations = []PatchOperation{PatchRemove(externalTailnetsKey, alias), PatchPruneEmpty(externalTailnetsKey)}
 	return edit, nil
 }
 

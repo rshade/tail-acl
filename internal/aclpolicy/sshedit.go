@@ -109,6 +109,9 @@ func RemoveSSHRule(policy *Policy, spec SSHRuleSpec) (SSHRuleEdit, error) {
 	for i, j := 0, len(edit.Operations)-1; i < j; i, j = i+1, j-1 {
 		edit.Operations[i], edit.Operations[j] = edit.Operations[j], edit.Operations[i]
 	}
+	if len(edit.Operations) != 0 {
+		edit.Operations = append(edit.Operations, PatchPruneEmpty("ssh"))
+	}
 	return edit, nil
 }
 
@@ -122,7 +125,7 @@ func RemoveSSHRuleAt(policy *Policy, index int) (SSHRuleEdit, error) {
 	return SSHRuleEdit{
 		RuleIndex:  index,
 		Rule:       policy.SSH[index],
-		Operations: []PatchOperation{PatchRemove("ssh", strconv.Itoa(index))},
+		Operations: []PatchOperation{PatchRemove("ssh", strconv.Itoa(index)), PatchPruneEmpty("ssh")},
 	}, nil
 }
 

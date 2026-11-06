@@ -271,8 +271,8 @@ func TestRemoveAssertionsRemovesDuplicatesAndPrunesEntry(t *testing.T) {
 	if !reflect.DeepEqual(edit.AssertionIDs, wantIDs) {
 		t.Errorf("assertion IDs = %#v, want %#v", edit.AssertionIDs, wantIDs)
 	}
-	if len(edit.Operations) != 1 {
-		t.Errorf("operations = %d, want one entry removal", len(edit.Operations))
+	if len(edit.Operations) != 2 {
+		t.Errorf("operations = %d, want one entry removal and the prune of tests", len(edit.Operations))
 	}
 	if len(policy.Tests) != 1 || policy.Tests[0].Source != "bob@example.com" {
 		t.Errorf("tests = %#v", policy.Tests)
