@@ -113,7 +113,17 @@ run = 'commitlint --from "${COMMIT_FROM:-$(git merge-base HEAD origin/main)}" --
 
 [tasks.govulncheck]
 description = "Scan Go dependencies for known vulnerabilities"
-run = "govulncheck ./..."
+# vuln.go.dev resets connections now and then. govulncheck exits 3 when it finds
+# vulnerabilities, which must fail at once; any other failure is retried.
+run = '''
+for attempt in 1 2 3; do
+  govulncheck ./... && exit 0
+  status=$?
+  [ "$status" = 3 ] && exit 3
+  [ "$attempt" = 3 ] || { echo "govulncheck failed (attempt $attempt); retrying" >&2; sleep $((attempt * 10)); }
+done
+exit 1
+'''
 
 [tasks.scan-secrets]
 description = "Run both secret scanners"
