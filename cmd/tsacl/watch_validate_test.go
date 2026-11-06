@@ -289,7 +289,7 @@ func TestStablePolicyPollerGatesRewritesAndQuietPeriod(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "acl.hujson")
 	writeTestPolicy(t, path, watchPassingPolicy)
-	logger := newLogger(io.Discard, false)
+	logger := newLogger(io.Discard, false, nil)
 	ctx := context.Background()
 	poller := newStablePolicyPoller(path, []byte(watchPassingPolicy))
 
@@ -320,7 +320,7 @@ func TestStablePolicyPollerWarnsOnceWhileUnreadable(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.hujson")
 	var stderr strings.Builder
-	logger := newLogger(&stderr, false)
+	logger := newLogger(&stderr, false, nil)
 	ctx := context.Background()
 	poller := newStablePolicyPoller(path, []byte(watchPassingPolicy))
 	for range 3 {

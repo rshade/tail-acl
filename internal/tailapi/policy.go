@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -108,14 +109,21 @@ func RedactSecret(err error, clientSecret string) error {
 // IsForbidden reports whether the control plane answered with HTTP 403.
 func IsForbidden(err error) bool { return isForbidden(err) }
 
+// redactError removes the client secret and any request URL from err's text.
+// The URL is dropped because the Tailscale API embeds the tailnet name in the
+// path (/api/v2/tailnet/NAME/...), and a transport failure prints it verbatim.
 func redactError(err error, secret string) error {
-	if secret == "" || !strings.Contains(err.Error(), secret) {
+	message := err.Error()
+	if secret != "" {
+		message = strings.ReplaceAll(message, secret, "[REDACTED]")
+	}
+	if urlErr, ok := errors.AsType[*url.Error](err); ok && urlErr.URL != "" {
+		message = strings.ReplaceAll(message, urlErr.URL, "<api-url>")
+	}
+	if message == err.Error() {
 		return err
 	}
-	return &redactedError{
-		message: strings.ReplaceAll(err.Error(), secret, "[REDACTED]"),
-		err:     err,
-	}
+	return &redactedError{message: message, err: err}
 }
 
 func isForbidden(err error) bool {
@@ -183,6 +191,9 @@ func NewClient(config Config) (*tailscale.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing Tailscale API URL: %w", err)
 	}
+	if err = requireSecureBaseURL(parsed); err != nil {
+		return nil, err
+	}
 	var auth tailscale.Auth
 	if hasOAuthID {
 		auth = oauthAuth{
@@ -218,6 +229,8 @@ type oauthAuth struct {
 	scopes       []string
 }
 
+func refuseRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 func (a oauthAuth) HTTPClient(orig *http.Client, baseURL string) *http.Client {
 	config := clientcredentials.Config{
 		ClientID:     a.clientID,
@@ -234,8 +247,10 @@ func (a oauthAuth) HTTPClient(orig *http.Client, baseURL string) *http.Client {
 	// token until expiry; wrapping it again would allocate nothing and only
 	// suggest to a reader that the inner source is uncached.
 	return &http.Client{
-		Transport:     &oauth2.Transport{Base: orig.Transport, Source: config.TokenSource(tokenCtx)},
-		CheckRedirect: orig.CheckRedirect,
+		Transport: &oauth2.Transport{Base: orig.Transport, Source: config.TokenSource(tokenCtx)},
+		// Never follow a redirect: oauth2.Transport re-adds the bearer token on
+		// every hop, so a redirect to another host would hand it that host.
+		CheckRedirect: refuseRedirect,
 		Jar:           orig.Jar,
 		Timeout:       orig.Timeout,
 	}
@@ -397,4 +412,25 @@ func PlanFile(ctx context.Context, client *tailscale.Client, path string) (*Plan
 		Changed:    len(edits) != 0,
 		Validation: validation,
 	}, nil
+}
+
+// requireSecureBaseURL refuses a plain-HTTP API URL unless it points at the
+// local machine, because the API key or OAuth token would cross the network in
+// clear text. Loopback stays allowed so tests and local fakes keep working.
+func requireSecureBaseURL(u *url.URL) error {
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host == "localhost" {
+			return nil
+		}
+		if addr, err := netip.ParseAddr(host); err == nil && addr.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"the Tailscale API URL must use https (plain http is allowed only for loopback), got scheme %q", u.Scheme,
+	)
 }

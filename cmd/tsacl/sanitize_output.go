@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/netip"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -523,4 +524,21 @@ func clonePointer[T any](value *T) *T {
 	}
 	clone := *value
 	return &clone
+}
+
+var emailShaped = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+
+// scrubText sanitizes diagnostic text (stderr errors and log lines) that is
+// written before, or outside, the structured result that registers identities.
+// It registers every email-shaped token it meets under the same "login" kind
+// the envelope uses, so the placeholder correlates across channels, then
+// applies the registered replacements.
+func scrubText(output *sanitize.Sanitizer, text string) string {
+	if output == nil || output.Level() == sanitize.Off {
+		return text
+	}
+	for _, match := range emailShaped.FindAllString(text, -1) {
+		output.Value("login", match)
+	}
+	return output.Text(text)
 }

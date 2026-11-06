@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -892,5 +893,40 @@ func TestSanitizeBareUnbracketedIPv6WithoutPortClassifiesAsIP(t *testing.T) {
 				t.Errorf("sanitizeSelector(%q) = %q, misclassified bare IPv6 as hostname", tc.selector, got)
 			}
 		})
+	}
+}
+
+func TestLoggerSanitizesStringAndErrorAttributes(t *testing.T) {
+	t.Parallel()
+	sanitizer, err := sanitize.New(sanitize.Options{
+		Level: sanitize.Identity, Tool: toolName, Tailnet: "example.ts.net",
+		KeyHex: strings.Repeat("ab", 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	logger := newLogger(&stderr, false, sanitizer)
+	logger.Warn("validation warning", "user", "alice@example.com", "error", errors.New("bad: alice@example.com"))
+	if strings.Contains(stderr.String(), "alice@example.com") {
+		t.Errorf("log line leaks the identity: %s", stderr.String())
+	}
+}
+
+func TestRunSanitizesTheReturnedErrorText(t *testing.T) {
+	t.Parallel()
+	err := error(usageError{errors.New("could not read alice@example.com")})
+	sanitizer, newErr := sanitize.New(sanitize.Options{
+		Level: sanitize.Identity, Tool: toolName, KeyHex: strings.Repeat("ab", 32),
+	})
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	wrapped := &sanitizedError{message: scrubText(sanitizer, err.Error()), err: err}
+	if strings.Contains(wrapped.Error(), "alice@example.com") {
+		t.Errorf("error text leaks the identity: %v", wrapped)
+	}
+	if exitCode(wrapped) != exitUsage {
+		t.Errorf("exit code = %d, want %d after sanitizing", exitCode(wrapped), exitUsage)
 	}
 }

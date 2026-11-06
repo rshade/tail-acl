@@ -3,12 +3,15 @@ package tailapi_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tailscale "tailscale.com/client/tailscale/v2"
@@ -568,5 +571,83 @@ func TestLookupServiceTypesUnreadableAnswersAsUnavailable(t *testing.T) {
 				t.Errorf("requests = %d, want exactly one request for the policy selector", requests)
 			}
 		})
+	}
+}
+
+func TestRedactSecretStripsTheRequestURLThatNamesTheTailnet(t *testing.T) {
+	t.Parallel()
+	transport := &url.Error{
+		Op:  "Post",
+		URL: "https://api.example.invalid/api/v2/tailnet/secretcorp.example/acl/validate",
+		Err: errors.New("connection refused"),
+	}
+	wrapped := fmt.Errorf("calling ACL validation endpoint: %w", transport)
+	got := tailapi.RedactSecret(wrapped, "")
+	if strings.Contains(got.Error(), "secretcorp.example") {
+		t.Errorf("error still names the tailnet: %v", got)
+	}
+	if !strings.Contains(got.Error(), "connection refused") {
+		t.Errorf("error lost the failure reason: %v", got)
+	}
+	if !errors.Is(got, transport) {
+		t.Error("redaction broke the error chain")
+	}
+}
+
+func TestNewClientRefusesPlainHTTPExceptOnLoopback(t *testing.T) {
+	t.Parallel()
+	for baseURL, wantErr := range map[string]bool{
+		"https://api.example.invalid": false,
+		"http://127.0.0.1:8080":       false,
+		"http://localhost:8080":       false,
+		"http://[::1]:8080":           false,
+		"http://api.example.invalid":  true,
+		"ftp://api.example.invalid":   true,
+	} {
+		_, err := tailapi.NewClient(tailapi.Config{Tailnet: "example.com", APIKey: "k", BaseURL: baseURL})
+		if (err != nil) != wantErr {
+			t.Errorf("NewClient(%q) error = %v, want error %v", baseURL, err, wantErr)
+		}
+	}
+}
+
+func TestOAuthClientDoesNotForwardTheBearerTokenOnRedirect(t *testing.T) {
+	t.Parallel()
+	var leaked atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Store(true)
+		}
+	}))
+	t.Cleanup(target.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/oauth/token") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer","expires_in":3600}`))
+			return
+		}
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	t.Cleanup(api.Close)
+
+	client, err := tailapi.NewClient(tailapi.Config{
+		Tailnet: "example.com", BaseURL: api.URL, HTTP: &http.Client{},
+		OAuthClientID: "id", OAuthClientSecret: "secret", OAuthScopes: []string{"policy_file"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(
+		t.Context(), http.MethodGet, api.URL+"/api/v2/tailnet/example.com/acl", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.HTTP.Do(request)
+	if err == nil {
+		response.Body.Close()
+	}
+	if leaked.Load() {
+		t.Error("the bearer token was forwarded to the redirect target")
 	}
 }
