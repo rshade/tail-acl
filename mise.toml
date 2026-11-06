@@ -162,8 +162,18 @@ description = "gitleaks over the staged changes (the pre-commit check)"
 run = "gitleaks git --staged --no-banner --redact"
 
 [tasks.install-hooks]
-description = "Point git at .githooks so pre-commit runs scan-staged"
-run = "git config core.hooksPath .githooks"
+description = "Install a pre-commit hook that runs scan-staged"
+shell = "bash -euo pipefail -c"
+run = '''
+# A fixed script under .git, not core.hooksPath at a tracked directory: a hook
+# directory inside the working tree would let any checked-out branch change
+# what runs on your next commit.
+hook="$(git rev-parse --git-path hooks)/pre-commit"
+mkdir -p "$(dirname "$hook")"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nexec mise run scan-staged\n' > "$hook"
+chmod +x "$hook"
+echo "installed $hook"
+'''
 
 [tasks.apidiff]
 description = "Incompatible pkg/ API changes since APIDIFF_BASE (default origin/main)"

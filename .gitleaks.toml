@@ -26,7 +26,11 @@ keywords = ["tskey-"]
 [[rules]]
 id = "tailnet-dns-name"
 description = "MagicDNS name other than example.ts.net"
-regex = '''\b[a-z0-9][a-z0-9-]*\.ts\.net\b'''
+regex = '''(?i)\b[a-z0-9][a-z0-9-]*\.ts\.net\b'''
 keywords = [".ts.net"]
+# The match is the label before .ts.net, so host.example.ts.net yields
+# example.ts.net. Anchor the allowance to the whole match, or acme-example
+# would pass.
 [[rules.allowlists]]
-regexes = ['''(?i)example\.ts\.net''']
+regexTarget = "secret"
+regexes = ['''(?i)^example\.ts\.net$''']

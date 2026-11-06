@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Block a commit that stages a secret or a real tailnet name.
-# Enable with: mise run install-hooks
-set -euo pipefail
-exec mise run scan-staged
