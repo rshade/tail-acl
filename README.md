@@ -363,8 +363,12 @@ Placeholders use an ephemeral HMAC scope by default. Set
 operator-and-tailnet-scoped placeholders across runs. The JSON envelope records
 the effective level, scheme, and scope.
 
-Sanitization covers rendered command results, not policy files modified or
-written by authoring, merge, pull, or upload commands. `normalize`, `plan`, and
+Sanitization covers rendered command results and the error and log text on
+stderr (which also pseudonymizes any email-shaped token it meets), not policy
+files modified or written by authoring, merge, pull, or upload commands. Free
+text inside a command result, such as control-plane error prose, is replaced
+only for identities the command registered; do not rely on it for names in
+unstructured server messages. `normalize`, `plan`, and
 `jq` refuse active sanitization with exit `2`: their stdout is respectively a
 policy, a policy diff, or arbitrary policy-derived data, none of which can be
 mechanically sanitized without pretending that a partial rewrite is safe.
@@ -384,7 +388,8 @@ the `NO_COLOR` environment variable to any non-empty value disables color under
 
 `plan` and `pull` write the ETag they observed to `.tsacl-state.json` beside
 `--file`; a successful `upload` replaces it with the new ETag. The versioned
-state file is gitignored, stores one entry per tailnet, and records observation
+state file stores one entry per tailnet name (add `.tsacl-state.json` to your
+policy repo's `.gitignore`; this repository already does), and records observation
 only. It is never parsed as policy, merged, validated, or uploaded. Keeping it
 policy-adjacent makes the safety boundary local to the working copy that made
 the observation, while tailnet keying prevents one `--tailnet` from supplying

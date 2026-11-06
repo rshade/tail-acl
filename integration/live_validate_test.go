@@ -140,7 +140,7 @@ func TestLiveValidateProductionClassifier(t *testing.T) {
 	failureResult, err := tailapi.ValidatePolicy(t.Context(), client, failing.body)
 	var validationErr *tailapi.ValidationError
 	if !errors.As(err, &validationErr) {
-		t.Fatalf("live failing policy error = %v, want *tailapi.ValidationError", err)
+		t.Fatalf("live failing policy error = %s, want *tailapi.ValidationError", errShape(err))
 	}
 	// Assertions report shape, never content: ValidationDetail.User carries the
 	// real identity this harness derives without displaying, and t.Errorf output
@@ -161,7 +161,7 @@ func TestLiveValidateProductionClassifier(t *testing.T) {
 	healthy := probeByName(t, probes, "e_healthy")
 	healthyResult, err := tailapi.ValidatePolicy(t.Context(), client, healthy.body)
 	if err != nil {
-		t.Fatalf("live healthy policy failed: %v", err)
+		t.Fatalf("live healthy policy failed: %s", errShape(err))
 	}
 	if healthyResult.Message != "" || len(healthyResult.Failures) != 0 || len(healthyResult.Warnings) != 0 {
 		t.Errorf("live healthy policy: message-present=%v failures=%d warnings=%d, want a clean validation",
@@ -241,19 +241,19 @@ func liveValidateUserFromPolicy(
 	request.Header.Set("Accept", "application/hujson")
 	response, err := client.Do(request)
 	if err != nil {
-		t.Fatalf("fetch deployed policy to derive %s: %v", liveValidateUser, err)
+		t.Fatalf("fetch deployed policy to derive %s: %s", liveValidateUser, errShape(err))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		t.Fatalf("read deployed policy to derive %s: %v", liveValidateUser, err)
+		t.Fatalf("read deployed policy to derive %s: %s", liveValidateUser, errShape(err))
 	}
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("fetch deployed policy to derive %s: HTTP %d", liveValidateUser, response.StatusCode)
 	}
 	users, err := concretePolicyUsers(body)
 	if err != nil {
-		t.Fatalf("parse deployed policy to derive %s: %v", liveValidateUser, err)
+		t.Fatalf("parse deployed policy to derive %s: %s", liveValidateUser, errShape(err))
 	}
 	if len(users) == 0 {
 		t.Fatalf("deployed policy contains no concrete email selector; set %s explicitly", liveValidateUser)

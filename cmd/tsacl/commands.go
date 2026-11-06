@@ -33,7 +33,7 @@ type commandDeps struct {
 	sanitizer  **sanitize.Sanitizer
 }
 
-func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose) }
+func (d *commandDeps) logger() *slog.Logger { return newLogger(d.stderr, *d.verbose, *d.sanitizer) }
 
 // colorize resolves whether human output on stdout should carry ANSI color.
 // It reads the flag pointers after cobra has parsed them, so watch mode (which

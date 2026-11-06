@@ -632,10 +632,8 @@ func run(
 	if err != nil && strings.HasPrefix(err.Error(), "unknown command") {
 		err = usageError{err}
 	}
+	res, err = sanitizeOutcome(res, err, outputSanitizer)
 	if res != nil {
-		if outputSanitizer != nil && outputSanitizer.Level() != sanitize.Off {
-			res = sanitizeResultEnvelope(res, outputSanitizer)
-		}
 		mode, _ := parseColorMode(colorRaw)
 		colorize := colorEnabled(format, mode, stdout, getenv)
 		if renderErr := render(stdout, format, colorize, res); renderErr != nil {
@@ -761,13 +759,54 @@ func loadRoster(path string) (map[string]tailscale.UserRole, error) {
 	return roster, nil
 }
 
-func newLogger(w io.Writer, verbose bool) *slog.Logger {
+// newLogger builds the stderr diagnostics logger. When sanitizer is active it
+// rewrites every string and error attribute through the same pseudonym map as
+// the rendered result, so --sanitize also covers log lines.
+func newLogger(w io.Writer, verbose bool, sanitizer *sanitize.Sanitizer) *slog.Logger {
 	level := slog.LevelWarn
 	if verbose {
 		level = slog.LevelDebug
 	}
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
+	options := &slog.HandlerOptions{Level: level}
+	if sanitizer != nil && sanitizer.Level() != sanitize.Off {
+		options.ReplaceAttr = func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Value.Kind() == slog.KindString {
+				return slog.String(attr.Key, scrubText(sanitizer, attr.Value.String()))
+			}
+			if err, ok := attr.Value.Any().(error); ok && attr.Value.Kind() == slog.KindAny {
+				return slog.String(attr.Key, scrubText(sanitizer, err.Error()))
+			}
+			return attr
+		}
+	}
+	return slog.New(slog.NewTextHandler(w, options))
 }
+
+// sanitizeOutcome applies the active sanitizer to the command result and to the
+// error text that main prints on stderr. It is a no-op when sanitizing is off.
+func sanitizeOutcome(res *result, err error, output *sanitize.Sanitizer) (*result, error) {
+	if output == nil || output.Level() == sanitize.Off {
+		return res, err
+	}
+	if res != nil {
+		res = sanitizeResultEnvelope(res, output)
+	}
+	if err != nil {
+		err = &sanitizedError{message: scrubText(output, err.Error()), err: err}
+	}
+	return res, err
+}
+
+// sanitizedError carries error text that has been through the output
+// sanitizer while keeping the original in the chain, so exitCode still
+// classifies it.
+type sanitizedError struct {
+	message string
+	err     error
+}
+
+func (e *sanitizedError) Error() string { return e.message }
+func (e *sanitizedError) Unwrap() error { return e.err }
 
 func newResult(command, status, message string) *result {
 	return &result{
@@ -3539,6 +3578,10 @@ func tscliServiceLookupClient(opts options, apiURL string) (*tailscale.Client, e
 	viper.Set("oauth-client-secret", opts.oauthClientSecret)
 	viper.Set("base-url", apiURL)
 
+	// tscli derives its default User-Agent from the git state of the working
+	// directory, which would send the policy repo's HEAD to the API.
+	viper.Set("user-agent", toolName+"/"+version)
+
 	client, err := tscli.New()
 	viper.Set("oauth-client-secret", "")
 	viper.Set("api-key", "")
@@ -3549,9 +3592,6 @@ func tscliServiceLookupClient(opts options, apiURL string) (*tailscale.Client, e
 		)
 		return nil, redactedErr
 	}
-	// tscli.New() has an internal userAgentTransport that unconditionally
-	// overwrites User-Agent on every request, ignoring the public UserAgent field.
-	// This leak is a known limitation; a fix has been requested upstream.
 	return client, nil
 }
 
@@ -3926,8 +3966,9 @@ const usageRosterNote = `
 `
 
 const usageUploadNote = `
-  upload safety   plan and pull record the observed ETag in a gitignored
-                  .tsacl-state.json beside --file, keyed by tailnet. Upload
+  upload safety   plan and pull record the observed ETag in
+                  .tsacl-state.json beside --file, keyed by tailnet (add it to
+                  the policy repo's .gitignore: it names the tailnet). Upload
                   uses that ETag by default and refuses if the record is absent,
                   unreadable, or stale. --if-match explicitly overrides the
                   record. --accept-remote-changes is the explicit opt-out that
@@ -3956,6 +3997,8 @@ const usageSanitizationNote = `
                         applied only after evaluation. normalize, plan, and jq
                         refuse active sanitization because policy bytes and
                         policy diffs cannot be mechanically sanitized safely.
+                        Error text and log lines on stderr are scrubbed too,
+                        including any email-shaped token.
                         TAILSCALE_SANITIZE_KEY accepts exactly 64 hexadecimal
                         characters for stable, operator-scoped placeholders;
                         without it placeholders are artifact-scoped.

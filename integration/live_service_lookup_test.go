@@ -63,7 +63,7 @@ func TestLiveServiceLookupNameSpelling(t *testing.T) {
 
 	services, err := client.Services().List(requestCtx)
 	if err != nil {
-		t.Fatalf("list tailnet services: %v", err)
+		t.Fatalf("list tailnet services: %s", errShape(err))
 	}
 	if len(services) == 0 {
 		t.Skipf("the tailnet reachable with these credentials advertises no services, so %s cannot "+
@@ -83,7 +83,7 @@ func TestLiveServiceLookupNameSpelling(t *testing.T) {
 
 	wireLookup, err := tailapi.LookupService(requestCtx, client, wire)
 	if err != nil {
-		t.Fatalf("look up the wire name exactly as List returned it: %v", err)
+		t.Fatalf("look up the wire name exactly as List returned it: %s", errShape(err))
 	}
 	if !wireLookup.Exists {
 		t.Errorf("LookupService(<name exactly as List returned it>).Exists = false, want true; "+
@@ -92,7 +92,7 @@ func TestLiveServiceLookupNameSpelling(t *testing.T) {
 
 	selectorLookup, err := tailapi.LookupService(requestCtx, client, prefixed)
 	if err != nil {
-		t.Fatalf("look up the svc:-prefixed policy-selector spelling: %v", err)
+		t.Fatalf("look up the svc:-prefixed policy-selector spelling: %s", errShape(err))
 	}
 	if !selectorLookup.Exists {
 		t.Error(`LookupService("svc:<name>").Exists = false, want true; every service a policy ` +
@@ -104,7 +104,7 @@ func TestLiveServiceLookupNameSpelling(t *testing.T) {
 	// assert an API guarantee Tailscale never offered.
 	bareLookup, err := tailapi.LookupService(requestCtx, client, bare)
 	if err != nil {
-		t.Logf("observed: looking up the bare spelling was unavailable: %v", err)
+		t.Logf("observed: looking up the bare spelling was unavailable: %s", errShape(err))
 	} else {
 		t.Logf("observed: the bare spelling without the svc: prefix resolves = %t", bareLookup.Exists)
 	}
