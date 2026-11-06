@@ -11,3 +11,26 @@ description = "placeholder API key in the no-secret-in-output tests"
 condition = "AND"
 paths = ['''cmd/(acl-upload|tsacl|tail-acl)/main_test\.go''']
 regexes = ['''tskey-api-SE''']
+
+# Tailscale credentials. The default ruleset has no Tailscale rule. Real keys
+# are tskey-<kind>-<id>-<secret>; the placeholders in tests lack the second
+# segment, so they do not match.
+[[rules]]
+id = "tailscale-key"
+description = "Tailscale API, auth, OAuth client, SCIM or webhook key"
+regex = '''tskey-(?:api|auth|client|scim|webhook)-[A-Za-z0-9]{8,}-[A-Za-z0-9]{20,}'''
+keywords = ["tskey-"]
+
+# A real MagicDNS name identifies a tailnet. Only example.ts.net is allowed in
+# fixtures, docs and tests.
+[[rules]]
+id = "tailnet-dns-name"
+description = "MagicDNS name other than example.ts.net"
+regex = '''(?i)\b[a-z0-9][a-z0-9-]*\.ts\.net\b'''
+keywords = [".ts.net"]
+# The match is the label before .ts.net, so host.example.ts.net yields
+# example.ts.net. Anchor the allowance to the whole match, or acme-example
+# would pass.
+[[rules.allowlists]]
+regexTarget = "secret"
+regexes = ['''(?i)^example\.ts\.net$''']

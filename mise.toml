@@ -6,6 +6,7 @@ golangci-lint = "2.15.0"
 goreleaser = "2.20.0"
 actionlint = "1.7.12"
 gitleaks = "8.30.1"
+jq = "1.7.1"
 trufflehog = "3.99.8"
 "go:golang.org/x/vuln/cmd/govulncheck" = "1.9.0"
 "go:github.com/google/go-licenses/v2" = "2.0.1"
@@ -112,7 +113,17 @@ run = 'commitlint --from "${COMMIT_FROM:-$(git merge-base HEAD origin/main)}" --
 
 [tasks.govulncheck]
 description = "Scan Go dependencies for known vulnerabilities"
-run = "govulncheck ./..."
+# vuln.go.dev resets connections now and then. govulncheck exits 3 when it finds
+# vulnerabilities, which must fail at once; any other failure is retried.
+run = '''
+for attempt in 1 2 3; do
+  govulncheck ./... && exit 0
+  status=$?
+  [ "$status" = 3 ] && exit 3
+  [ "$attempt" = 3 ] || { echo "govulncheck failed (attempt $attempt); retrying" >&2; sleep $((attempt * 10)); }
+done
+exit 1
+'''
 
 [tasks.scan-secrets]
 description = "Run both secret scanners"
@@ -138,6 +149,52 @@ if [ -n "${SCAN_BASE:-}" ]; then
   since=(--since-commit "$SCAN_BASE")
 fi
 trufflehog git "file://$PWD" "${since[@]}" --branch HEAD --only-verified --fail --no-update
+'''
+
+[tasks.scan-trufflehog-report]
+description = "trufflehog including unverified and unknown results, redacted to detector and location (never fails)"
+shell = "bash -euo pipefail -c"
+run = '''
+since=()
+if [ -n "${SCAN_BASE:-}" ]; then
+  since=(--since-commit "$SCAN_BASE")
+fi
+# Raw and Redacted fields are dropped on purpose: an unverified hit may be a
+# real but revoked credential, and CI logs outlive the secret's rotation.
+trufflehog git "file://$PWD" "${since[@]}" --branch HEAD \
+  --results=verified,unknown,unverified --json --no-update \
+  | jq -r 'select(.DetectorName) | "\(.DetectorName) verified=\(.Verified) \(.SourceMetadata.Data.Git.file // "?"):\(.SourceMetadata.Data.Git.line // 0) \(.SourceMetadata.Data.Git.commit // "?")"' \
+  | sort -u | tee /dev/stderr | { grep -c . || true; } | sed 's/^/findings: /'
+'''
+
+[tasks.scan-staged]
+description = "gitleaks over the staged changes (the pre-commit check)"
+run = "gitleaks git --staged --no-banner --redact"
+
+[tasks.install-hooks]
+description = "Install a pre-commit hook that runs gitleaks on the staged changes"
+shell = "bash -euo pipefail -c"
+run = '''
+# The hook lives in the real git directory and calls gitleaks directly. It does
+# not use core.hooksPath (a tracked hook directory would let any checked-out
+# branch change what runs on your next commit) and does not run a mise task
+# (that would execute whatever the checked-out mise.toml defines). It still
+# reads .gitleaks.toml from the working tree, which is data, not code.
+if [ -n "$(git config --get core.hooksPath || true)" ]; then
+  echo "core.hooksPath is set; refusing to install. Unset it or install the hook there by hand." >&2
+  exit 1
+fi
+hook="$(git rev-parse --git-common-dir)/hooks/pre-commit"
+mkdir -p "$(dirname "$hook")"
+rm -f "$hook"
+cat > "$hook" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+command -v gitleaks >/dev/null || { echo "pre-commit: gitleaks not found; run mise install" >&2; exit 1; }
+exec gitleaks git --staged --no-banner --redact
+HOOK
+chmod +x "$hook"
+echo "installed $hook"
 '''
 
 [tasks.apidiff]
