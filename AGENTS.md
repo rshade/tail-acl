@@ -67,6 +67,15 @@ because a policy with neither `acls` nor `grants` is allow-all, not deny-all.
 `tsacl merge --base --add` keeps them and is the stale-ETag reconciliation
 path. `tsacl` is the only shipped binary.
 
+## Secret Scanning
+
+CI runs gitleaks (patterns, including a Tailscale key rule and a rule for any
+MagicDNS name other than `example.ts.net`) and trufflehog (verified live
+credentials) as required checks. An advisory trufflehog job lists unverified
+findings by detector and location only. Run `mise run install-hooks` once per
+clone so a commit that stages a secret is blocked locally by `scan-staged`.
+Actions are pinned by commit SHA; Renovate keeps the pins current.
+
 ## Spec-Driven Changes (OpenSpec)
 
 A change that adds or alters a capability, CLI surface, or machine-readable
